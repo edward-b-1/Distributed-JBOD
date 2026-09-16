@@ -1,7 +1,8 @@
 # Distributed Object Store: Design Specification
 
-Draft 2, 16 September 2026. Revised after review of draft 1. Awaiting
-approval.
+Draft 3, 16 September 2026. Revised after review of drafts 1 and 2.
+Approved for implementation; remaining [O] and [P] items are settled when
+the part they affect is built.
 
 Every numbered item carries one of these markers:
 
@@ -11,10 +12,18 @@ Every numbered item carries one of these markers:
 - **[O]** Open. Needs a decision before implementation of the affected part.
 - **[X]** Deferred. Agreed to be out of scope for the first version.
 
+### Changes since draft 2
+
+- Cluster secret included in v1 (6.1.2).
+- Buckets: the `default` bucket is a top-level directory under `objects/`
+  and the key hash covers the key alone (9.1). Buckets stay independent on
+  the filesystem and need no migration when more are added.
+- PUT to an existing key replaces it; decided (9.2.4).
+
 ### Changes since draft 1
 
-- Buckets deferred. Keys form one flat namespace. A `bucket` field is kept
-  in records, fixed to `default`, so buckets can be added later (2, 9.1).
+- Buckets deferred. Keys form one flat namespace within the single bucket
+  `default` (2, 9.1).
 - No key length limit beyond a configurable sanity limit (9.1.5).
 - Versioning deferred. At most one version per key in v1 (9.2).
 - Failure domains deferred. Independence level fixed to `device` (7).
@@ -30,7 +39,7 @@ Every numbered item carries one of these markers:
   does not vary with object size.
 - Reopened for discussion with recommendations: content length requirement
   (10.1), space reservation (10.6), one file per shard versus one file per
-  block (9.3), key hash algorithm (9.1.2), cluster secret (6.1.1).
+  block (9.3), key hash algorithm (9.1.2).
 
 ---
 
@@ -63,7 +72,7 @@ small clusters, with an administrator in the loop when something breaks.
 | **Device** | One filesystem, mounted at one path, managed by one node. The smallest unit of independent failure. |
 | **Coordinator** | The node a client connects to for a given request. Any node can be a coordinator. |
 | **Key** | A UTF-8 string naming an object. No fixed length limit (9.1.5). |
-| **Bucket** | Deferred. A namespace for keys. In v1 every record carries `bucket = "default"` and the API exposes no bucket concept. |
+| **Bucket** | A namespace for keys, and a top-level directory on every device. v1 has exactly one, named `default`, and the API exposes no bucket concept. |
 | **Object** | The data stored under a key, plus its metadata. |
 | **Version** | One immutable body written under a key. Versioning is deferred; v1 keeps at most one version per key, but every body still has a version id (9.2). |
 | **Stripe** | A fixed-size window of an object's bytes, the unit of erasure coding. |
@@ -111,8 +120,9 @@ inline.
 
 3.11 [D] Fast listing. Listing is a cluster-wide scan.
 
-3.12 [D] Users, permissions, access keys, and TLS. Some minimal form may be
-added later and must remain optional for LAN deployments (22).
+3.12 [D] Users, permissions, client access keys, and TLS. Some minimal form
+may be added later and must remain optional for LAN deployments (22). The
+cluster secret between nodes (6.1.2) is in v1.
 
 3.13 [D] S3 compatibility. Planned as a separate stream of work (19.2).
 
@@ -195,16 +205,16 @@ Configuration has three layers.
 
 ### 6.1 Per-node (local file)
 
-6.1.1 [D] Node UUID, listen addresses, the list of device paths, and one or
-more bootstrap peer addresses.
+6.1.1 [D] Node UUID, listen addresses, the list of device paths, one or
+more bootstrap peer addresses, and the cluster secret.
 
-6.1.2 [O] **Cluster secret.** A shared token, the same on every node, that
-a node must present when joining or when another node connects to it. Its
-only purpose is to stop an unrelated machine on the same network from
-joining the cluster or impersonating a node. It is not encryption and does
-not protect data on the wire. Recommendation for v1: omit it. Nodes trust
-any peer that presents the right cluster id. Add it with access keys and
-optional TLS later (22).
+6.1.2 [D] **Cluster secret.** A shared token, the same on every node, that
+a node must present when joining and on every node-to-node connection. Its
+purpose is to stop an unrelated machine on the same network from joining
+the cluster or impersonating a node. It is not encryption and does not
+protect data on the wire. Included in v1. The presentation mechanism is
+part of the connection handshake (19.1.2); a challenge-response so the
+secret never crosses the wire in clear is preferred over sending it.
 
 6.1.3 [X] Coordinator coding limit: the maximum number of concurrent
 server-side encode or assemble streams a node will accept, with zero
@@ -216,7 +226,7 @@ coding work.
 
 6.2.1 [D] The document carries a monotonically increasing version number
 and a cluster id. Every node holds a copy. A joining node fetches it from a
-bootstrap peer.
+bootstrap peer after presenting the cluster secret.
 
 6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
@@ -362,11 +372,12 @@ job.
 <device path>/
     device.json               identity file (section 5.2)
     objects/
-        ab/                   first two hex characters of the key hash
-            cd/               next two hex characters
-                abcd...<64 hex>/          one directory per key
-                    <version>.meta.json   the metadata record
-                    <version>.<idx>.shard the shard file held on this device
+        default/              one directory per bucket; v1 has only this one
+            ab/               first two hex characters of the key hash
+                cd/           next two hex characters
+                    abcd...<64 hex>/          one directory per key
+                        <version>.meta.json   the metadata record
+                        <version>.<idx>.shard the shard file held on this device
 ```
 
 9.1.1 [D] The object directory is named by the key hash, not by the key.
@@ -377,8 +388,8 @@ but NUL, and an object `a` may coexist with an object `a/b`.
 uniform distribution, and enough width that collisions never happen in
 practice. Speed is irrelevant because keys are small. Collision resistance
 against a malicious client is not required in v1 but costs nothing.
-Recommendation: **SHA-256** over `bucket ‖ 0x00 ‖ key`, rendered as 64
-lowercase hex characters. It is available in every language's standard
+Recommendation: **SHA-256** over the key bytes alone, rendered as 64
+lowercase hex characters. The bucket is a directory, not part of the hash. It is available in every language's standard
 library, hardware-accelerated on recent CPUs, and boring. Alternatives are
 listed in 9.1.7. Fixed by format version once chosen.
 
@@ -418,9 +429,12 @@ keys in one directory.
 is at most one shard file per version per object directory. Which shard
 index it holds varies from object to object.
 
-9.1.9 [D] The `bucket` component of the hash input is the constant
-`default` in v1. Including it now means adding buckets later changes the
-API and the record but not the hash function or the layout.
+9.1.9 [D] Buckets are top-level directories under `objects/`. v1 creates
+only `default` and every operation acts within it. Adding buckets later
+means creating a directory and exposing a bucket parameter in the API;
+nothing on disk moves and the hash function is unchanged. Keeping each
+bucket in its own directory also keeps them independent on the
+filesystem: a bucket can be listed, scrubbed, or removed by path.
 
 ### 9.2 Version identifiers
 
@@ -435,10 +449,9 @@ that the layout and record format need not change if versioning is added.
 by the coordinator at write time. Sorting version file names
 lexicographically yields creation order.
 
-9.2.4 [O] **PUT to an existing key in v1.** With at most one version per
-key, the write must either fail or replace. Recommendation: replace. The
-coordinator writes the new version fully (all shards and records durable),
-then deletes the old version from its holders, then acknowledges. If the
+9.2.4 [D] **PUT to an existing key replaces it.** The coordinator writes
+the new version fully (all shards and records durable), then deletes the
+old version from its holders, then acknowledges. If the
 coordinator dies between the two steps the key briefly has two versions;
 reads return the newest by ULID and the scrubber or a later PUT removes the
 older. This also resolves concurrent writes to the same key (21.1) as
@@ -514,7 +527,7 @@ stored on every device holding a shard of that version.
 ```
 format_version      integer, fixes checksum and key hash algorithms
 system              "distributed-jbod"
-bucket              string, always "default" in v1
+bucket              string, the bucket directory; always "default" in v1
 key                 string
 key_hash            hex string
 version             ULID
@@ -958,10 +971,13 @@ about devices, nodes, or the cluster document, except the three
 client-side coding operations, which expose device UUIDs and node
 addresses by design.
 
-19.1.5 [X] Authentication (an access key presented by clients, the cluster
-secret between nodes) and TLS are deferred. Both must remain optional for
-LAN deployments. The framing reserves the `flags` field so that a later
-version can negotiate them at connection start.
+19.1.5 [D] Every node-to-node connection begins with a handshake that
+proves knowledge of the cluster secret (6.1.2) and exchanges cluster id
+and document version. A connection failing the handshake is closed.
+
+19.1.6 [X] Client authentication (an access key) and TLS are deferred and
+must remain optional for LAN deployments. The `flags` field in the frame
+header is reserved so a later version can negotiate them in the handshake.
 
 ### 19.2 S3 translation layer
 
@@ -977,9 +993,8 @@ protocol.
 19.2.3 [P] The translation layer owns everything the native layer does not:
 authentication, policies, bucket configuration, sorted listing, multipart
 assembly, and S3 versioning semantics including delete markers. It stores
-what it needs in `user_metadata` or in its own state. Until native buckets
-exist it maps S3 bucket names onto key prefixes or refuses all but one
-bucket.
+what it needs in `user_metadata` or in its own state. Until more than one
+native bucket exists it serves a single S3 bucket mapped to `default`.
 
 ## 20. Operations and tooling
 
@@ -1037,24 +1052,21 @@ layout in section 9 uses fixed-length names and stays well within both.
 
 | # | Question | Where | Recommendation |
 |---|----------|-------|----------------|
-| 21.1 | Concurrent writes to the same key from two coordinators. | 9.2.4 | Last writer by ULID wins; falls out of the replace semantics. |
-| 21.2 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
-| 21.3 | Cleanup of orphaned temporary files. | 10.11 | Age-based deletion at startup and scrub. |
-| 21.4 | Cluster secret in v1. | 6.1.2 | Omit; add with access keys later. |
-| 21.5 | Key hash algorithm. | 9.1.2 | SHA-256. |
-| 21.6 | One file per shard or per shard block. | 9.3.1 | Per shard. |
-| 21.7 | Content length required on PUT. | 10.1 | Required. |
-| 21.8 | Space reservation. | 10.6 | `fallocate` per write. |
-| 21.9 | PUT to an existing key. | 9.2.4 | Replace, then delete old. |
-| 21.10 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.11 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.12 | Control payload encoding. | 19.1.2 | CBOR. |
+| 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
+| 21.2 | Cleanup of orphaned temporary files. | 10.11 | Age-based deletion at startup and scrub. |
+| 21.3 | Key hash algorithm. | 9.1.2 | SHA-256. |
+| 21.4 | One file per shard or per shard block. | 9.3.1 | Per shard. |
+| 21.5 | Content length required on PUT. | 10.1 | Required. |
+| 21.6 | Space reservation. | 10.6 | `fallocate` per write. |
+| 21.7 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
+| 21.8 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.9 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
 - Object versioning (9.2). Planned; may be a client-side wrapper; may be
   dropped.
-- Buckets as a native concept (2, 9.1.9).
+- Buckets beyond `default` (2, 9.1.9).
 - Failure domain hierarchy and configurable independence level (7).
 - Coordinator coding limit and refusal (6.1.3, 17.3, 17.4).
 - Randomised or round-robin placement for load spreading (10.5).
@@ -1068,8 +1080,8 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
 - Administration web UI (20.3).
-- Users, permissions, client access keys, cluster secret, TLS. All
-  optional for LAN deployments (19.1.5).
+- Users, permissions, client access keys, TLS. All optional for LAN
+  deployments (19.1.6).
 - S3 translation layer (19.2). Separate stream of work.
 - Packing shard files into large volume files to reduce inode and fsync
   cost. The logical layout in section 9 is designed to survive this change
@@ -1137,10 +1149,14 @@ nothing. It is copied to every shard holder, as MinIO does.
 length, path-safe, uniformly distributed names. The plain key is kept
 inside the record for humans and for collision detection.
 
-**No buckets, no versioning, no failure domains in v1.** Each is a
-feature the format can accommodate later (constant bucket in the hash
-input, version id in every file name, device list ready for labels)
-without a migration, so none needs to be built now.
+**One bucket, no versioning, no failure domains in v1.** Each is a
+feature the format can accommodate later (bucket as a directory, version
+id in every file name, device list ready for labels) without a migration,
+so none needs to be built now.
+
+**PUT replaces.** Without versioning a key has one body. Writing the new
+body fully before deleting the old one means a crash never leaves the key
+empty, and gives concurrent writers a last-writer-wins outcome by ULID.
 
 **Uniform format regardless of object size.** One code path for storage,
 scrub, repair, and recovery. The cost of a small object is one small shard
