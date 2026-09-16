@@ -1,0 +1,9 @@
+[package]
+name = "djbod-core"
+description = "On-disk format, checksums, and erasure coding for Distributed-JBOD"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reed-solomon-erasure = { workspace = true }

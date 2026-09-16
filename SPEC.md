@@ -307,8 +307,11 @@ implemented from scratch.
 the first `m'` parity rows for scheme `k+m'` equal the first `m'` parity
 rows for scheme `k+m` whenever `m' < m`. Cauchy-style constructions with an
 identity block on top have this property. It makes reducing `m` a matter of
-deleting parity shards rather than recomputing them (18.9). To be verified
-against the chosen library.
+deleting parity shards rather than recomputing them (18.9). Verified by
+test for `reed-solomon-erasure` 6.0.0, which builds its matrix as
+Vandermonde(k+m, k) times the inverse of its top k rows, so parity row j
+depends only on j and k
+(`crates/djbod-core/tests/erasure_library.rs`).
 
 8.1.6 [X] A non-systematic (information dispersal) variant, in which no
 shard contains plaintext, may be offered later as an option. It would
@@ -1237,7 +1240,15 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-cli` | Command-line client and administrative commands over the native protocol. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
 
-C.3 [P] **Candidate dependencies**, to be confirmed at each milestone:
+C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.
+Findings so far on `reed-solomon-erasure` 6.0.0 from the library tests:
+it is systematic, recovers every erasure pattern up to `m`, refuses `m+1`
+erasures, trusts unmarked corrupt shards (confirming the need for
+checksums, 8.3), is byte-wise independent (streaming is valid), satisfies
+8.1.5, treats `k = 1` as replication, rejects `m = 0` (our wrapper must
+special-case it, 8.1.2), and allows `k + m <= 256`. Without SIMD it
+encodes 3+1 at about 6 GiB/s and 10+4 at about 1.5 GiB/s of data on one
+core, and reconstructs one shard at about 6 GiB/s. Dependencies:
 `tokio` (async runtime and networking), `reed-solomon-erasure` (classic
 GF(2^8) systematic Reed-Solomon, a port of the Go library MinIO uses) with
 `reed-solomon-simd` as the alternative if throughput demands it,

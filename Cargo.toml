@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/djbod-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+reed-solomon-erasure = "6.0"
