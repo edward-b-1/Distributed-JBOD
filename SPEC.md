@@ -1219,3 +1219,52 @@ Object: 10 MiB.
   device to receive each moved shard, and after the drain four remain, so
   this works once. Decommissioning a second device requires adding one
   first or re-encoding to `m = 0` (18.9).
+
+## Appendix C: Implementation plan
+
+C.1 [D] **Language: Rust.** Chosen because the reviewer reads Rust today.
+Static binaries, no garbage collector, direct system call access, and
+mature libraries for everything the design needs. Garage is the reference
+point for a Rust system of this shape.
+
+C.2 [P] **Crate layout.** One Cargo workspace:
+
+| Crate | Contents |
+|-------|----------|
+| `djbod-core` | On-disk format (device identity, shard file, metadata record), key hash, block checksums, Reed-Solomon wrapper, stripe encode and decode. No networking. Fully unit-tested, including round-trips through the code with every erasure pattern up to `m`. |
+| `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3. Shared by node, client, and tools. |
+| `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
+| `djbod-cli` | Command-line client and administrative commands over the native protocol. |
+| `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
+
+C.3 [P] **Candidate dependencies**, to be confirmed at each milestone:
+`tokio` (async runtime and networking), `reed-solomon-erasure` (classic
+GF(2^8) systematic Reed-Solomon, a port of the Go library MinIO uses) with
+`reed-solomon-simd` as the alternative if throughput demands it,
+`xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` or `minicbor`
+(CBOR), `ulid`, `uuid`, `serde` and `serde_json` (metadata records),
+`rustix` or `nix` (`fallocate`, `statvfs`, `st_dev`), `clap`, `tracing`,
+`thiserror`.
+
+C.4 [P] **Milestones.** Each ends with something that runs and is tested.
+
+1. **Core format.** `djbod-core` complete. A test writes an object into
+   shard files in temporary directories, corrupts or deletes up to `m` of
+   them, and reads it back. Settles 21.3 (hash) and 21.4 (file per shard)
+   in code. Verifies whether the library satisfies 8.1.5.
+2. **Single node.** A node process managing several device directories on
+   one machine, the native protocol, and a CLI. PUT, GET, DELETE, and LIST
+   work end to end against a cluster of one node. Settles 21.5 (content
+   length), 21.6 (reservation), and 21.9 (CBOR).
+3. **Cluster.** Cluster document, handshake with the cluster secret,
+   broadcast lookup, placement across nodes, fail-stop error propagation.
+   Integration tests start several node processes on localhost with
+   directories as devices, kill one, and check every error in 16.1 is
+   produced with the detail in 16.2. Settles 21.1 and 21.8.
+4. **Administration.** Drain, repair, re-encode, the recovery tool, and
+   the scrubber. Settles 21.2 and 21.7.
+
+C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
+Multi-node tests run real node processes on one machine. Every failure
+condition in 16.1 has a test that provokes it. Corruption tests flip bytes
+in shard files directly.
