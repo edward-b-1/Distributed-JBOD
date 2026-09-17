@@ -38,7 +38,7 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const CHECKSUM_ALGORITHM_XXH3_64: u32 = 1;
 
 pub const HEADER_LEN: u64 = 4096;
-pub const FOOTER_FIXED_LEN: u64 = 32;
+pub const FOOTER_FIXED_LEN: u64 = 40;
 pub const TRAILER_LEN: u64 = 16;
 
 // Byte offsets of the header fields within the header page (SPEC 9.3.2).
@@ -58,8 +58,9 @@ const OFF_HEADER_CHECKSUM: usize = 80;
 const OFF_FOOTER_BLOCK_COUNT: usize = 0;
 const OFF_FOOTER_LAST_BLOCK_LENGTH: usize = 8;
 const OFF_FOOTER_OBJECT_SIZE: usize = 16;
-const OFF_FOOTER_CHECKSUM: usize = 24;
-const OFF_FOOTER_TABLE: usize = 32;
+const OFF_FOOTER_OBJECT_CHECKSUM: usize = 24;
+const OFF_FOOTER_CHECKSUM: usize = 32;
+const OFF_FOOTER_TABLE: usize = 40;
 
 /// What is known when a shard file is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,8 +77,42 @@ pub struct ShardFileHeader {
 pub struct ShardFileFooter {
     pub block_count: u64,
     pub last_block_length: u64,
+    /// Total bytes of the object, before striping and padding.
     pub object_size: u64,
+    /// XXH3-64 of the whole object's bytes, before striping and padding
+    /// (SPEC 8.3.6). A copy of the value in the metadata record, so the
+    /// recovery tool can confirm a reassembled object with nothing but the
+    /// shard files.
+    pub object_checksum: BlockChecksum,
     pub checksums: Vec<BlockChecksum>,
+}
+
+/// The block count and last block length that a shard file must have for
+/// an object of `object_size` bytes under `scheme` with blocks of
+/// `block_length` (SPEC 8.2.5). Fully determined, so both the writer and
+/// the reader can check a file against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShardGeometry {
+    pub block_count: u64,
+    pub last_block_length: u64,
+}
+
+pub fn shard_geometry(
+    scheme: Scheme,
+    block_length: u64,
+    object_size: u64,
+) -> Option<ShardGeometry> {
+    if object_size == 0 || block_length == 0 {
+        return None;
+    }
+    let k = scheme.data_shards() as u64;
+    let stripe_bytes = k * block_length;
+    let block_count = object_size.div_ceil(stripe_bytes);
+    let last_stripe_bytes = object_size - (block_count - 1) * stripe_bytes;
+    Some(ShardGeometry {
+        block_count,
+        last_block_length: last_stripe_bytes.div_ceil(k),
+    })
 }
 
 #[derive(Debug, Error)]
@@ -130,6 +165,16 @@ pub enum ShardFileError {
     },
     #[error("a shard file must hold at least one block")]
     NoBlocks,
+    #[error(
+        "an object of {object_size} bytes needs {expected_blocks} blocks with a last block of {expected_last} bytes, but the file has {actual_blocks} blocks with a last block of {actual_last} bytes"
+    )]
+    GeometryMismatch {
+        object_size: u64,
+        expected_blocks: u64,
+        expected_last: u64,
+        actual_blocks: u64,
+        actual_last: u64,
+    },
 }
 
 fn write_u32(buf: &mut [u8], offset: usize, value: u32) {
@@ -244,6 +289,11 @@ impl ShardFileFooter {
             self.last_block_length,
         );
         write_u64(&mut bytes, OFF_FOOTER_OBJECT_SIZE, self.object_size);
+        write_u64(
+            &mut bytes,
+            OFF_FOOTER_OBJECT_CHECKSUM,
+            self.object_checksum.0,
+        );
         for (i, checksum) in self.checksums.iter().enumerate() {
             write_u64(&mut bytes, OFF_FOOTER_TABLE + 8 * i, checksum.0);
         }
@@ -282,6 +332,7 @@ impl ShardFileFooter {
             block_count,
             last_block_length: read_u64(bytes, OFF_FOOTER_LAST_BLOCK_LENGTH),
             object_size: read_u64(bytes, OFF_FOOTER_OBJECT_SIZE),
+            object_checksum: BlockChecksum(read_u64(bytes, OFF_FOOTER_OBJECT_CHECKSUM)),
             checksums,
         })
     }
@@ -362,14 +413,45 @@ impl ShardFileWriter {
 
     /// Write the footer and trailer and flush everything to disk. The file
     /// is complete once this returns.
-    pub fn finish(mut self, object_size: u64) -> Result<ShardFileFooter, ShardFileError> {
+    ///
+    /// The blocks written must be exactly what an object of `object_size`
+    /// bytes produces for this shard (see [`shard_geometry`]); otherwise
+    /// the coordinator sent too few, too many, or a wrongly padded final
+    /// block, and the file is refused rather than recorded as valid.
+    pub fn finish(
+        mut self,
+        object_size: u64,
+        object_checksum: BlockChecksum,
+    ) -> Result<ShardFileFooter, ShardFileError> {
         if self.checksums.is_empty() {
             return Err(ShardFileError::NoBlocks);
         }
+        let actual_blocks = self.checksums.len() as u64;
+        let expected = shard_geometry(self.header.scheme, self.header.block_length, object_size);
+        let matches = match expected {
+            Some(g) => {
+                g.block_count == actual_blocks && g.last_block_length == self.last_block_length
+            }
+            None => false,
+        };
+        if !matches {
+            let (expected_blocks, expected_last) = match expected {
+                Some(g) => (g.block_count, g.last_block_length),
+                None => (0, 0),
+            };
+            return Err(ShardFileError::GeometryMismatch {
+                object_size,
+                expected_blocks,
+                expected_last,
+                actual_blocks,
+                actual_last: self.last_block_length,
+            });
+        }
         let footer = ShardFileFooter {
-            block_count: self.checksums.len() as u64,
+            block_count: actual_blocks,
             last_block_length: self.last_block_length,
             object_size,
+            object_checksum,
             checksums: self.checksums,
         };
         let footer_offset = HEADER_LEN
@@ -448,6 +530,29 @@ impl ShardFileReader {
                 expected_footer_offset,
                 footer_offset
             )));
+        }
+
+        // And the blocks must be what the recorded object size implies.
+        let geometry = shard_geometry(header.scheme, header.block_length, footer.object_size);
+        let geometry_matches = match geometry {
+            Some(g) => {
+                g.block_count == footer.block_count
+                    && g.last_block_length == footer.last_block_length
+            }
+            None => false,
+        };
+        if !geometry_matches {
+            let (expected_blocks, expected_last) = match geometry {
+                Some(g) => (g.block_count, g.last_block_length),
+                None => (0, 0),
+            };
+            return Err(ShardFileError::GeometryMismatch {
+                object_size: footer.object_size,
+                expected_blocks,
+                expected_last,
+                actual_blocks: footer.block_count,
+                actual_last: footer.last_block_length,
+            });
         }
 
         Ok(ShardFileReader {

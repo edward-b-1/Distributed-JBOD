@@ -367,6 +367,18 @@ block. The read is not served from the corrupt block.
 to detect or locate corruption. Detection and location are the checksum's
 job.
 
+8.3.6 [D] **Whole-object checksum.** In addition to the per-block
+checksums, every version carries one XXH3-64 over the entire object's
+bytes as the client sent them, before striping, padding, or encoding. The
+coordinator computes it while streaming the upload and stores it in the
+metadata record (9.4.2) and in every shard file footer (9.3.2). A full
+read recomputes it over the bytes delivered and fails on mismatch (11.7).
+Block checksums protect against the disk and locate a fault to one block;
+this check is end to end and catches what they cannot: stripes stored in
+the wrong order, a duplicated or dropped stripe, wrongly trimmed padding,
+or a bug in the encoder or decoder. Range reads cannot perform it and rely
+on block checksums alone.
+
 ## 9. On-disk layout
 
 ### 9.1 Device root
@@ -513,23 +525,30 @@ BLOCKS
 FOOTER, at file offset F, immediately after the last block, written last
   0    8   block count         n, at least 1
   8    8   last block length   1 .. B
- 16    8   object size         total object bytes, for the recovery tool
- 24    8   footer checksum     XXH3-64 over footer and trailer, this field zeroed
- 32   8n   checksum table      XXH3-64 of block i at entry i
+ 16    8   object size         total object bytes
+ 24    8   object checksum     XXH3-64 of the whole object (8.3.6)
+ 32    8   footer checksum     XXH3-64 over footer and trailer, this field zeroed
+ 40   8n   checksum table      XXH3-64 of block i at entry i
 
 TRAILER, the last 16 bytes of the file
-  0    8   footer length       L = 32 + 8n
+  0    8   footer length       L = 40 + 8n
   8    8   footer offset       F
 
 invariant: F + L + 16 == file length
 ```
 
 Reading: `fstat` for the length, read the trailer, check the invariant,
-read L bytes at F, verify the footer checksum, then read block i at
-`4096 + i × B` and verify it against table entry i. The header is read
-when identity matters (recovery, scrubbing, orphan cleanup) and to
-cross-check block length and shard index against the footer and the
-metadata record.
+read L bytes at F, verify the footer checksum, read and verify the header,
+then read block i at `4096 + i × B` and verify it against table entry i.
+
+**Geometry check.** The object size, k, and B fully determine how many
+blocks a shard must hold and how long the last one is (8.2.5). The writer
+refuses to finish a file whose blocks do not match the object size it is
+given, and the reader refuses to open a file whose footer disagrees with
+its own blocks. A coordinator that sends too few stripes or a wrongly
+padded final stripe therefore cannot produce a valid-looking file. The
+object size and object checksum in the footer duplicate the record so the
+recovery tool can verify a reassembled object from shard files alone.
 
 Why this shape: the header is aligned so every block starts on a 4096-byte
 boundary (8.2.2), and because it is written at file creation even a
@@ -565,6 +584,7 @@ key_hash            hex string
 version             ULID
 created             RFC 3339 timestamp
 size                integer, true object length in bytes
+object_checksum     XXH3-64 of the whole object, as 16 hex characters (8.3.6)
 k, m                integers, the global values when written (6.3)
 block_size          integer, B when written
 shards              array of { index, device_uuid, node_uuid }
@@ -648,11 +668,16 @@ everything written so far is removed.
 
 10.8 [D] The coordinator (or the client, section 17) reads the body one
 stripe at a time, splits it into k data blocks, computes m parity blocks,
-computes k+m checksums, and streams block and checksum to each holder.
-Memory in use per request is bounded by one stripe plus parity.
+computes k+m checksums, and streams block and checksum to each holder,
+each frame tagged with its stripe number. It also folds every body byte
+into the whole-object checksum (8.3.6) as it goes. Memory in use per
+request is bounded by one stripe plus parity.
 
-10.9 [D] Each receiving node writes blocks into the shard file, writes the
-header last, fsyncs, and renames. It then writes the metadata record the
+10.9 [D] Each receiving node writes the shard file header at creation,
+appends blocks as they arrive, refusing a frame whose stripe number is not
+the next expected, then on end of stream writes the footer and trailer
+(checking the geometry against the object size, 9.3.2), fsyncs, and
+renames. It then writes the metadata record the
 coordinator sends, fsyncs, renames, and fsyncs the directory.
 
 10.10 [D] The coordinator acknowledges the write to the client only when
@@ -687,6 +712,13 @@ memory at once.
 
 11.6 [D] The last stripe is truncated to the object's true length before
 delivery.
+
+11.7 [D] The coordinator folds every delivered byte into a whole-object
+checksum and, after the last stripe, compares it with the record's
+`object_checksum` (8.3.6). A mismatch is an error (16.1). Because the
+body has by then been streamed to the client, the error is delivered as
+the stream's terminating status (19.1.2), and the client must treat the
+body as invalid.
 
 ## 12. Placement summary
 
@@ -754,6 +786,8 @@ to the client:
 - Any node in the cluster document does not respond to a broadcast.
 - Any device holding a shard needed for a read is unreachable.
 - Any shard block fails its checksum.
+- The whole-object checksum of a completed read does not match the record
+  (11.7).
 - Metadata record copies for a version disagree, or fewer than k+m are
   found.
 - The key in a record does not match the requested key (hash collision or
@@ -962,16 +996,20 @@ coordinator, and those nodes send to each other. Every response is either
 `PutShard`
 : Request: device UUID, key hash, version id, shard index, block count,
   block length, last block length. The node creates the temporary shard
-  file, reserves it (10.6), and responds `READY`. Then a stream of exactly
-  `block count` data frames, each a checksum and a block; the node
-  recomputes the checksum and rejects the stream on mismatch (17.6). On
-  end-of-stream the node writes the header, fsyncs, renames, and responds
-  `OK`. Any failure deletes the temporary file and responds `ERROR`.
+  file with its header, reserves it (10.6), and responds `READY`. Then a
+  stream of exactly `block count` data frames, each a stripe number, a
+  checksum, and a block. The node rejects the stream if a stripe number is
+  not the next expected, or if the recomputed checksum differs from the
+  one sent (17.6). The end-of-stream message carries the object size and
+  whole-object checksum; the node checks the blocks written against the
+  object size (9.3.2 geometry check), writes the footer and trailer,
+  fsyncs, renames, and responds `OK`. Any failure deletes the temporary
+  file and responds `ERROR`.
 
 `GetShard`
 : Request: device UUID, key hash, version id, shard index, first block,
-  block count. Response: a stream of data frames, each the stored checksum
-  and block, then end-of-stream. The sending node does not verify
+  block count. Response: a stream of data frames, each a stripe number,
+  the stored checksum, and the block, then end-of-stream. The sending node does not verify
   checksums; the receiver does. A missing file is an `ERROR`.
 
 `PutMeta`
@@ -1251,7 +1289,7 @@ Object: 10 MiB.
 - Stripe 4: remaining 1 MiB split into three blocks of 349,526 bytes
   (padded), plus one parity block of the same size.
 - Four shard files, each holding four blocks: three of 1 MiB and one of
-  349,526 bytes, plus a 4 KiB header and an 80-byte footer and trailer.
+  349,526 bytes, plus a 4 KiB header and an 88-byte footer and trailer.
   Each shard file is about 3.34 MiB.
 - Stored total: about 13.4 MiB for 10 MiB of data, a ratio of 1.33.
 - Four metadata records of a few hundred bytes each, one per holder.

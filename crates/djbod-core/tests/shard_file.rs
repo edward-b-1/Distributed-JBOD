@@ -11,8 +11,8 @@ use djbod_core::checksum::{block_matches_checksum, checksum_block, BlockChecksum
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::hash_key;
 use djbod_core::shardfile::{
-    ShardFileError, ShardFileHeader, ShardFileReader, ShardFileWriter, FOOTER_FIXED_LEN,
-    HEADER_LEN, MAGIC, TRAILER_LEN,
+    shard_geometry, ShardFileError, ShardFileFooter, ShardFileHeader, ShardFileReader,
+    ShardFileWriter, ShardGeometry, FOOTER_FIXED_LEN, HEADER_LEN, MAGIC, TRAILER_LEN,
 };
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
@@ -51,6 +51,18 @@ fn block_for(index: u8, len: usize, seed: u64) -> ShardBlock {
     }
 }
 
+/// An object size whose shard geometry is `full_blocks` blocks of B bytes
+/// followed by one block of `last_len` bytes: the final stripe holds
+/// exactly `last_len × k` bytes so its blocks need no padding.
+fn object_size_for(header: &ShardFileHeader, full_blocks: usize, last_len: usize) -> u64 {
+    let k = header.scheme.data_shards() as u64;
+    (full_blocks as u64) * k * header.block_length + (last_len as u64) * k
+}
+
+/// A stand-in whole-object checksum for files whose object bytes the test
+/// never assembles.
+const FAKE_OBJECT_CHECKSUM: BlockChecksum = BlockChecksum(0x0B1E_C7C4_3C5A_0001);
+
 /// Write a shard file of `full_blocks` blocks of B bytes followed by one
 /// block of `last_len` bytes. Returns the blocks written.
 fn write_shard_file(
@@ -61,6 +73,7 @@ fn write_shard_file(
 ) -> Vec<ShardBlock> {
     let block_length = header.block_length as usize;
     let shard_index = header.shard_index.0;
+    let object_size = object_size_for(&header, full_blocks, last_len);
     let mut writer = ShardFileWriter::create(path, header).expect("failed to create shard file");
     let mut blocks = Vec::with_capacity(full_blocks + 1);
     for i in 0..full_blocks {
@@ -70,7 +83,9 @@ fn write_shard_file(
     for block in &blocks {
         writer.append_block(block).expect("failed to append block");
     }
-    writer.finish(12_345).expect("failed to finish shard file");
+    writer
+        .finish(object_size, FAKE_OBJECT_CHECKSUM)
+        .expect("failed to finish shard file");
     blocks
 }
 
@@ -154,7 +169,11 @@ fn round_trip_reads_back_every_block_with_its_checksum() {
         assert_eq!(reader.header(), &header);
         assert_eq!(reader.block_count(), written.len() as u64);
         assert_eq!(reader.footer().last_block_length, last_len as u64);
-        assert_eq!(reader.footer().object_size, 12_345);
+        assert_eq!(
+            reader.footer().object_size,
+            object_size_for(&header, full_blocks, last_len)
+        );
+        assert_eq!(reader.footer().object_checksum, FAKE_OBJECT_CHECKSUM);
         for (i, expected) in written.iter().enumerate() {
             let block = reader.read_block(i as u64).expect("failed to read block");
             assert_eq!(&block, expected, "block {i}");
@@ -212,7 +231,10 @@ fn finishing_with_no_blocks_is_an_error() {
     let path = dir.path().join("shard");
     let writer = ShardFileWriter::create(&path, header_for(3, 1, 0, 4096))
         .expect("failed to create shard file");
-    assert!(matches!(writer.finish(0), Err(ShardFileError::NoBlocks)));
+    assert!(matches!(
+        writer.finish(0, FAKE_OBJECT_CHECKSUM),
+        Err(ShardFileError::NoBlocks)
+    ));
 }
 
 #[test]
@@ -363,6 +385,7 @@ fn object_round_trips_through_stripes_and_shard_files_on_disk() {
     let object = xorshift64_bytes(10 * stripe_size + 1234, 42);
     let key_hash = hash_key(b"docs/report.pdf");
     let version_id = VersionId([7u8; 16]);
+    let object_checksum = checksum_block(&object);
 
     // Write: one writer per shard, fed stripe by stripe.
     let mut paths: Vec<PathBuf> = Vec::new();
@@ -389,7 +412,7 @@ fn object_round_trips_through_stripes_and_shard_files_on_disk() {
     }
     for writer in writers {
         writer
-            .finish(object.len() as u64)
+            .finish(object.len() as u64, object_checksum)
             .expect("failed to finish shard file");
     }
 
@@ -420,6 +443,13 @@ fn object_round_trips_through_stripes_and_shard_files_on_disk() {
         }
     }
     assert_eq!(recovered, object);
+    // The whole-object check the read path performs (SPEC 11.7), and the
+    // copy the recovery tool would use.
+    assert_eq!(checksum_block(&recovered), object_checksum);
+    for reader in &readers {
+        assert_eq!(reader.footer().object_checksum, object_checksum);
+        assert_eq!(reader.footer().object_size, object.len() as u64);
+    }
 
     // Damage block 4 of shard 1 on disk, then read every shard and let the
     // decoder repair.
@@ -459,4 +489,154 @@ fn object_round_trips_through_stripes_and_shard_files_on_disk() {
     }
     assert_eq!(repaired_stripes, 1);
     assert_eq!(recovered, object);
+}
+
+#[test]
+fn shard_geometry_follows_the_padding_rule() {
+    let scheme = Scheme::new(3, 1).expect("failed to construct scheme");
+    // Appendix B: 10 MiB at 3+1 with 1 MiB blocks is four stripes, the last
+    // holding 1 MiB split into blocks of 349,526 bytes.
+    assert_eq!(
+        shard_geometry(scheme, 1 << 20, 10 << 20),
+        Some(ShardGeometry {
+            block_count: 4,
+            last_block_length: 349_526
+        })
+    );
+    // Exactly one full stripe.
+    assert_eq!(
+        shard_geometry(scheme, 4096, 3 * 4096),
+        Some(ShardGeometry {
+            block_count: 1,
+            last_block_length: 4096
+        })
+    );
+    // One byte more than a full stripe: a second stripe of one byte,
+    // padded to one-byte blocks.
+    assert_eq!(
+        shard_geometry(scheme, 4096, 3 * 4096 + 1),
+        Some(ShardGeometry {
+            block_count: 2,
+            last_block_length: 1
+        })
+    );
+    // A two-byte object splits into blocks of one byte.
+    assert_eq!(
+        shard_geometry(scheme, 4096, 2),
+        Some(ShardGeometry {
+            block_count: 1,
+            last_block_length: 1
+        })
+    );
+    assert_eq!(shard_geometry(scheme, 4096, 0), None);
+}
+
+#[test]
+fn finish_refuses_blocks_that_do_not_match_the_object_size() {
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let header = header_for(3, 1, 0, 4096);
+
+    // Too few blocks: two full blocks written, object size says three.
+    let path = dir.path().join("too-few");
+    let mut writer =
+        ShardFileWriter::create(&path, header.clone()).expect("failed to create shard file");
+    writer
+        .append_block(&block_for(0, 4096, 1))
+        .expect("failed to append block");
+    writer
+        .append_block(&block_for(0, 4096, 2))
+        .expect("failed to append block");
+    let three_stripes = 3 * 3 * 4096;
+    match writer.finish(three_stripes, FAKE_OBJECT_CHECKSUM) {
+        Err(ShardFileError::GeometryMismatch {
+            expected_blocks,
+            actual_blocks,
+            ..
+        }) => {
+            assert_eq!(expected_blocks, 3);
+            assert_eq!(actual_blocks, 2);
+        }
+        other => panic!("expected GeometryMismatch, got {other:?}"),
+    }
+
+    // Wrong padding: the object needs a last block of 2 bytes, 1 was written.
+    let path = dir.path().join("wrong-last");
+    let mut writer =
+        ShardFileWriter::create(&path, header.clone()).expect("failed to create shard file");
+    writer
+        .append_block(&block_for(0, 4096, 1))
+        .expect("failed to append block");
+    writer
+        .append_block(&block_for(0, 1, 2))
+        .expect("failed to append block");
+    let one_stripe_plus_five = 3 * 4096 + 5; // ceil(5 / 3) = 2
+    match writer.finish(one_stripe_plus_five, FAKE_OBJECT_CHECKSUM) {
+        Err(ShardFileError::GeometryMismatch {
+            expected_last,
+            actual_last,
+            ..
+        }) => {
+            assert_eq!(expected_last, 2);
+            assert_eq!(actual_last, 1);
+        }
+        other => panic!("expected GeometryMismatch, got {other:?}"),
+    }
+
+    // Object size zero can never match a file with blocks.
+    let path = dir.path().join("zero");
+    let mut writer = ShardFileWriter::create(&path, header).expect("failed to create shard file");
+    writer
+        .append_block(&block_for(0, 4096, 1))
+        .expect("failed to append block");
+    assert!(matches!(
+        writer.finish(0, FAKE_OBJECT_CHECKSUM),
+        Err(ShardFileError::GeometryMismatch { .. })
+    ));
+}
+
+#[test]
+fn open_refuses_a_footer_whose_object_size_disagrees_with_the_blocks() {
+    // Build the file by hand with a correctly checksummed footer that
+    // claims an object size the blocks cannot hold. Only the geometry
+    // check can catch this.
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let path = dir.path().join("shard");
+    let header = header_for(3, 1, 0, 4096);
+    let block = block_for(0, 4096, 1);
+    let footer = ShardFileFooter {
+        block_count: 1,
+        last_block_length: 4096,
+        object_size: 3 * 4096 * 2, // says two stripes; the file has one block
+        object_checksum: FAKE_OBJECT_CHECKSUM,
+        checksums: vec![block.checksum],
+    };
+    let footer_offset = HEADER_LEN + 4096;
+    let mut bytes = header.encode();
+    bytes.extend_from_slice(&block.bytes);
+    bytes.extend_from_slice(&footer.encode_with_trailer(footer_offset));
+    std::fs::write(&path, &bytes).expect("failed to write file");
+
+    match ShardFileReader::open(&path) {
+        Err(ShardFileError::GeometryMismatch {
+            expected_blocks,
+            actual_blocks,
+            ..
+        }) => {
+            assert_eq!(expected_blocks, 2);
+            assert_eq!(actual_blocks, 1);
+        }
+        Err(other) => panic!("expected GeometryMismatch, got {other:?}"),
+        Ok(_) => panic!("expected GeometryMismatch, but the file opened"),
+    }
+
+    // The same file with a truthful object size opens.
+    let truthful = ShardFileFooter {
+        object_size: 3 * 4096,
+        ..footer
+    };
+    let mut bytes = header.encode();
+    bytes.extend_from_slice(&block.bytes);
+    bytes.extend_from_slice(&truthful.encode_with_trailer(footer_offset));
+    std::fs::write(&path, &bytes).expect("failed to write file");
+    ShardFileReader::open(&path).expect("truthful footer should open");
 }
