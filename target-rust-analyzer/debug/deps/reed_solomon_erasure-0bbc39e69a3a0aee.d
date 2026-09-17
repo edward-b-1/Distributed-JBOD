@@ -1,0 +1,14 @@
+/home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/deps/reed_solomon_erasure-0bbc39e69a3a0aee.d: /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/lib.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/macros.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/core.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/errors.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/matrix.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_16.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_8.rs /home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/build/reed-solomon-erasure-06048021d7ed4a8c/out/table.rs
+
+/home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/deps/libreed_solomon_erasure-0bbc39e69a3a0aee.rmeta: /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/lib.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/macros.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/core.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/errors.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/matrix.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_16.rs /home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_8.rs /home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/build/reed-solomon-erasure-06048021d7ed4a8c/out/table.rs
+
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/lib.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/macros.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/core.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/errors.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/matrix.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_16.rs:
+/home/ecb/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reed-solomon-erasure-6.0.0/src/galois_8.rs:
+/home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/build/reed-solomon-erasure-06048021d7ed4a8c/out/table.rs:
+
+# env-dep:OUT_DIR=/home/ecb/work/Distributed-JBOD/target-rust-analyzer/debug/build/reed-solomon-erasure-06048021d7ed4a8c/out
