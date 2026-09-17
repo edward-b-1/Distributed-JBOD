@@ -935,22 +935,30 @@ version.
 Frames carry one shard block and its checksum so that the wire unit matches
 the storage unit.
 
-19.1.2 [P] **Framing.** Every message is a fixed header followed by a
-payload:
+19.1.2 [D] **Framing.** Every message is a 12-byte header followed by a
+payload. Little-endian, like the shard file.
 
 ```
-message type        2 bytes
-flags               2 bytes
-request id          4 bytes    correlates responses and streams with requests
-payload length      4 bytes
-payload             payload length bytes
+0   2   message type    1 Hello, 2 HelloProof, 3 Request, 4 Response,
+                        5 Data, 6 EndOfStream
+2   2   flags           0 in protocol version 1; a non-zero value is rejected
+4   4   request id      correlates responses and stream frames with a request
+8   4   payload length  at most 64 MiB + 4096; a larger value is rejected
+                        before any payload is read
+12      payload
 ```
 
-Control payloads (requests, responses, records) are encoded in a compact
-self-describing format; CBOR is proposed. Data payloads (shard blocks) are
-raw bytes preceded by their 8-byte checksum. A streaming operation is one
-request message followed by a sequence of data messages sharing its
-request id, terminated by an end-of-stream message carrying a status.
+Control payloads (Hello, HelloProof, Request, Response, EndOfStream) are
+CBOR, produced by serde, so the record and cluster document types are
+reused as they are. Data payloads are a 16-byte prefix, the sequence
+number and the XXH3-64 checksum of the bytes, followed by the raw bytes;
+a block costs its own length plus 16 on the wire. For shard streams the
+sequence is the stripe number (10.8); for object body streams it counts
+chunks from zero. A streaming operation is one request, then Data frames
+sharing its request id, then one EndOfStream carrying a status and, for
+`PutShard`, the object size and whole-object checksum. Implemented in
+`crates/djbod-proto`, which is runtime-agnostic: it converts messages to
+and from bytes and nothing else.
 
 19.1.3 [P] **Operations.** Two groups: those a client sends to a
 coordinator, and those nodes send to each other. Every response is either
@@ -1075,9 +1083,18 @@ about devices, nodes, or the cluster document, except the three
 client-side coding operations, which expose device UUIDs and node
 addresses by design.
 
-19.1.5 [D] Every node-to-node connection begins with a handshake that
-proves knowledge of the cluster secret (6.1.2) and exchanges cluster id
-and document version. A connection failing the handshake is closed.
+19.1.5 [D] Every connection begins with a handshake. Each side sends a
+`Hello` carrying the protocol version, its peer kind (node or client), its
+node id if a node, the cluster id, its cluster document version, and a
+fresh 32-byte random nonce. A node peer then sends a `HelloProof`: an
+HMAC-SHA256, keyed by the cluster secret (6.1.2), over a fixed label, a
+role label (initiator or responder), both nonces, and the cluster id. Each
+node verifies the other's proof in constant time. The secret never crosses
+the wire, a captured proof is useless against a different nonce, and the
+role label stops a proof being reflected back at the side that produced
+it. A connection failing any check, or presenting a different cluster id
+or document version, is closed. Clients send `Hello` with kind `client`
+and no proof in v1 (19.1.6).
 
 19.1.6 [X] Client authentication (an access key) and TLS are deferred and
 must remain optional for LAN deployments. The `flags` field in the frame
@@ -1160,7 +1177,6 @@ layout in section 9 uses fixed-length names and stays well within both.
 | 21.2 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
 | 21.3 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
 | 21.4 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.5 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
@@ -1343,7 +1359,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | Crate | Contents |
 |-------|----------|
 | `djbod-core` | On-disk format (device identity, shard file, metadata record), key hash, block checksums, Reed-Solomon wrapper, stripe encode and decode. No networking. Fully unit-tested, including round-trips through the code with every erasure pattern up to `m`. |
-| `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3. Shared by node, client, and tools. |
+| `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3, data frames, stream ends. Runtime-agnostic (bytes in, messages out). Shared by node, client, and tools. |
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
 | `djbod-cli` | Command-line client and administrative commands over the native protocol. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
@@ -1357,11 +1373,10 @@ checksums, 8.3), is byte-wise independent (streaming is valid), satisfies
 special-case it, 8.1.2), and allows `k + m <= 256`. Without SIMD it
 encodes 3+1 at about 6 GiB/s and 10+4 at about 1.5 GiB/s of data on one
 core, and reconstructs one shard at about 6 GiB/s. Dependencies:
-`tokio` (async runtime and networking; chosen, see C.6), `reed-solomon-erasure` (classic
+`tokio` (async runtime and networking; decided, C.6), `reed-solomon-erasure` (classic
 GF(2^8) systematic Reed-Solomon, a port of the Go library MinIO uses) with
 `reed-solomon-simd` as the alternative if throughput demands it,
-`xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` or `minicbor`
-(CBOR), `ulid`, `uuid`, `serde` and `serde_json` (metadata records),
+`xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` (CBOR; decided, 19.1.2), `hmac` (handshake), `ulid`, `uuid`, `serde` and `serde_json` (metadata records),
 `rustix` or `nix` (`fallocate`, `statvfs`, `st_dev`), `clap`, `tracing`,
 `thiserror`.
 
@@ -1396,7 +1411,7 @@ shard), 8.1.5 (library parity rows are prefix-stable), 8.3.2 and 8.3.6
 identity file (5.2) and the temporary-name, fsync, rename procedure
 (9.3.3, 9.4.3), because both are driven by the node process.
 
-C.6 [P] **Async runtime: `tokio`.** Alternatives considered:
+C.6 [D] **Async runtime: `tokio`.** Alternatives considered:
 `async-std` (discontinued in 2025 in favour of `smol`), `smol` (small and
 sound, but a fraction of tokio's ecosystem and documentation), and the
 io_uring runtimes `glommio`, `monoio`, and `compio` (true asynchronous disk

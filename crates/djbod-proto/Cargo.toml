@@ -1,0 +1,21 @@
+[package]
+name = "djbod-proto"
+description = "Native wire protocol for Distributed-JBOD: frames, handshake, and messages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+djbod-core = { workspace = true }
+serde = { workspace = true }
+ciborium = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+time = { workspace = true }
