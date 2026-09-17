@@ -615,16 +615,12 @@ error (section 16).
 
 ## 10. Write path (PUT)
 
-10.1 [O] **Whether content length is required.** Draft 1 required it.
-Three things use it: choosing devices with enough room, reserving space
-(10.6), and writing a header whose checksum table is sized by block count.
-Without it the coordinator must pick devices blind, a write can fail
-partway when a device fills, and the checksum table must move to a trailer
-at the end of the file, written after the last block. All of that is
-workable. Recommendation: require content length in v1. Every native
-client knows the size of what it is sending, and S3 requires it on PUT as
-well. Unknown-length streaming can be added later by switching the table
-to a trailer.
+10.1 [D] **Content length is required on PUT.** It lets the coordinator
+choose devices with enough room, reserve the shard files (10.6), and check
+every shard's geometry on finish (9.3.2). Every native client knows the
+size of what it is sending, and S3 requires it on PUT as well. Unknown-
+length streaming is deferred (22); the shard file format already
+accommodates it because its footer is written last.
 
 10.2 [D] The coordinator generates a version id and computes the key hash,
 stripe count, and shard file size.
@@ -645,32 +641,18 @@ coordinators writing at once will pick the same devices; if reservation
 if the first fills the device. Randomised or round-robin selection for load
 spreading is deferred.
 
-10.6 [O] **Space reservation.** Three options were discussed.
-
-*Reserve the entire device up front.* Either one preallocated file per
-device with an allocator inside it, which is a volume format and a large
-piece of work, or a pool of preallocated fixed-size block files claimed by
-rename. The pool variant is simple but every object's final block occupies
-a whole `B`-sized file, wasting up to `(k+m) × B` per object, which at
-`B = 1 MiB` is several megabytes per small object. It also fixes the file
-count at format time and means the per-key directory holds no data, only
-pointers, changing section 9 substantially.
-
-*Reserve per write with `fallocate(2)`.* When a shard transfer begins the
-receiving node preallocates the shard file to its final size. This is a
-filesystem metadata operation, writes nothing, causes no wear, and makes
-the filesystem the arbiter: two coordinators cannot overcommit, another
+10.6 [D] **Space is reserved per shard file with `fallocate(2)`, mode 0.**
+When a shard transfer begins the receiving node creates the temporary file
+and preallocates it to its final size, which is known from the object size
+(shard_geometry, 9.3.2) plus header, footer, and trailer. This is a
+filesystem metadata operation: it writes nothing, causes no wear, and makes
+the filesystem the arbiter, so two coordinators cannot overcommit, another
 process cannot take reserved space, and a write that starts will not run
-out of room. Requires the size up front (10.1). `posix_fallocate` must not
-be used; it silently writes zeros on filesystems without native support.
-
-*No reservation.* Check free space, write, and if the device fills
-mid-stream fail the write and clean up. Consistent with fail-stop. The
-only cost is that near-full devices produce failures the coordinator could
-have avoided.
-
-Recommendation: `fallocate` per write. It is a single system call in the
-existing write path and removes a class of failures.
+out of room. `ENOSPC` from `fallocate` is the refusal in 10.7.
+`posix_fallocate` must not be used; it silently writes zeros on filesystems
+without native support. Reserving the whole device up front, and no
+reservation at all, were considered and rejected (draft 2 recorded the
+trade).
 
 10.7 [D] For each chosen device, the coordinator opens a shard transfer.
 If the receiving node cannot create or reserve the shard file (for
@@ -697,9 +679,14 @@ all k+m shard files and all k+m metadata records are durable. Any failure
 at any step fails the whole write. The coordinator makes a best effort to
 delete temporary files on failure.
 
-10.11 [O] Cleanup of temporary files left by a coordinator that crashed
-mid-write. Proposed: a device deletes temporary files older than a
-configurable age at startup and during scrub.
+10.11 [D] **Temporary files.** A shard file or record is written under
+its final name plus the suffix `.tmp`, in the object's own directory, so
+the rename into place is within one directory and atomic. At startup a
+node deletes any `.tmp` file on its devices older than a configurable age
+(default one hour), logging what each was: a temporary shard file carries
+its header from creation (9.3.2), so the log can name the key hash, version,
+and shard index it belonged to. The scrubber, when it exists, does the same
+during its walk.
 
 ## 11. Read path (GET)
 
@@ -1141,12 +1128,9 @@ layout in section 9 uses fixed-length names and stays well within both.
 | # | Question | Where | Recommendation |
 |---|----------|-------|----------------|
 | 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
-| 21.2 | Cleanup of orphaned temporary files. | 10.11 | Age-based deletion at startup and scrub. |
-| 21.3 | Content length required on PUT. | 10.1 | Required. |
-| 21.4 | Space reservation. | 10.6 | `fallocate` per write. |
-| 21.5 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.6 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.7 | Control payload encoding. | 19.1.2 | CBOR. |
+| 21.2 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
+| 21.3 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.4 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
