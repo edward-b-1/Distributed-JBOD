@@ -387,14 +387,11 @@ job.
 Keys are not filesystem-safe: they may exceed 255 bytes, contain any byte
 but NUL, and an object `a` may coexist with an object `a/b`.
 
-9.1.2 [O] **Key hash algorithm.** Requirements: fixed output length,
-uniform distribution, and enough width that collisions never happen in
-practice. Speed is irrelevant because keys are small. Collision resistance
-against a malicious client is not required in v1 but costs nothing.
-Recommendation: **SHA-256** over the key bytes alone, rendered as 64
-lowercase hex characters. The bucket is a directory, not part of the hash. It is available in every language's standard
-library, hardware-accelerated on recent CPUs, and boring. Alternatives are
-listed in 9.1.7. Fixed by format version once chosen.
+9.1.2 [D] **Key hash algorithm: SHA-256** over the key's raw bytes,
+untruncated, rendered as 64 lowercase hex characters. The bucket is a
+directory, not part of the hash. No normalisation is applied to the key:
+two keys that differ in any byte are different keys, as in S3. Fixed by
+on-disk format version 1. Alternatives considered are listed in 9.1.7.
 
 9.1.3 [D] The two fan-out levels `ab/cd/` exist only to keep directory
 sizes bounded. Without them, `objects/` would hold one entry per key on the
@@ -413,10 +410,24 @@ limit applies to it.
 9.1.6 [D] **Collisions.** With a 256-bit hash, two distinct keys share a
 directory only if SHA-256 collides, which has never been observed and
 would need on the order of 2^128 objects to expect by chance. The design
-nonetheless detects it: every metadata record contains the plain key, and
-every read compares the requested key with the key in the record. A
-mismatch is reported as an error (16.1). No attempt is made to store two
-keys in one directory.
+nonetheless detects it rather than assuming it away, because the check is
+free: every metadata record contains the plain key.
+
+- **On read** (11.2), the coordinator compares the requested key with the
+  key in every record found under the hash. A mismatch is an error naming
+  both keys (16.1). The stored object is never returned for the wrong key.
+- **On write** (10.2), before placing anything, the coordinator looks the
+  hash up. If a record exists whose key differs from the key being
+  written, the write is refused with the same error. The existing object is
+  untouched and the new key cannot be stored in this cluster.
+- **On delete and list**, the same comparison applies wherever a record is
+  matched to a key.
+
+No attempt is made to store two keys in one directory. The second key of a
+colliding pair is simply unstorable, which is accepted given the odds. The
+same check also catches two failures that are far more likely than a
+collision: a record whose key field was corrupted on disk, and a record
+written under the wrong directory by a software bug.
 
 9.1.7 Key hash alternatives, for reference:
 
@@ -1057,13 +1068,12 @@ layout in section 9 uses fixed-length names and stays well within both.
 |---|----------|-------|----------------|
 | 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
 | 21.2 | Cleanup of orphaned temporary files. | 10.11 | Age-based deletion at startup and scrub. |
-| 21.3 | Key hash algorithm. | 9.1.2 | SHA-256. |
-| 21.4 | One file per shard or per shard block. | 9.3.1 | Per shard. |
-| 21.5 | Content length required on PUT. | 10.1 | Required. |
-| 21.6 | Space reservation. | 10.6 | `fallocate` per write. |
-| 21.7 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.8 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.9 | Control payload encoding. | 19.1.2 | CBOR. |
+| 21.3 | One file per shard or per shard block. | 9.3.1 | Per shard. |
+| 21.4 | Content length required on PUT. | 10.1 | Required. |
+| 21.5 | Space reservation. | 10.6 | `fallocate` per write. |
+| 21.6 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
+| 21.7 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.8 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
