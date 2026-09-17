@@ -160,29 +160,44 @@ broadcast.
 4.3 [D] The metadata record for a version is stored in full on every device
 that holds a shard of that version. There are therefore k+m identical copies.
 
-4.4 [P] Each node process is single-threaded in the sense of one thread of
-control, but it must serve several connections concurrently, for example
-with an event loop. A node that handled one connection at a time could
-deadlock: node A coordinating a write needs node B to accept a shard while
-node B, coordinating its own write, needs the same of node A.
+4.4 [D] Each node must serve several connections concurrently. A node
+that handled one connection at a time could deadlock: node A coordinating
+a write needs node B to accept a shard while node B, coordinating its own
+write, needs the same of node A. The node is written with an async runtime
+(C.3). Disk I/O goes through `djbod-core`, which stays synchronous and
+runtime-agnostic and is called from blocking worker threads.
 
 ## 5. Nodes and devices
 
 5.1 [D] A node's local configuration lists the devices it manages as
 filesystem paths, for example `/mnt/disk0/data`, `/mnt/disk1/data`.
 
-5.2 [D] On first use, the node writes a device identity file `device.json`
-at the root of the device path. Fields:
+5.2 [D] On first use, the node writes a device identity file named
+`DISTRIBUTED-JBOD-DEVICE.json` at the root of the device path. The name is
+uppercase so it sorts first in a listing and carries the project name so
+that anyone finding the directory, including an administrator who has
+forgotten the software is installed, can tell what owns it and search for
+it. Fields:
 
 ```
 system           "distributed-jbod"   identifies the file as belonging to this system
+notice           plain-English text   what this directory is, what owns it, where the
+                                      project lives, and that it must not be edited by hand
 format_version   integer              on-disk format version (fixes algorithms, 6.2.2)
-device_uuid      UUID                 freshly generated; the device's name in every record
+device_id        UUID                 freshly generated; the device's name in every record
 cluster_id       UUID                 the cluster this device was initialised into
 created          RFC 3339 timestamp
 ```
 
 The UUID is the device's name in every record. Paths are never recorded.
+
+5.2.1 [D] **Initialising a device requires an empty directory.** The
+directory must exist and contain nothing except, optionally, a
+`lost+found` entry, which ext4 creates at every mount root. Anything else
+is refused with an error naming what was found; there is no override. On
+every later start, a directory that has an `objects` subdirectory but no
+identity file is refused too: either the identity file was deleted or the
+directory belongs to something else.
 
 5.3 [D] At startup the node checks the filesystem id (`st_dev`) of every
 configured path. If two paths resolve to the same filesystem, the node
@@ -1327,7 +1342,7 @@ checksums, 8.3), is byte-wise independent (streaming is valid), satisfies
 special-case it, 8.1.2), and allows `k + m <= 256`. Without SIMD it
 encodes 3+1 at about 6 GiB/s and 10+4 at about 1.5 GiB/s of data on one
 core, and reconstructs one shard at about 6 GiB/s. Dependencies:
-`tokio` (async runtime and networking), `reed-solomon-erasure` (classic
+`tokio` (async runtime and networking; chosen, see C.6), `reed-solomon-erasure` (classic
 GF(2^8) systematic Reed-Solomon, a port of the Go library MinIO uses) with
 `reed-solomon-simd` as the alternative if throughput demands it,
 `xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` or `minicbor`
@@ -1365,6 +1380,18 @@ shard), 8.1.5 (library parity rows are prefix-stable), 8.3.2 and 8.3.6
 (checksums). Left to milestone 2's device layer: the `device.json`
 identity file (5.2) and the temporary-name, fsync, rename procedure
 (9.3.3, 9.4.3), because both are driven by the node process.
+
+C.6 [P] **Async runtime: `tokio`.** Alternatives considered:
+`async-std` (discontinued in 2025 in favour of `smol`), `smol` (small and
+sound, but a fraction of tokio's ecosystem and documentation), and the
+io_uring runtimes `glommio`, `monoio`, and `compio` (true asynchronous disk
+I/O, but young, Linux-kernel-version sensitive, and often disabled on
+hardened hosts). tokio is the de facto standard, is what Garage uses, has
+the most documentation for a reviewer to lean on, and its file I/O model,
+blocking calls on a worker thread pool, matches keeping `djbod-core`
+synchronous. Runtime flavour is a one-line choice: `current_thread` gives
+the single-OS-thread event loop originally envisaged, `multi_thread` adds
+CPU parallelism for encoding on machines with cores to spare.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
