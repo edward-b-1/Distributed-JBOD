@@ -473,30 +473,16 @@ last-writer-wins by ULID.
 
 ### 9.3 Shard file format
 
-9.3.1 [O] **One file per shard, or one file per shard block.** Draft 1
-proposed one file per shard: all of a device's blocks for a version in one
-file with a header. The reviewer's assumption was one file per block. The
-trade:
-
-*One file per shard block.* Simplest possible file: block bytes, checksum
-in a small header or in the file name. Every file has a known maximum
-size of `B` plus a header. Blocks can be verified in isolation with no
-shared structure. Cost: a 10 GiB object at `B = 1 MiB` and 3+1 produces
-10,240 files per device and 40,960 files in total, each needing a create,
-a write, an fsync, and an inode, in a directory of 10,240 entries. Small
-files also defeat the disk's sequential read path.
-
-*One file per shard.* One create, one fsync, one inode per device per
-version. Blocks are contiguous so sequential reads run at disk speed. The
-file size is bounded by the object size divided by k, which on ext4 is
-16 TiB. Cost: a header with a checksum table that must be read before any
-block can be verified, and a maximum object size that is a configuration
-choice rather than a property of the format.
-
-Recommendation: one file per shard, as below, with a configurable maximum
-object size (default 1 TiB) enforced at PUT. If the reviewer prefers one
-file per block, the change is confined to 9.3 and the shard transfer
-operations in 19.1.
+9.3.1 [D] **One file per shard.** All of a device's blocks for a version
+are stored in one file with a header holding the checksum table. The
+alternative, one file per shard block, was rejected because its
+filesystem cost grows with object size: a 10 GiB object at 1 MiB blocks
+and 3+1 would be about 41,000 files, each an inode, a create, and an
+fsync, and each a separate read that defeats the disk's sequential path.
+Packing into volume files is the eventual replacement (22). The one
+advantage of per-block files, rewriting a single corrupt block, can be
+recovered later by allowing the repair job alone to overwrite one block in
+place, since the header's checksum for that block verifies the result.
 
 9.3.2 [P] Proposed shard file format:
 
@@ -761,16 +747,21 @@ a planned extension.
 
 ## 17. Coordinator role and reconstruction policy
 
-17.1 [D] Erasure coding work (encoding on write, and assembling or
-reconstructing on read) can be done by the coordinator or by the client.
-Which one is chosen per request.
+17.1 [D] In v1 the node a client connects to is the coordinator for the
+request: it performs the broadcast, the shard transfers, and the erasure
+coding, and the client speaks to one node only.
 
-17.2 [D] A client indicates whether it wants the coordinator to perform
-coding or wants to do it itself. A native client that codes for itself
-receives (on read) the metadata record and fetches shard blocks directly
-from the holding nodes, and (on write) asks the coordinator for a
-placement, encodes stripes, sends shard streams directly to the chosen
-devices, and asks the coordinator to commit the record (19.1).
+17.2 [X] **Client as coordinator.** A native client may instead take the
+coordinator role itself: it asks one node for the metadata record (or, on
+write, for a placement), then sends requests directly to every holding
+node, and performs the reassembly, verification, and coding on its own
+machine. This removes one network hop from every block transferred, so it
+is primarily a latency optimisation, and secondarily moves coding CPU off
+the cluster. It needs no new on-disk or metadata format, only the
+node-to-node operations of 19.1.3 exposed to authorised clients plus the
+three client-side operations listed there. Deferred; the design keeps the
+door open by making the coordinator use the same node-to-node operations a
+client would.
 
 17.3 [X] A node may refuse to perform coding, governed by the local limit
 of 6.1.3. Deferred with it. In v1 every node accepts coding work.
@@ -779,8 +770,9 @@ of 6.1.3. Deferred with it. In v1 every node accepts coding work.
 chosen placement (for writes) so the client may proceed itself, and may
 also name another node willing to accept the work. Deferred with 17.3.
 
-17.5 [D] This mechanism is how deployments spread coding CPU across
-machines of unequal capability, or steer it to a strong machine.
+17.5 [X] Together, 17.2 to 17.4 are how deployments spread coding CPU
+across machines of unequal capability, or steer it to a strong machine.
+Deferred with them.
 
 17.6 [D] Regardless of where coding happens, the receiving node computes
 each shard block's checksum itself and does not trust a checksum supplied
@@ -900,13 +892,13 @@ coordinator, and those nodes send to each other. Every response is either
   Response: sorted list of keys and, for each, size and version id; plus a
   flag saying whether more remain. Section 15.
 
-`PlaceObject` (client-side coding, 17.2)
+`PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
   of k+m (device UUID, node address) chosen by 10.4 and 10.5. The
   coordinator opens no transfers; the client sends `PutShard` to each
   holder itself.
 
-`CommitObject` (client-side coding)
+`CommitObject` (client as coordinator; deferred)
 : Request: the complete metadata record for a version whose shards the
   client has finished sending. The coordinator verifies that every listed
   holder reports the shard file present and complete (`GetMeta` with a
@@ -914,7 +906,7 @@ coordinator, and those nodes send to each other. Every response is either
   then, if a previous version of the key exists, deletes it (9.2.4).
   Response: none.
 
-`LocateObject` (client-side coding)
+`LocateObject` (client as coordinator; deferred)
 : Request: key. Response: the metadata record and, for each shard, the
   node address to fetch it from. The client then issues `GetShard`
   directly. Identical to `HeadObject` plus addresses.
@@ -1068,12 +1060,11 @@ layout in section 9 uses fixed-length names and stays well within both.
 |---|----------|-------|----------------|
 | 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
 | 21.2 | Cleanup of orphaned temporary files. | 10.11 | Age-based deletion at startup and scrub. |
-| 21.3 | One file per shard or per shard block. | 9.3.1 | Per shard. |
-| 21.4 | Content length required on PUT. | 10.1 | Required. |
-| 21.5 | Space reservation. | 10.6 | `fallocate` per write. |
-| 21.6 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.7 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.8 | Control payload encoding. | 19.1.2 | CBOR. |
+| 21.3 | Content length required on PUT. | 10.1 | Required. |
+| 21.4 | Space reservation. | 10.6 | `fallocate` per write. |
+| 21.5 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
+| 21.6 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.7 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
@@ -1081,7 +1072,7 @@ layout in section 9 uses fixed-length names and stays well within both.
   dropped.
 - Buckets beyond `default` (2, 9.1.9).
 - Failure domain hierarchy and configurable independence level (7).
-- Coordinator coding limit and refusal (6.1.3, 17.3, 17.4).
+- Coordinator coding limit and refusal (6.1.3, 17.3, 17.4, 17.5).
 - Randomised or round-robin placement for load spreading (10.5).
 - Inline reconstruction on read (16.5).
 - Scrubber (20.1).
@@ -1090,6 +1081,17 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Non-systematic encoding option (8.1.6).
 - Optional parity verification on read, for deployments that want it.
 - Range reads and multipart upload.
+- **Maximum shard file size.** A global configuration value capping the
+  size of a shard file, for example 1 GiB. A shard whose blocks would
+  exceed it is written as several files, each with its own header and
+  checksum table, numbered in sequence, in the way Kafka splits a partition
+  log into segments. Bounds the cost of rewriting a shard during repair
+  and keeps any single file small enough to copy or inspect comfortably.
+  Interacts with 9.3.1 and the maximum object size.
+- **Client as coordinator** (17.2). A native client fetches the metadata
+  record from one node, then talks to every holding node itself and does
+  the reassembly, verification, and coding locally. Primarily a latency
+  optimisation: one fewer hop per block.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
 - Administration web UI (20.3).
