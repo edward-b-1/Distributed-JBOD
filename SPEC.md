@@ -1369,6 +1369,19 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
 4. **Administration.** Drain, repair, re-encode, the recovery tool, and
    the scrubber. Settles 21.2 and 21.7.
 
+C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
+holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
+`ReedSolomonCode`), `stripe` (`ShardBlock`, `encode_stripe`,
+`decode_stripe` returning `DecodedStripe::{Intact, Repaired,
+Unrecoverable}`), `keyhash` (SHA-256), `version` (ULID value and text),
+`shardfile` (format version 1 reader and writer with geometry checks),
+`record` (`MetadataRecord` with validation), and `layout` (directory and
+file names). 77 tests. Settled in code: 21.3 (hash), 9.3.1 (file per
+shard), 8.1.5 (library parity rows are prefix-stable), 8.3.2 and 8.3.6
+(checksums). Left to milestone 2's device layer: the `device.json`
+identity file (5.2) and the temporary-name, fsync, rename procedure
+(9.3.3, 9.4.3), because both are driven by the node process.
+
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
 condition in 16.1 has a test that provokes it. Corruption tests flip bytes
