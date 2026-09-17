@@ -132,16 +132,22 @@ pub enum CodingError {
     TooFewShardsPresent { present: usize, needed: usize },
 }
 
-/// Encoder and decoder for one scheme.
-pub struct Coder {
+/// The Reed-Solomon code for one scheme: computes parity blocks from data
+/// blocks and reconstructs missing blocks from present ones.
+///
+/// This wraps the library's `ReedSolomon` object, which holds the
+/// precomputed encoding matrix for the scheme's k and m, and adds three
+/// things: shard indices instead of slice positions, validation of inputs
+/// with typed errors, and the `m = 0` case the library refuses.
+pub struct ReedSolomonCode {
     scheme: Scheme,
     /// `None` when the scheme has no parity shards; the library does not
     /// support that case and there is nothing to compute.
     reed_solomon: Option<ReedSolomon>,
 }
 
-impl Coder {
-    pub fn new(scheme: Scheme) -> Coder {
+impl ReedSolomonCode {
+    pub fn new(scheme: Scheme) -> ReedSolomonCode {
         let reed_solomon = if scheme.parity_shards() == 0 {
             None
         } else {
@@ -149,7 +155,7 @@ impl Coder {
                 .expect("failed to initialize ReedSolomon");
             Some(rs)
         };
-        Coder {
+        ReedSolomonCode {
             scheme,
             reed_solomon,
         }
@@ -309,40 +315,40 @@ mod tests {
 
     #[test]
     fn compute_parity_validates_its_input() {
-        let coder = Coder::new(Scheme::new(2, 1).expect("valid scheme"));
+        let code = ReedSolomonCode::new(Scheme::new(2, 1).expect("valid scheme"));
         assert_eq!(
-            coder.compute_parity(&[vec![1u8; 4]]),
+            code.compute_parity(&[vec![1u8; 4]]),
             Err(CodingError::WrongDataBlockCount {
                 expected: 2,
                 actual: 1
             })
         );
         assert_eq!(
-            coder.compute_parity(&[vec![1u8; 4], vec![1u8; 3]]),
+            code.compute_parity(&[vec![1u8; 4], vec![1u8; 3]]),
             Err(CodingError::UnequalBlockLengths)
         );
         assert_eq!(
-            coder.compute_parity(&[vec![], vec![]]),
+            code.compute_parity(&[vec![], vec![]]),
             Err(CodingError::EmptyBlocks)
         );
     }
 
     #[test]
     fn no_parity_scheme_computes_nothing_and_reconstructs_nothing() {
-        let coder = Coder::new(Scheme::new(2, 0).expect("valid scheme"));
+        let code = ReedSolomonCode::new(Scheme::new(2, 0).expect("valid scheme"));
         let data = [vec![1u8; 8], vec![2u8; 8]];
-        assert_eq!(coder.compute_parity(&data), Ok(vec![]));
+        assert_eq!(code.compute_parity(&data), Ok(vec![]));
 
         let present: [(ShardIndex, &[u8]); 2] =
             [(ShardIndex(0), &data[0]), (ShardIndex(1), &data[1])];
-        let out = coder
+        let out = code
             .reconstruct(&present, &[ShardIndex(1), ShardIndex(0)])
             .expect("everything present");
         assert_eq!(out, vec![data[1].clone(), data[0].clone()]);
 
         let only_one: [(ShardIndex, &[u8]); 1] = [(ShardIndex(0), &data[0])];
         assert_eq!(
-            coder.reconstruct(&only_one, &[ShardIndex(1)]),
+            code.reconstruct(&only_one, &[ShardIndex(1)]),
             Err(CodingError::TooFewShardsPresent {
                 present: 1,
                 needed: 2
@@ -352,22 +358,22 @@ mod tests {
 
     #[test]
     fn reconstruct_rejects_bad_indices() {
-        let coder = Coder::new(Scheme::new(2, 1).expect("valid scheme"));
+        let code = ReedSolomonCode::new(Scheme::new(2, 1).expect("valid scheme"));
         let block = [0u8; 4];
         let out_of_range: [(ShardIndex, &[u8]); 1] = [(ShardIndex(3), &block)];
         assert_eq!(
-            coder.reconstruct(&out_of_range, &[ShardIndex(0)]),
+            code.reconstruct(&out_of_range, &[ShardIndex(0)]),
             Err(CodingError::IndexOutOfRange(ShardIndex(3)))
         );
         let duplicate: [(ShardIndex, &[u8]); 2] =
             [(ShardIndex(0), &block), (ShardIndex(0), &block)];
         assert_eq!(
-            coder.reconstruct(&duplicate, &[ShardIndex(1)]),
+            code.reconstruct(&duplicate, &[ShardIndex(1)]),
             Err(CodingError::DuplicateIndex(ShardIndex(0)))
         );
         let fine: [(ShardIndex, &[u8]); 2] = [(ShardIndex(0), &block), (ShardIndex(1), &block)];
         assert_eq!(
-            coder.reconstruct(&fine, &[ShardIndex(7)]),
+            code.reconstruct(&fine, &[ShardIndex(7)]),
             Err(CodingError::IndexOutOfRange(ShardIndex(7)))
         );
     }
@@ -385,14 +391,14 @@ mod tests {
             (10, 4),
         ] {
             let scheme = Scheme::new(k, m).expect("valid scheme");
-            let coder = Coder::new(scheme);
+            let code = ReedSolomonCode::new(scheme);
             let block_len = 64;
 
             let mut data = Vec::with_capacity(scheme.data_shards());
             for i in 0..scheme.data_shards() {
                 data.push(vec![(i as u8).wrapping_mul(37).wrapping_add(k); block_len]);
             }
-            let parity = coder
+            let parity = code
                 .compute_parity(&data)
                 .expect("failed to compute parity");
             let mut all = data.clone();
@@ -404,7 +410,7 @@ mod tests {
             for i in (m as usize)..scheme.total_shards() {
                 present.push((ShardIndex(i as u8), &all[i]));
             }
-            let out = coder
+            let out = code
                 .reconstruct(&present, &scheme.shard_indices())
                 .expect("failed to reconstruct shards");
             assert_eq!(out, all, "scheme {k}+{m}");

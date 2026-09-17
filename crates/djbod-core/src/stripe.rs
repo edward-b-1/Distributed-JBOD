@@ -11,7 +11,7 @@
 //! (8.3.5). Only the checksum does that.
 
 use crate::checksum::{checksum_block, BlockChecksum};
-use crate::erasure::{Coder, CodingError, ShardIndex};
+use crate::erasure::{CodingError, ReedSolomonCode, ShardIndex};
 use thiserror::Error;
 
 /// A stripe's blocks and their checksums, in shard index order.
@@ -91,19 +91,19 @@ pub enum StripeError {
 /// The length of every block in a stripe holding `data_len` object
 /// bytes: `ceil(data_len / k)` (8.2.5). A full stripe of `k × B` bytes
 /// gives `B`.
-pub fn block_length_for(coder: &Coder, data_len: usize) -> usize {
-    let k = coder.scheme().data_shards();
+pub fn block_length_for(code: &ReedSolomonCode, data_len: usize) -> usize {
+    let k = code.scheme().data_shards();
     data_len.div_ceil(k)
 }
 
 /// Encode up to `k × block_size` object bytes into `k + m` checksummed
 /// blocks.
 pub fn encode_stripe(
-    coder: &Coder,
+    code: &ReedSolomonCode,
     data: &[u8],
     block_size: usize,
 ) -> Result<EncodedStripe, StripeError> {
-    let scheme = coder.scheme();
+    let scheme = code.scheme();
     if data.is_empty() {
         return Err(StripeError::Empty);
     }
@@ -114,7 +114,7 @@ pub fn encode_stripe(
             max,
         });
     }
-    let block_len = block_length_for(coder, data.len());
+    let block_len = block_length_for(code, data.len());
 
     let mut blocks: Vec<Vec<u8>> = Vec::with_capacity(scheme.total_shards());
     for i in 0..scheme.data_shards() {
@@ -127,7 +127,7 @@ pub fn encode_stripe(
         block.resize(block_len, 0);
         blocks.push(block);
     }
-    let parity = coder.compute_parity(&blocks)?;
+    let parity = code.compute_parity(&blocks)?;
     blocks.extend(parity);
 
     let mut checksums = Vec::with_capacity(blocks.len());
@@ -151,15 +151,15 @@ pub fn encode_stripe(
 /// erasure. If at least k blocks are usable the data is returned along
 /// with the list of erasures; otherwise the error carries that list.
 pub fn decode_stripe(
-    coder: &Coder,
+    code: &ReedSolomonCode,
     received: &[ReceivedBlock],
     data_len: usize,
 ) -> Result<DecodedStripe, StripeError> {
-    let scheme = coder.scheme();
+    let scheme = code.scheme();
     if data_len == 0 {
         return Err(StripeError::Empty);
     }
-    let block_len = block_length_for(coder, data_len);
+    let block_len = block_length_for(code, data_len);
 
     // Index the received blocks by shard index, rejecting protocol errors.
     let mut by_index: Vec<Option<&ReceivedBlock>> = vec![None; scheme.total_shards()];
@@ -216,7 +216,7 @@ pub fn decode_stripe(
         });
     }
 
-    let data_blocks = coder.reconstruct(&usable, &scheme.data_shard_indices())?;
+    let data_blocks = code.reconstruct(&usable, &scheme.data_shard_indices())?;
 
     let mut data = Vec::with_capacity(data_len);
     for block in &data_blocks {

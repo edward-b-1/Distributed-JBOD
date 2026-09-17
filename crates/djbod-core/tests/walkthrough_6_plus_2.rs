@@ -4,14 +4,14 @@
 //! erasure is then repaired, using the layers one call at a time.
 
 use djbod_core::checksum::{block_matches_checksum, checksum_block, BlockChecksum};
-use djbod_core::erasure::{Coder, Scheme, ShardIndex};
+use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::stripe::{decode_stripe, encode_stripe, FaultKind, ReceivedBlock};
 
 #[test]
 fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
     // Step 1. The scheme: 6 data shards, 2 parity shards, 8 shards total.
     let scheme = Scheme::new(6, 2).expect("failed to construct scheme");
-    let coder = Coder::new(scheme);
+    let code = ReedSolomonCode::new(scheme);
     assert_eq!(scheme.total_shards(), 8);
 
     // Step 2. Six data blocks of 8 bytes each. In the real system these are
@@ -28,7 +28,7 @@ fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
 
     // Step 3. Compute the two parity blocks. They are the same length as
     // the data blocks and are shards 6 and 7.
-    let parity_blocks = coder
+    let parity_blocks = code
         .compute_parity(&data_blocks)
         .expect("failed to compute parity");
     assert_eq!(parity_blocks.len(), 2);
@@ -76,16 +76,16 @@ fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
     }
     assert_eq!(bad_shards, vec![ShardIndex(2)]);
 
-    // Step 8. Treat shard 2 as erased: hand the coder only the seven shards
+    // Step 8. Treat shard 2 as erased: hand the code only the seven shards
     // that passed, and ask for shard 2 back. Seven is more than the six
-    // needed, so the coder has a spare.
+    // needed, so the code has a spare.
     let mut present: Vec<(ShardIndex, &[u8])> = Vec::with_capacity(7);
     for i in 0..8 {
         if i != 2 {
             present.push((ShardIndex(i as u8), &shards[i]));
         }
     }
-    let recovered = coder
+    let recovered = code
         .reconstruct(&present, &[ShardIndex(2)])
         .expect("failed to reconstruct shard 2");
 
@@ -104,9 +104,9 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     // what it reports, and in particular the behaviour behind the open API
     // question: faults are judged against the whole scheme, so blocks the
     // caller never asked for are reported as Missing.
-    let coder = Coder::new(Scheme::new(6, 2).expect("failed to construct scheme"));
+    let code = ReedSolomonCode::new(Scheme::new(6, 2).expect("failed to construct scheme"));
     let object_bytes = b"block-0.block-1.block-2.block-3.block-4.block-5.";
-    let encoded = encode_stripe(&coder, object_bytes, 8).expect("failed to encode stripe");
+    let encoded = encode_stripe(&code, object_bytes, 8).expect("failed to encode stripe");
     assert_eq!(encoded.blocks[2], b"block-2.");
 
     // Case A: the read path fetches only the six data blocks (SPEC 11.3),
@@ -124,7 +124,7 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     // With only five usable blocks of the six needed, this cannot decode.
     // The error lists shard 2 as a checksum mismatch and shards 6 and 7 as
     // Missing, although the caller chose not to fetch 6 and 7.
-    let err = decode_stripe(&coder, &received, object_bytes.len())
+    let err = decode_stripe(&code, &received, object_bytes.len())
         .expect_err("five usable blocks cannot decode");
     let faults = match err {
         djbod_core::stripe::StripeError::Unrecoverable {
@@ -156,7 +156,7 @@ fn the_same_walkthrough_through_the_stripe_layer() {
         stored_checksum: encoded.checksums[6],
     });
     let decoded =
-        decode_stripe(&coder, &received, object_bytes.len()).expect("failed to decode stripe");
+        decode_stripe(&code, &received, object_bytes.len()).expect("failed to decode stripe");
     assert_eq!(decoded.data, object_bytes);
     assert_eq!(decoded.faults.len(), 2);
     assert_eq!(decoded.faults[0].index, ShardIndex(2));
