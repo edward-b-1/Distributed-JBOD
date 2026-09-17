@@ -49,22 +49,15 @@ fn xorshift64_bytes(len: usize, seed: u64) -> Vec<u8> {
     out
 }
 
-/// Construct a codec for scheme k+m, naming the scheme if the library
-/// refuses it.
-fn codec(k: usize, m: usize) -> ReedSolomon {
-    ReedSolomon::new(k, m).unwrap_or_else(|e| panic!("ReedSolomon::new({k}, {m}) failed: {e:?}"))
-}
-
 /// Build k data shards of `len` bytes each, plus m zeroed parity shards,
 /// and encode. Returns all k+m shards.
 fn encode(k: usize, m: usize, len: usize, seed: u64) -> Vec<Vec<u8>> {
-    let rs = codec(k, m);
+    let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
     let mut shards: Vec<Vec<u8>> = (0..k)
         .map(|i| xorshift64_bytes(len, seed ^ (i as u64 + 1)))
         .collect();
     shards.extend((0..m).map(|_| vec![0u8; len]));
-    rs.encode(&mut shards)
-        .unwrap_or_else(|e| panic!("scheme {k}+{m}, shard length {len}: encode failed: {e:?}"));
+    rs.encode(&mut shards).expect("failed to encode shards");
     shards
 }
 
@@ -102,9 +95,9 @@ fn encode_is_systematic_data_shards_unchanged() {
 #[test]
 fn verify_accepts_freshly_encoded_shards() {
     for &(k, m) in SCHEMES {
-        let rs = codec(k, m);
+        let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
         let shards = encode(k, m, 1024, 11);
-        let ok = rs.verify(&shards).unwrap_or_else(|e| panic!("scheme {k}+{m}: verify failed: {e:?}"));
+        let ok = rs.verify(&shards).expect("failed to verify shards");
         assert!(ok, "scheme {k}+{m}: verify rejected freshly encoded shards");
     }
 }
@@ -112,7 +105,7 @@ fn verify_accepts_freshly_encoded_shards() {
 #[test]
 fn every_erasure_pattern_up_to_m_reconstructs_exactly() {
     for &(k, m) in SCHEMES {
-        let rs = codec(k, m);
+        let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
         let len = 512;
         let original = encode(k, m, len, 23);
         let n = k + m;
@@ -141,7 +134,7 @@ fn reconstruct_data_only_recovers_data_shards() {
     // The read path (11.3) only needs data shards; reconstruct_data should
     // recover those without also rebuilding parity.
     let (k, m) = (4, 2);
-    let rs = codec(k, m);
+    let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
     let original = encode(k, m, 256, 31);
     let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
     damaged[1] = None;
@@ -156,7 +149,7 @@ fn reconstruct_data_only_recovers_data_shards() {
 #[test]
 fn more_than_m_erasures_is_refused_not_silently_wrong() {
     for &(k, m) in SCHEMES {
-        let rs = codec(k, m);
+        let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
         let original = encode(k, m, 128, 47);
         let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
         for i in 0..=m {
@@ -173,7 +166,7 @@ fn undetected_corruption_is_not_caught_by_reconstruct() {
     // corrupt shard that is still marked present is trusted, so the
     // reconstruction of a *different* missing shard comes out wrong.
     let (k, m) = (4, 2);
-    let rs = codec(k, m);
+    let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
     let original = encode(k, m, 256, 59);
 
     let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
@@ -213,17 +206,17 @@ fn encoding_is_bytewise_independent_so_stripes_can_stream() {
     // halves (8.2.4). This is what lets the coordinator encode one stripe
     // at a time with bounded memory (3.6).
     for &(k, m) in SCHEMES {
-        let rs = codec(k, m);
+        let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
         let len = 2048;
         let whole = encode(k, m, len, 71);
 
         let mut first: Vec<Vec<u8>> = whole[..k].iter().map(|s| s[..len / 2].to_vec()).collect();
         first.extend((0..m).map(|_| vec![0u8; len / 2]));
-        rs.encode(&mut first).unwrap_or_else(|e| panic!("scheme {k}+{m}: encode of first half failed: {e:?}"));
+        rs.encode(&mut first).expect("failed to encode first half");
 
         let mut second: Vec<Vec<u8>> = whole[..k].iter().map(|s| s[len / 2..].to_vec()).collect();
         second.extend((0..m).map(|_| vec![0u8; len / 2]));
-        rs.encode(&mut second).unwrap_or_else(|e| panic!("scheme {k}+{m}: encode of second half failed: {e:?}"));
+        rs.encode(&mut second).expect("failed to encode second half");
 
         for j in 0..m {
             let mut joined = first[k + j].clone();
@@ -237,12 +230,11 @@ fn encoding_is_bytewise_independent_so_stripes_can_stream() {
 fn odd_and_tiny_shard_lengths_work() {
     for &len in &[1usize, 7, 63, 4095] {
         for &(k, m) in SCHEMES {
-            let rs = codec(k, m);
+            let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
             let original = encode(k, m, len, len as u64);
             let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
             damaged[0] = None;
-            rs.reconstruct(&mut damaged)
-                .unwrap_or_else(|e| panic!("scheme {k}+{m}, len {len}: reconstruct failed: {e:?}"));
+            rs.reconstruct(&mut damaged).expect("failed to reconstruct shards");
             assert_eq!(damaged[0].as_ref().unwrap(), &original[0], "scheme {k}+{m}, len {len}");
         }
     }
@@ -323,7 +315,7 @@ fn shard_count_limit_is_256() {
 
 #[test]
 fn unequal_shard_lengths_are_rejected() {
-    let rs = codec(3, 1);
+    let rs = ReedSolomon::new(3, 1).expect("failed to initialize ReedSolomon");
     let mut shards = vec![vec![0u8; 16], vec![0u8; 16], vec![0u8; 15], vec![0u8; 16]];
     assert_eq!(rs.encode(&mut shards), Err(Error::IncorrectShardSize));
 }
@@ -337,7 +329,7 @@ fn throughput_at_one_mebibyte_blocks() {
     use std::time::Instant;
     let len = 1 << 20;
     for &(k, m) in &[(3usize, 1usize), (4, 2), (10, 4)] {
-        let rs = codec(k, m);
+        let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
         let mut shards: Vec<Vec<u8>> = (0..k).map(|i| xorshift64_bytes(len, i as u64)).collect();
         shards.extend((0..m).map(|_| vec![0u8; len]));
         let rounds = 20;
