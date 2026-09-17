@@ -6,6 +6,8 @@
 //! into an erasure for the decoder (8.3.4). The parity shards are never
 //! used to detect corruption (8.3.5).
 
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use xxhash_rust::xxh3::xxh3_64;
 
 /// The checksum of one shard block.
@@ -15,6 +17,34 @@ pub struct BlockChecksum(pub u64);
 impl std::fmt::Debug for BlockChecksum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "BlockChecksum({:016x})", self.0)
+    }
+}
+
+impl BlockChecksum {
+    /// The 16 lowercase hex characters used in JSON.
+    pub fn to_hex(&self) -> String {
+        format!("{:016x}", self.0)
+    }
+
+    pub fn from_hex(hex: &str) -> Option<BlockChecksum> {
+        if hex.len() != 16 {
+            return None;
+        }
+        u64::from_str_radix(hex, 16).ok().map(BlockChecksum)
+    }
+}
+
+impl Serialize for BlockChecksum {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockChecksum {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<BlockChecksum, D::Error> {
+        let hex = String::deserialize(deserializer)?;
+        BlockChecksum::from_hex(&hex)
+            .ok_or_else(|| D::Error::custom(format!("not a 16-character hex checksum: {hex:?}")))
     }
 }
 
@@ -54,6 +84,15 @@ mod tests {
         assert!(!block_matches_checksum(&block, original));
         block[123_456] ^= 0x01;
         assert!(block_matches_checksum(&block, original));
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let checksum = BlockChecksum(0x0123_4567_89ab_cdef);
+        assert_eq!(checksum.to_hex(), "0123456789abcdef");
+        assert_eq!(BlockChecksum::from_hex("0123456789abcdef"), Some(checksum));
+        assert_eq!(BlockChecksum::from_hex("0123"), None);
+        assert_eq!(BlockChecksum::from_hex("0123456789abcdeg"), None);
     }
 
     #[test]

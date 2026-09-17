@@ -10,6 +10,10 @@ reed-solomon-erasure = { workspace = true }
 xxhash-rust = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

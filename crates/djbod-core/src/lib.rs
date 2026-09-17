@@ -17,10 +17,16 @@
 //! - [`version`]: the 16-byte version identifier of one body (SPEC 9.2).
 //! - [`shardfile`]: the on-disk file holding one shard of one version, with
 //!   its header, blocks, footer, and trailer (SPEC 9.3).
+//! - [`record`]: the metadata record describing one version, stored as
+//!   JSON on every device that holds a shard of it (SPEC 9.4).
+//! - [`layout`]: the directory and file names under a device root
+//!   (SPEC 9.1).
 
 pub mod checksum;
 pub mod erasure;
 pub mod keyhash;
+pub mod layout;
+pub mod record;
 pub mod shardfile;
 pub mod stripe;
 pub mod version;

@@ -587,11 +587,23 @@ size                integer, true object length in bytes
 object_checksum     XXH3-64 of the whole object, as 16 hex characters (8.3.6)
 k, m                integers, the global values when written (6.3)
 block_size          integer, B when written
-shards              array of { index, device_uuid, node_uuid }
+shards              array of { index, device }, exactly k+m entries, one per
+                    shard index, each device distinct
 content_type        string, optional
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer
 ```
+
+9.4.2.1 [P] The shard list names devices only, not nodes. A device's
+owning node is resolved through the cluster document at request time. A
+disk moved to another machine keeps its UUID (5.2) and every record that
+names it stays correct; a node UUID in the record would go stale.
+
+9.4.2.2 [D] A record is validated whenever it is read: system name and
+format version; the key hash must equal the hash of the key (9.1.6); the
+scheme must be valid and the block size a positive multiple of 4096; the
+shard list must contain every index `0 .. k+m-1` exactly once on distinct
+devices. A record failing any check is treated as corrupt (16.1).
 
 9.4.3 [D] The record is written after all shard files of the version are
 durable, using the same temporary-name, fsync, rename procedure, followed

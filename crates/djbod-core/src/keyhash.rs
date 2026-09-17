@@ -6,6 +6,8 @@
 //! any byte are different keys. The algorithm is fixed by on-disk format
 //! version 1.
 
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 /// The SHA-256 of a key.
@@ -36,6 +38,18 @@ impl KeyHash {
         out
     }
 
+    /// Parse the 64 hex characters produced by [`KeyHash::to_hex`].
+    pub fn from_hex(hex: &str) -> Option<KeyHash> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let mut bytes = [0u8; 32];
+        for i in 0..32 {
+            bytes[i] = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(KeyHash(bytes))
+    }
+
     /// The three path components under a bucket directory (9.1.3):
     /// the first two hex characters, the next two, and the full hash.
     pub fn directory_components(&self) -> [String; 3] {
@@ -44,9 +58,32 @@ impl KeyHash {
     }
 }
 
+/// In JSON a key hash is its 64 hex characters (9.1.2).
+impl Serialize for KeyHash {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyHash {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<KeyHash, D::Error> {
+        let hex = String::deserialize(deserializer)?;
+        KeyHash::from_hex(&hex)
+            .ok_or_else(|| D::Error::custom(format!("not a 64-character hex key hash: {hex:?}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_round_trips() {
+        let hash = hash_key(b"round trip");
+        assert_eq!(KeyHash::from_hex(&hash.to_hex()), Some(hash));
+        assert_eq!(KeyHash::from_hex("abc"), None);
+        assert_eq!(KeyHash::from_hex(&"zz".repeat(32)), None);
+    }
 
     #[test]
     fn matches_published_sha256_vectors() {
