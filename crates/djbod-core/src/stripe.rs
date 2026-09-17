@@ -14,19 +14,19 @@ use crate::checksum::{checksum_block, BlockChecksum};
 use crate::erasure::{CodingError, ReedSolomonCode, ShardIndex};
 use thiserror::Error;
 
-/// A stripe's blocks and their checksums, in shard index order.
+/// One block of one shard: which shard it belongs to, its bytes, and the
+/// checksum of those bytes. This is the unit the encoder produces, a
+/// device stores, and the decoder verifies. The same thing at three
+/// moments, so one type.
+///
+/// On disk the checksum is not written beside the bytes but in the shard
+/// file header's table (SPEC 8.3.3, 9.3). `ShardBlock` is the logical
+/// unit; the shard file is one layout of a sequence of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedStripe {
-    pub blocks: Vec<Vec<u8>>,
-    pub checksums: Vec<BlockChecksum>,
-    /// The number of object bytes in this stripe before padding.
-    pub data_len: usize,
-}
-
-impl EncodedStripe {
-    pub fn block_len(&self) -> usize {
-        self.blocks[0].len()
-    }
+pub struct ShardBlock {
+    pub index: ShardIndex,
+    pub bytes: Vec<u8>,
+    pub checksum: BlockChecksum,
 }
 
 /// Why a received block could not be used.
@@ -48,15 +48,6 @@ pub enum FaultKind {
 pub struct BlockFault {
     pub index: ShardIndex,
     pub kind: FaultKind,
-}
-
-/// A block as received from a holder, with the checksum that was stored
-/// alongside it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceivedBlock {
-    pub index: ShardIndex,
-    pub bytes: Vec<u8>,
-    pub stored_checksum: BlockChecksum,
 }
 
 /// The outcome of decoding a stripe. The three cases are distinct variants
@@ -105,13 +96,14 @@ pub fn block_length_for(code: &ReedSolomonCode, data_len: usize) -> usize {
     data_len.div_ceil(k)
 }
 
-/// Encode up to `k × block_size` object bytes into `k + m` checksummed
-/// blocks.
+/// Encode up to `k × block_size` object bytes into `k + m` shard blocks,
+/// returned in shard index order. Every block has the same length,
+/// `block_length_for(code, data.len())`.
 pub fn encode_stripe(
     code: &ReedSolomonCode,
     data: &[u8],
     block_size: usize,
-) -> Result<EncodedStripe, StripeError> {
+) -> Result<Vec<ShardBlock>, StripeError> {
     let scheme = code.scheme();
     if data.is_empty() {
         return Err(StripeError::Empty);
@@ -139,16 +131,16 @@ pub fn encode_stripe(
     let parity = code.compute_parity(&blocks)?;
     blocks.extend(parity);
 
-    let mut checksums = Vec::with_capacity(blocks.len());
-    for block in &blocks {
-        checksums.push(checksum_block(block));
+    let mut shard_blocks = Vec::with_capacity(blocks.len());
+    for (i, bytes) in blocks.into_iter().enumerate() {
+        let checksum = checksum_block(&bytes);
+        shard_blocks.push(ShardBlock {
+            index: ShardIndex(i as u8),
+            bytes,
+            checksum,
+        });
     }
-
-    Ok(EncodedStripe {
-        blocks,
-        checksums,
-        data_len: data.len(),
-    })
+    Ok(shard_blocks)
 }
 
 /// Recover the `data_len` object bytes of a stripe from the blocks that
@@ -169,7 +161,7 @@ pub fn encode_stripe(
 pub fn decode_stripe(
     code: &ReedSolomonCode,
     requested: &[ShardIndex],
-    received: &[ReceivedBlock],
+    received: &[ShardBlock],
     data_len: usize,
 ) -> Result<DecodedStripe, StripeError> {
     let scheme = code.scheme();
@@ -191,7 +183,7 @@ pub fn decode_stripe(
     }
 
     // Index the received blocks by shard index, rejecting protocol errors.
-    let mut by_index: Vec<Option<&ReceivedBlock>> = vec![None; scheme.total_shards()];
+    let mut by_index: Vec<Option<&ShardBlock>> = vec![None; scheme.total_shards()];
     for block in received {
         if !scheme.contains(block.index) {
             return Err(CodingError::IndexOutOfRange(block.index).into());
@@ -230,11 +222,11 @@ pub fn decode_stripe(
             continue;
         }
         let computed = checksum_block(&block.bytes);
-        if computed != block.stored_checksum {
+        if computed != block.checksum {
             faults.push(BlockFault {
                 index,
                 kind: FaultKind::ChecksumMismatch {
-                    stored: block.stored_checksum,
+                    stored: block.checksum,
                     computed,
                 },
             });

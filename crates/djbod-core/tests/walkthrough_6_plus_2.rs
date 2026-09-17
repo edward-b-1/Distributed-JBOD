@@ -5,7 +5,7 @@
 
 use djbod_core::checksum::{block_matches_checksum, checksum_block, BlockChecksum};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
-use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ReceivedBlock};
+use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ShardBlock};
 
 #[test]
 fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
@@ -106,17 +106,13 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     let code = ReedSolomonCode::new(Scheme::new(6, 2).expect("failed to construct scheme"));
     let object_bytes = b"block-0.block-1.block-2.block-3.block-4.block-5.";
     let encoded = encode_stripe(&code, object_bytes, 8).expect("failed to encode stripe");
-    assert_eq!(encoded.blocks[2], b"block-2.");
+    assert_eq!(encoded[2].bytes, b"block-2.");
 
     // Case A: the read path fetches only the six data blocks (SPEC 11.3),
     // and one of them is corrupt.
-    let mut received: Vec<ReceivedBlock> = Vec::with_capacity(6);
+    let mut received: Vec<ShardBlock> = Vec::with_capacity(6);
     for i in 0..6 {
-        received.push(ReceivedBlock {
-            index: ShardIndex(i as u8),
-            bytes: encoded.blocks[i].clone(),
-            stored_checksum: encoded.checksums[i],
-        });
+        received.push(encoded[i].clone());
     }
     received[2].bytes[5] ^= 0b0000_0100;
 
@@ -149,11 +145,7 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     // A fail-stop caller matches on Intact alone and never sees this data.
     let mut requested = data_indices.clone();
     requested.push(ShardIndex(6));
-    received.push(ReceivedBlock {
-        index: ShardIndex(6),
-        bytes: encoded.blocks[6].clone(),
-        stored_checksum: encoded.checksums[6],
-    });
+    received.push(encoded[6].clone());
     let result = decode_stripe(&code, &requested, &received, object_bytes.len())
         .expect("failed to decode stripe");
     match result {
