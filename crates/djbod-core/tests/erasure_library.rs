@@ -35,18 +35,18 @@ const SCHEMES: &[(usize, usize)] = &[
     (10, 4),
 ];
 
-/// Deterministic pseudo-random bytes (xorshift64*), so tests need no
-/// external dependency and failures reproduce.
-fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
+/// Deterministic pseudo-random bytes from an xorshift64* generator, so
+/// tests need no external dependency and failures reproduce.
+fn xorshift64_bytes(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..len)
-        .map(|_| {
-            x ^= x >> 12;
-            x ^= x << 25;
-            x ^= x >> 27;
-            (x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8
-        })
-        .collect()
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        out.push((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8);
+    }
+    out
 }
 
 /// Build k data shards of `len` bytes each, plus m zeroed parity shards,
@@ -54,7 +54,7 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
 fn encode(k: usize, m: usize, len: usize, seed: u64) -> Vec<Vec<u8>> {
     let rs = ReedSolomon::new(k, m).expect("valid scheme");
     let mut shards: Vec<Vec<u8>> = (0..k)
-        .map(|i| pseudo_random(len, seed ^ (i as u64 + 1)))
+        .map(|i| xorshift64_bytes(len, seed ^ (i as u64 + 1)))
         .collect();
     shards.extend((0..m).map(|_| vec![0u8; len]));
     rs.encode(&mut shards).expect("encode");
@@ -83,7 +83,7 @@ fn combinations(n: usize, size: usize) -> Vec<Vec<usize>> {
 fn encode_is_systematic_data_shards_unchanged() {
     for &(k, m) in SCHEMES {
         let len = 4096;
-        let originals: Vec<Vec<u8>> = (0..k).map(|i| pseudo_random(len, 7 ^ (i as u64 + 1))).collect();
+        let originals: Vec<Vec<u8>> = (0..k).map(|i| xorshift64_bytes(len, 7 ^ (i as u64 + 1))).collect();
         let shards = encode(k, m, len, 7);
         for i in 0..k {
             assert_eq!(shards[i], originals[i], "scheme {k}+{m}: data shard {i} was modified by encode");
@@ -329,7 +329,7 @@ fn throughput_at_one_mebibyte_blocks() {
     let len = 1 << 20;
     for &(k, m) in &[(3usize, 1usize), (4, 2), (10, 4)] {
         let rs = ReedSolomon::new(k, m).unwrap();
-        let mut shards: Vec<Vec<u8>> = (0..k).map(|i| pseudo_random(len, i as u64)).collect();
+        let mut shards: Vec<Vec<u8>> = (0..k).map(|i| xorshift64_bytes(len, i as u64)).collect();
         shards.extend((0..m).map(|_| vec![0u8; len]));
         let rounds = 20;
 
