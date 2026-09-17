@@ -5,9 +5,7 @@
 
 use djbod_core::checksum::{block_matches_checksum, checksum_block, BlockChecksum};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
-use djbod_core::stripe::{
-    decode_stripe, encode_stripe, FaultKind, ReceivedBlock, StripeDecodeResult,
-};
+use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ReceivedBlock};
 
 #[test]
 fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
@@ -130,7 +128,7 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     let result = decode_stripe(&code, &data_indices, &received, object_bytes.len())
         .expect("failed to decode stripe");
     let faults = match result {
-        StripeDecodeResult::Unrecoverable {
+        DecodedStripe::Unrecoverable {
             usable,
             needed,
             faults,
@@ -159,7 +157,7 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     let result = decode_stripe(&code, &requested, &received, object_bytes.len())
         .expect("failed to decode stripe");
     match result {
-        StripeDecodeResult::Repaired { data, faults } => {
+        DecodedStripe::Repaired { data, faults } => {
             assert_eq!(data, object_bytes);
             assert_eq!(faults.len(), 1);
             assert_eq!(faults[0].index, ShardIndex(2));

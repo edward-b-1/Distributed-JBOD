@@ -65,7 +65,7 @@ pub struct ReceivedBlock {
 /// job (SPEC 18.4) wants `Repaired`, which carries both the correct data
 /// and the list of shards to rewrite.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StripeDecodeResult {
+pub enum DecodedStripe {
     /// Every requested block arrived with the right length and a matching
     /// checksum. Nothing was reconstructed.
     Intact { data: Vec<u8> },
@@ -165,13 +165,13 @@ pub fn encode_stripe(
 /// The `Err` cases are misuse: an empty stripe, or indices that are out
 /// of range, duplicated, or not requested. Every outcome of examining the
 /// blocks themselves, including failure to recover, is a variant of
-/// [`StripeDecodeResult`].
+/// [`DecodedStripe`].
 pub fn decode_stripe(
     code: &ReedSolomonCode,
     requested: &[ShardIndex],
     received: &[ReceivedBlock],
     data_len: usize,
-) -> Result<StripeDecodeResult, StripeError> {
+) -> Result<DecodedStripe, StripeError> {
     let scheme = code.scheme();
     if data_len == 0 {
         return Err(StripeError::Empty);
@@ -244,7 +244,7 @@ pub fn decode_stripe(
     }
 
     if usable.len() < scheme.data_shards() {
-        return Ok(StripeDecodeResult::Unrecoverable {
+        return Ok(DecodedStripe::Unrecoverable {
             usable: usable.len(),
             needed: scheme.data_shards(),
             faults,
@@ -260,8 +260,8 @@ pub fn decode_stripe(
     data.truncate(data_len);
 
     if faults.is_empty() {
-        Ok(StripeDecodeResult::Intact { data })
+        Ok(DecodedStripe::Intact { data })
     } else {
-        Ok(StripeDecodeResult::Repaired { data, faults })
+        Ok(DecodedStripe::Repaired { data, faults })
     }
 }
