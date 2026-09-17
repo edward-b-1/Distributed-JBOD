@@ -97,6 +97,20 @@ pub struct ShardGeometry {
     pub last_block_length: u64,
 }
 
+/// The exact length of a finished shard file for an object of
+/// `object_size` bytes: header, blocks, footer, and trailer.
+pub fn shard_file_length(scheme: Scheme, block_length: u64, object_size: u64) -> Option<u64> {
+    let geometry = shard_geometry(scheme, block_length, object_size)?;
+    Some(
+        HEADER_LEN
+            + (geometry.block_count - 1) * block_length
+            + geometry.last_block_length
+            + FOOTER_FIXED_LEN
+            + 8 * geometry.block_count
+            + TRAILER_LEN,
+    )
+}
+
 pub fn shard_geometry(
     scheme: Scheme,
     block_length: u64,
@@ -352,10 +366,30 @@ impl ShardFileWriter {
     /// Create the file at `path` and write the header page. The path
     /// should be a temporary name; the caller renames on success (9.3.3).
     pub fn create(path: &Path, header: ShardFileHeader) -> Result<ShardFileWriter, ShardFileError> {
+        Self::create_with_reservation(path, header, None)
+    }
+
+    /// As [`create`](Self::create), but first reserve `reserve_length`
+    /// bytes with `fallocate(2)`, mode 0 (SPEC 10.6). Nothing is written
+    /// by the reservation; `ENOSPC` here means the device has no room and
+    /// the caller should choose another. The file is removed on failure.
+    pub fn create_with_reservation(
+        path: &Path,
+        header: ShardFileHeader,
+        reserve_length: Option<u64>,
+    ) -> Result<ShardFileWriter, ShardFileError> {
         if !header.scheme.contains(header.shard_index) {
             return Err(ShardFileError::ShardIndexOutOfRange(header.shard_index));
         }
         let mut file = File::create(path)?;
+        if let Some(length) = reserve_length {
+            let reserved =
+                rustix::fs::fallocate(&file, rustix::fs::FallocateFlags::empty(), 0, length);
+            if let Err(errno) = reserved {
+                let _ = std::fs::remove_file(path);
+                return Err(ShardFileError::Io(io::Error::from(errno)));
+            }
+        }
         file.write_all(&header.encode())?;
         Ok(ShardFileWriter {
             file,
