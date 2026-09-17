@@ -11,6 +11,8 @@ license = "MIT"
 reed-solomon-erasure = "6.0"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 thiserror = "2"
+sha2 = "0.10"
+tempfile = "3"
 
 # Project style: an explicit index loop is preferred over an iterator chain
 # when the index itself is meaningful (a shard index, a position in a

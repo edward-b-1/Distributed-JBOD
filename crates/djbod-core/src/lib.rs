@@ -12,6 +12,15 @@
 //!   and decodes received blocks by verifying every checksum, treating each
 //!   mismatch or absence as an erasure, and reconstructing (SPEC 8.2, 8.3.4).
 
+//! - [`keyhash`]: the SHA-256 key hash that names an object's directory
+//!   (SPEC 9.1).
+//! - [`version`]: the 16-byte version identifier of one body (SPEC 9.2).
+//! - [`shardfile`]: the on-disk file holding one shard of one version, with
+//!   its header, blocks, footer, and trailer (SPEC 9.3).
+
 pub mod checksum;
 pub mod erasure;
+pub mod keyhash;
+pub mod shardfile;
 pub mod stripe;
+pub mod version;
