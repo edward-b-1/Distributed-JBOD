@@ -5,8 +5,8 @@
 //! client's job. Three layers:
 //!
 //! - [`frame`]: the 12-byte header and the raw frame.
-//! - [`handshake`]: the first exchange on every connection, proving both
-//!   sides know the cluster secret without sending it (19.1.5).
+//! - [`handshake`]: the `Hello` each side sends first, so that a peer on
+//!   the wrong cluster or the wrong version is refused (19.1.5).
 //! - [`message`]: every request, response, data frame, and end-of-stream
 //!   marker for the operations of 19.1.3, and the [`message::Message`]
 //!   enum that ties them to frames.

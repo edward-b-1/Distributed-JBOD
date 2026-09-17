@@ -14,9 +14,7 @@ use djbod_core::version::VersionId;
 use djbod_proto::frame::{
     Frame, FrameError, FrameHeader, MessageType, HEADER_LEN, MAX_PAYLOAD_LEN,
 };
-use djbod_proto::handshake::{
-    compute_proof, verify_proof, Hello, HelloProof, PeerKind, Role, PROTOCOL_VERSION,
-};
+use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
     DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
     MessageError, Request, Response, StreamEnd, DATA_PREFIX_LEN,
@@ -109,7 +107,7 @@ fn frame_header_is_twelve_little_endian_bytes() {
     };
     let bytes = header.encode();
     assert_eq!(bytes.len(), HEADER_LEN);
-    assert_eq!(&bytes[0..2], &[5, 0]);
+    assert_eq!(&bytes[0..2], &[4, 0]);
     assert_eq!(&bytes[2..4], &[0, 0]);
     assert_eq!(&bytes[4..8], &[1, 2, 3, 4]);
     assert_eq!(&bytes[8..12], &[0, 0x10, 0, 0]);
@@ -209,116 +207,15 @@ fn data_frame_costs_exactly_sixteen_bytes_over_the_block() {
 }
 
 #[test]
-fn handshake_proofs_verify_only_with_the_right_secret_nonces_role_and_cluster() {
-    let secret = b"correct horse battery staple";
-    let initiator_nonce = [1u8; 32];
-    let responder_nonce = [2u8; 32];
-    let cluster = Uuid::from_u128(0xC1);
-
-    let proof = compute_proof(
-        secret,
-        Role::Initiator,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-    );
-    assert!(verify_proof(
-        secret,
-        Role::Initiator,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-        &proof
-    ));
-
-    assert!(!verify_proof(
-        b"wrong secret",
-        Role::Initiator,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-        &proof
-    ));
-    assert!(!verify_proof(
-        secret,
-        Role::Responder,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-        &proof
-    ));
-    assert!(!verify_proof(
-        secret,
-        Role::Initiator,
-        &[9u8; 32],
-        &responder_nonce,
-        cluster,
-        &proof
-    ));
-    assert!(!verify_proof(
-        secret,
-        Role::Initiator,
-        &initiator_nonce,
-        &[9u8; 32],
-        cluster,
-        &proof
-    ));
-    assert!(!verify_proof(
-        secret,
-        Role::Initiator,
-        &initiator_nonce,
-        &responder_nonce,
-        Uuid::from_u128(0xC2),
-        &proof
-    ));
-
-    let mut tampered = proof;
-    tampered[0] ^= 1;
-    assert!(!verify_proof(
-        secret,
-        Role::Initiator,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-        &tampered
-    ));
-
-    // The two roles produce different proofs, so one cannot be reflected.
-    let responder_proof = compute_proof(
-        secret,
-        Role::Responder,
-        &initiator_nonce,
-        &responder_nonce,
-        cluster,
-    );
-    assert_ne!(proof, responder_proof);
-}
-
-#[test]
-fn handshake_messages_round_trip_as_byte_strings() {
+fn hello_round_trips_for_nodes_and_clients() {
     let hello = Hello {
         protocol_version: PROTOCOL_VERSION,
         kind: PeerKind::Node,
         node_id: Some(node(1)),
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 7,
-        nonce: [0x5Au8; 32],
     };
-    let wire = round_trip(Message::Hello(hello.clone()));
-    // The 32-byte nonce is a CBOR byte string (major type 2, one-byte
-    // length 0x58 0x20) followed by the raw bytes: 34 bytes on the wire,
-    // not 64 hex characters or a 32-element array.
-    let bytes = Message::Hello(hello.clone()).encode().expect("encode");
-    let mut expected = vec![0x58u8, 0x20];
-    expected.extend_from_slice(&[0x5Au8; 32]);
-    assert!(
-        bytes
-            .windows(expected.len())
-            .any(|w| w == expected.as_slice()),
-        "nonce not encoded as a byte string"
-    );
-    assert!(wire < HEADER_LEN + 256, "hello is {wire} bytes");
-
+    round_trip(Message::Hello(hello.clone()));
     let client = Hello {
         kind: PeerKind::Client,
         node_id: None,
@@ -326,7 +223,78 @@ fn handshake_messages_round_trip_as_byte_strings() {
         ..hello
     };
     round_trip(Message::Hello(client));
-    round_trip(Message::HelloProof(HelloProof { proof: [7u8; 32] }));
+}
+
+#[test]
+fn hello_checks_catch_wrong_cluster_wrong_version_and_stale_nodes() {
+    let ours = Uuid::from_u128(0xC1);
+    let good = Hello {
+        protocol_version: PROTOCOL_VERSION,
+        kind: PeerKind::Node,
+        node_id: Some(node(1)),
+        cluster_id: ours,
+        document_version: 7,
+    };
+    assert_eq!(good.check_against(ours, 7), Ok(()));
+
+    let wrong_cluster = Hello {
+        cluster_id: Uuid::from_u128(0xC2),
+        ..good.clone()
+    };
+    assert_eq!(
+        wrong_cluster.check_against(ours, 7),
+        Err(HelloError::ClusterId {
+            peer: Uuid::from_u128(0xC2),
+            ours
+        })
+    );
+
+    let old_protocol = Hello {
+        protocol_version: 0,
+        ..good.clone()
+    };
+    assert_eq!(
+        old_protocol.check_against(ours, 7),
+        Err(HelloError::ProtocolVersion {
+            peer: 0,
+            ours: PROTOCOL_VERSION
+        })
+    );
+
+    let stale_node = Hello {
+        document_version: 6,
+        ..good.clone()
+    };
+    assert_eq!(
+        stale_node.check_against(ours, 7),
+        Err(HelloError::DocumentVersion { peer: 6, ours: 7 })
+    );
+
+    let anonymous_node = Hello {
+        node_id: None,
+        ..good.clone()
+    };
+    assert_eq!(
+        anonymous_node.check_against(ours, 7),
+        Err(HelloError::NodeIdMissing)
+    );
+
+    // Clients are not held to the document version and need no node id.
+    let client = Hello {
+        kind: PeerKind::Client,
+        node_id: None,
+        document_version: 0,
+        ..good
+    };
+    assert_eq!(client.check_against(ours, 7), Ok(()));
+    let lost_client = Hello {
+        cluster_id: Uuid::from_u128(0xC2),
+        ..client
+    };
+    assert!(matches!(
+        lost_client.check_against(ours, 7),
+        Err(HelloError::ClusterId { .. })
+    ));
 }
 
 #[test]
@@ -551,7 +519,13 @@ fn request_ids_are_carried_and_handshake_frames_have_none() {
     assert_eq!(request.request_id(), Some(77));
     let bytes = request.encode().expect("encode");
     assert_eq!(&bytes[4..8], &77u32.to_le_bytes());
-    let hello = Message::HelloProof(HelloProof { proof: [0u8; 32] });
+    let hello = Message::Hello(Hello {
+        protocol_version: PROTOCOL_VERSION,
+        kind: PeerKind::Client,
+        node_id: None,
+        cluster_id: Uuid::from_u128(0xC1),
+        document_version: 0,
+    });
     assert_eq!(hello.request_id(), None);
 }
 

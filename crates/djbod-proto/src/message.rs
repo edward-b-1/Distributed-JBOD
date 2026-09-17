@@ -1,8 +1,7 @@
 //! Every message of the native protocol (SPEC 19.1.3), and how each maps
 //! onto a frame.
 //!
-//! A conversation is: one `Hello` each way, one `HelloProof` each way for
-//! node peers, then any number of requests. A request is one `Request`
+//! A conversation is: one `Hello` each way, then any number of requests. A request is one `Request`
 //! frame. Its answer is one `Response` frame. Streaming operations add
 //! `Data` frames, each carrying a sequence number, a checksum, and raw
 //! bytes, and end with an `EndOfStream` frame carrying a status. All
@@ -34,7 +33,7 @@ use djbod_core::version::VersionId;
 
 use crate::codec::{decode_cbor, encode_cbor, CodecError};
 use crate::frame::{Frame, FrameError, MessageType};
-use crate::handshake::{Hello, HelloProof};
+use crate::handshake::Hello;
 
 // ---------------------------------------------------------------- errors
 
@@ -364,7 +363,6 @@ impl StreamEnd {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     Hello(Hello),
-    HelloProof(HelloProof),
     Request { id: u32, request: Request },
     Response { id: u32, response: Response },
     Data { id: u32, data: DataFrame },
@@ -384,7 +382,7 @@ pub enum MessageError {
 impl Message {
     pub fn request_id(&self) -> Option<u32> {
         match self {
-            Message::Hello(_) | Message::HelloProof(_) => None,
+            Message::Hello(_) => None,
             Message::Request { id, .. }
             | Message::Response { id, .. }
             | Message::Data { id, .. }
@@ -395,9 +393,6 @@ impl Message {
     pub fn to_frame(&self) -> Result<Frame, MessageError> {
         let frame = match self {
             Message::Hello(hello) => Frame::new(MessageType::Hello, 0, encode_cbor(hello)?),
-            Message::HelloProof(proof) => {
-                Frame::new(MessageType::HelloProof, 0, encode_cbor(proof)?)
-            }
             Message::Request { id, request } => {
                 Frame::new(MessageType::Request, *id, encode_cbor(request)?)
             }
@@ -416,7 +411,6 @@ impl Message {
         let id = frame.header.request_id;
         let message = match frame.header.message_type {
             MessageType::Hello => Message::Hello(decode_cbor(&frame.payload)?),
-            MessageType::HelloProof => Message::HelloProof(decode_cbor(&frame.payload)?),
             MessageType::Request => Message::Request {
                 id,
                 request: decode_cbor(&frame.payload)?,

@@ -14,7 +14,7 @@ Every numbered item carries one of these markers:
 
 ### Changes since draft 2
 
-- Cluster secret included in v1 (6.1.2).
+- Cluster secret considered and dropped (6.1.2).
 - Buckets: the `default` bucket is a top-level directory under `objects/`
   and the key hash covers the key alone (9.1). Buckets stay independent on
   the filesystem and need no migration when more are added.
@@ -120,9 +120,11 @@ inline.
 
 3.11 [D] Fast listing. Listing is a cluster-wide scan.
 
-3.12 [D] Users, permissions, client access keys, and TLS. Some minimal form
-may be added later and must remain optional for LAN deployments (22). The
-cluster secret between nodes (6.1.2) is in v1.
+3.12 [D] Authentication and encryption. v1 assumes a LAN whose members
+are all trusted: nothing on the wire is authenticated or encrypted, and
+anyone who can reach a node's port can issue any request. Securing the
+network is one piece of later work, TLS (19.1.6), and must remain optional
+for LAN deployments.
 
 3.13 [D] S3 compatibility. Planned as a separate stream of work (19.2).
 
@@ -220,16 +222,19 @@ Configuration has three layers.
 
 ### 6.1 Per-node (local file)
 
-6.1.1 [D] Node UUID, listen addresses, the list of device paths, one or
-more bootstrap peer addresses, and the cluster secret.
+6.1.1 [D] Node UUID, listen addresses, the list of device paths, and one
+or more bootstrap peer addresses.
 
-6.1.2 [D] **Cluster secret.** A shared token, the same on every node, that
-a node must present when joining and on every node-to-node connection. Its
-purpose is to stop an unrelated machine on the same network from joining
-the cluster or impersonating a node. It is not encryption and does not
-protect data on the wire. Included in v1. The presentation mechanism is
-part of the connection handshake (19.1.2); a challenge-response so the
-secret never crosses the wire in clear is preferred over sending it.
+6.1.2 [D] **No cluster secret.** A shared secret with an HMAC
+challenge-response handshake was designed, implemented, and then removed
+before merging. The misconfigurations it was meant to catch, a node or
+client pointed at the wrong cluster, a stale node, are all caught by the
+cluster id and version fields of the plain `Hello` (19.1.5) without any
+secret. Against a deliberate actor on the LAN it was incomplete: an
+on-path attacker can relay the handshake and act afterwards, nothing bound
+later frames to it, and client connections were unauthenticated anyway.
+That is a lock without a wall. Authentication arrives with TLS (19.1.6),
+where it covers the whole connection.
 
 6.1.3 [X] Coordinator coding limit: the maximum number of concurrent
 server-side encode or assemble streams a node will accept, with zero
@@ -241,7 +246,7 @@ coding work.
 
 6.2.1 [D] The document carries a monotonically increasing version number
 and a cluster id. Every node holds a copy. A joining node fetches it from a
-bootstrap peer after presenting the cluster secret.
+bootstrap peer.
 
 6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
@@ -939,8 +944,7 @@ the storage unit.
 payload. Little-endian, like the shard file.
 
 ```
-0   2   message type    1 Hello, 2 HelloProof, 3 Request, 4 Response,
-                        5 Data, 6 EndOfStream
+0   2   message type    1 Hello, 2 Request, 3 Response, 4 Data, 5 EndOfStream
 2   2   flags           0 in protocol version 1; a non-zero value is rejected
 4   4   request id      correlates responses and stream frames with a request
 8   4   payload length  at most 64 MiB + 4096; a larger value is rejected
@@ -948,7 +952,7 @@ payload. Little-endian, like the shard file.
 12      payload
 ```
 
-Control payloads (Hello, HelloProof, Request, Response, EndOfStream) are
+Control payloads (Hello, Request, Response, EndOfStream) are
 CBOR, produced by serde, so the record and cluster document types are
 reused as they are. Data payloads are a 16-byte prefix, the sequence
 number and the XXH3-64 checksum of the bytes, followed by the raw bytes;
@@ -1083,22 +1087,24 @@ about devices, nodes, or the cluster document, except the three
 client-side coding operations, which expose device UUIDs and node
 addresses by design.
 
-19.1.5 [D] Every connection begins with a handshake. Each side sends a
-`Hello` carrying the protocol version, its peer kind (node or client), its
-node id if a node, the cluster id, its cluster document version, and a
-fresh 32-byte random nonce. A node peer then sends a `HelloProof`: an
-HMAC-SHA256, keyed by the cluster secret (6.1.2), over a fixed label, a
-role label (initiator or responder), both nonces, and the cluster id. Each
-node verifies the other's proof in constant time. The secret never crosses
-the wire, a captured proof is useless against a different nonce, and the
-role label stops a proof being reflected back at the side that produced
-it. A connection failing any check, or presenting a different cluster id
-or document version, is closed. Clients send `Hello` with kind `client`
-and no proof in v1 (19.1.6).
+19.1.5 [D] Every connection begins with each side sending one `Hello`
+carrying the protocol version, its peer kind (node or client), its node id
+if a node, the cluster id, and its cluster document version (0 for a
+client). A node closes the connection if the protocol version is
+unsupported, the cluster id differs, or a node peer's document version
+differs (6.2.7), with an error naming which. This catches a node or client
+pointed at the wrong cluster and a node running stale software or
+configuration. It authenticates nothing; see 6.1.2 and 19.1.6.
 
-19.1.6 [X] Client authentication (an access key) and TLS are deferred and
-must remain optional for LAN deployments. The `flags` field in the frame
-header is reserved so a later version can negotiate them in the handshake.
+19.1.6 [X] **TLS.** Deferred, but the intended design is fixed so nothing
+built now conflicts with it. Each node generates a self-signed certificate
+at initialisation; the cluster document lists each node's certificate
+fingerprint beside its id, so a node's identity is its key and trust flows
+from the document the administrator already controls, with no certificate
+authority. Node-to-node connections use mutual TLS; clients present a
+certificate or token issued by the administrator. TLS wraps the byte
+stream beneath the frames, so `djbod-proto` is unchanged. It must remain
+optional for trusted-LAN deployments. Until it exists, 3.12 applies.
 
 ### 19.2 S3 translation layer
 
@@ -1206,8 +1212,8 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
 - Administration web UI (20.3).
-- Users, permissions, client access keys, TLS. All optional for LAN
-  deployments (19.1.6).
+- TLS with per-node certificates listed in the cluster document, and
+  client authentication (19.1.6). Optional for trusted-LAN deployments.
 - S3 translation layer (19.2). Separate stream of work.
 - Packing shard files into large volume files to reduce inode and fsync
   cost. The logical layout in section 9 is designed to survive this change
@@ -1376,7 +1382,7 @@ core, and reconstructs one shard at about 6 GiB/s. Dependencies:
 `tokio` (async runtime and networking; decided, C.6), `reed-solomon-erasure` (classic
 GF(2^8) systematic Reed-Solomon, a port of the Go library MinIO uses) with
 `reed-solomon-simd` as the alternative if throughput demands it,
-`xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` (CBOR; decided, 19.1.2), `hmac` (handshake), `ulid`, `uuid`, `serde` and `serde_json` (metadata records),
+`xxhash-rust` (XXH3-64), `sha2` (SHA-256), `ciborium` (CBOR; decided, 19.1.2), `ulid`, `uuid`, `serde` and `serde_json` (metadata records),
 `rustix` or `nix` (`fallocate`, `statvfs`, `st_dev`), `clap`, `tracing`,
 `thiserror`.
 
@@ -1390,7 +1396,7 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    one machine, the native protocol, and a CLI. PUT, GET, DELETE, and LIST
    work end to end against a cluster of one node. Settles 21.5 (content
    length), 21.6 (reservation), and 21.9 (CBOR).
-3. **Cluster.** Cluster document, handshake with the cluster secret,
+3. **Cluster.** Cluster document, `Hello` checks between nodes,
    broadcast lookup, placement across nodes, fail-stop error propagation.
    Integration tests start several node processes on localhost with
    directories as devices, kill one, and check every error in 16.1 is

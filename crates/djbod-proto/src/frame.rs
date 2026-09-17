@@ -23,27 +23,24 @@ pub const MAX_PAYLOAD_LEN: u32 = 64 * 1024 * 1024 + 4096;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum MessageType {
-    /// Handshake, first message from each side.
+    /// First message from each side of a connection.
     Hello = 1,
-    /// Handshake, second message from each side.
-    HelloProof = 2,
-    Request = 3,
-    Response = 4,
+    Request = 2,
+    Response = 3,
     /// One chunk of a stream: 16-byte prefix and raw bytes.
-    Data = 5,
+    Data = 4,
     /// Terminates a stream, carrying its status.
-    EndOfStream = 6,
+    EndOfStream = 5,
 }
 
 impl MessageType {
     pub fn from_u16(value: u16) -> Option<MessageType> {
         match value {
             1 => Some(MessageType::Hello),
-            2 => Some(MessageType::HelloProof),
-            3 => Some(MessageType::Request),
-            4 => Some(MessageType::Response),
-            5 => Some(MessageType::Data),
-            6 => Some(MessageType::EndOfStream),
+            2 => Some(MessageType::Request),
+            3 => Some(MessageType::Response),
+            4 => Some(MessageType::Data),
+            5 => Some(MessageType::EndOfStream),
             _ => None,
         }
     }
