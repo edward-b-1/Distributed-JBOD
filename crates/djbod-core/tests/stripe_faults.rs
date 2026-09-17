@@ -6,8 +6,8 @@
 use djbod_core::checksum::checksum_block;
 use djbod_core::erasure::{CodingError, ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::stripe::{
-    block_length_for, decode_stripe, encode_stripe, BlockFault, EncodedStripe, FaultKind,
-    ReceivedBlock, StripeError,
+    block_length_for, decode_stripe, encode_stripe, BlockFault, DecodedStripe, EncodedStripe,
+    FaultKind, ReceivedBlock, StripeError,
 };
 
 const SCHEMES: &[(u8, u8)] = &[
@@ -109,15 +109,14 @@ fn short_final_stripe_is_padded_to_equal_blocks() {
     let last = &encoded.blocks[2];
     assert_eq!(&last[last.len() - padding..], &[0u8, 0u8]);
     // Round trip strips it.
-    let decoded = decode_stripe(
+    let result = decode_stripe(
         &code,
         &code.scheme().shard_indices(),
         &all_received(&encoded),
         data.len(),
     )
     .expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    assert!(decoded.faults.is_empty());
+    assert_eq!(result, DecodedStripe::Intact { data });
 }
 
 #[test]
@@ -131,14 +130,14 @@ fn stripes_shorter_than_k_bytes_still_encode() {
             if len <= 4 { 1 } else { 2 },
             "len {len}"
         );
-        let decoded = decode_stripe(
+        let result = decode_stripe(
             &code,
             &code.scheme().shard_indices(),
             &all_received(&encoded),
             len,
         )
         .expect("failed to decode stripe");
-        assert_eq!(decoded.data, data, "len {len}");
+        assert_eq!(result, DecodedStripe::Intact { data }, "len {len}");
     }
 }
 
@@ -171,19 +170,14 @@ fn intact_blocks_decode_with_no_faults_and_no_parity_needed() {
         // does (11.3). Nothing is reported: the parity was never asked for.
         let mut received = all_received(&encoded);
         received.truncate(k as usize);
-        let decoded = decode_stripe(
+        let result = decode_stripe(
             &code,
             &code.scheme().data_shard_indices(),
             &received,
             data.len(),
         )
         .expect("failed to decode stripe");
-        assert_eq!(decoded.data, data, "scheme {k}+{m}");
-        assert!(
-            decoded.faults.is_empty(),
-            "scheme {k}+{m}: {:?}",
-            decoded.faults
-        );
+        assert_eq!(result, DecodedStripe::Intact { data }, "scheme {k}+{m}");
     }
 }
 
@@ -198,12 +192,23 @@ fn a_flipped_bit_is_reported_as_a_checksum_mismatch_and_repaired() {
             let mut received = all_received(&encoded);
             received[victim].bytes[BLOCK_SIZE / 2] ^= 0x10;
 
-            let decoded =
+            let result =
                 decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
-                    .unwrap_or_else(|e| panic!("scheme {k}+{m}, corrupt shard {victim}: {e}"));
-            assert_eq!(decoded.data, data, "scheme {k}+{m}, corrupt shard {victim}");
-            assert_eq!(decoded.faults.len(), 1);
-            let fault = &decoded.faults[0];
+                    .expect("failed to decode stripe");
+            let faults = match result {
+                DecodedStripe::Repaired {
+                    data: recovered,
+                    faults,
+                } => {
+                    assert_eq!(recovered, data, "scheme {k}+{m}, corrupt shard {victim}");
+                    faults
+                }
+                other => panic!(
+                    "scheme {k}+{m}, corrupt shard {victim}: expected Repaired, got {other:?}"
+                ),
+            };
+            assert_eq!(faults.len(), 1);
+            let fault = &faults[0];
             assert_eq!(fault.index, ShardIndex(victim as u8));
             match &fault.kind {
                 FaultKind::ChecksumMismatch { stored, computed } => {
@@ -276,13 +281,24 @@ fn every_damage_pattern_up_to_m_is_repaired_and_reported_exactly() {
                     }
                 }
 
-                let decoded =
+                let result =
                     decode_stripe(&code, &code.scheme().shard_indices(), &kept, data.len())
-                        .unwrap_or_else(|e| panic!("scheme {k}+{m}, pattern {pattern:?}: {e}"));
-                assert_eq!(decoded.data, data, "scheme {k}+{m}, pattern {pattern:?}");
+                        .expect("failed to decode stripe");
+                let faults = match result {
+                    DecodedStripe::Repaired {
+                        data: recovered,
+                        faults,
+                    } => {
+                        assert_eq!(recovered, data, "scheme {k}+{m}, pattern {pattern:?}");
+                        faults
+                    }
+                    other => panic!(
+                        "scheme {k}+{m}, pattern {pattern:?}: expected Repaired, got {other:?}"
+                    ),
+                };
 
                 let mut reported: Vec<(ShardIndex, FaultKind)> = Vec::new();
-                for fault in decoded.faults {
+                for fault in faults {
                     reported.push((fault.index, fault.kind));
                 }
                 assert_eq!(
@@ -295,7 +311,7 @@ fn every_damage_pattern_up_to_m_is_repaired_and_reported_exactly() {
 }
 
 #[test]
-fn more_than_m_damaged_blocks_is_an_error_listing_every_fault() {
+fn more_than_m_damaged_blocks_is_unrecoverable_listing_every_fault() {
     for &(k, m) in SCHEMES {
         let code = reed_solomon_code_for(k, m);
         let data = xorshift64_bytes(k as usize * 128, 6);
@@ -306,10 +322,10 @@ fn more_than_m_damaged_blocks_is_an_error_listing_every_fault() {
         for i in 0..=m as usize {
             received[i].bytes[7] ^= 0x01;
         }
-        let err = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
-            .expect_err("decode should fail");
-        match err {
-            StripeError::Unrecoverable {
+        let result = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
+            .expect("failed to decode stripe");
+        match result {
+            DecodedStripe::Unrecoverable {
                 usable,
                 needed,
                 faults,
@@ -340,13 +356,22 @@ fn swapped_blocks_are_both_caught_by_their_checksums() {
     received[1].bytes = b;
     received[2].bytes = a;
 
-    let decoded = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
+    let result = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
         .expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    assert_eq!(decoded.faults.len(), 2);
-    assert_eq!(decoded.faults[0].index, ShardIndex(1));
-    assert_eq!(decoded.faults[1].index, ShardIndex(2));
-    for fault in &decoded.faults {
+    let faults = match result {
+        DecodedStripe::Repaired {
+            data: recovered,
+            faults,
+        } => {
+            assert_eq!(recovered, data);
+            faults
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    };
+    assert_eq!(faults.len(), 2);
+    assert_eq!(faults[0].index, ShardIndex(1));
+    assert_eq!(faults[1].index, ShardIndex(2));
+    for fault in &faults {
         assert!(matches!(fault.kind, FaultKind::ChecksumMismatch { .. }));
     }
 }
@@ -358,23 +383,22 @@ fn no_parity_scheme_round_trips_and_cannot_repair() {
     let encoded = encode_stripe(&code, &data, 1000).expect("failed to encode stripe");
     assert_eq!(encoded.blocks.len(), 3);
 
-    let decoded = decode_stripe(
+    let result = decode_stripe(
         &code,
         &code.scheme().shard_indices(),
         &all_received(&encoded),
         data.len(),
     )
     .expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    assert!(decoded.faults.is_empty());
+    assert_eq!(result, DecodedStripe::Intact { data: data.clone() });
 
     let mut received = all_received(&encoded);
     received[0].bytes[0] ^= 0x01;
-    let err = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
-        .expect_err("decode should fail");
+    let result = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
+        .expect("failed to decode stripe");
     assert!(matches!(
-        err,
-        StripeError::Unrecoverable {
+        result,
+        DecodedStripe::Unrecoverable {
             usable: 2,
             needed: 3,
             ..
@@ -394,11 +418,19 @@ fn a_wrong_stored_checksum_condemns_a_good_block() {
     received[0].stored_checksum =
         djbod_core::checksum::BlockChecksum(received[0].stored_checksum.0 ^ 1);
 
-    let decoded = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
+    let result = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
         .expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    assert_eq!(decoded.faults.len(), 1);
-    assert_eq!(decoded.faults[0].index, ShardIndex(0));
+    match result {
+        DecodedStripe::Repaired {
+            data: recovered,
+            faults,
+        } => {
+            assert_eq!(recovered, data);
+            assert_eq!(faults.len(), 1);
+            assert_eq!(faults[0].index, ShardIndex(0));
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    }
 }
 
 #[test]
@@ -445,10 +477,18 @@ fn fault_list_is_in_shard_index_order_regardless_of_arrival_order() {
     received.reverse();
     received.remove(1); // drops shard index 4
     received[0].bytes[0] ^= 0x01; // corrupts shard index 5
-    let decoded = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
+    let result = decode_stripe(&code, &code.scheme().shard_indices(), &received, data.len())
         .expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    let faults: Vec<BlockFault> = decoded.faults;
+    let faults: Vec<BlockFault> = match result {
+        DecodedStripe::Repaired {
+            data: recovered,
+            faults,
+        } => {
+            assert_eq!(recovered, data);
+            faults
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    };
     assert_eq!(faults[0].index, ShardIndex(4));
     assert_eq!(faults[0].kind, FaultKind::Missing);
     assert_eq!(faults[1].index, ShardIndex(5));
@@ -474,12 +514,20 @@ fn only_requested_indices_can_be_missing() {
     received.retain(|block| block.index != ShardIndex(2) && block.index != ShardIndex(5));
     assert_eq!(received.len(), 4);
 
-    let decoded =
+    let result =
         decode_stripe(&code, &requested, &received, data.len()).expect("failed to decode stripe");
-    assert_eq!(decoded.data, data);
-    assert_eq!(decoded.faults.len(), 1);
-    assert_eq!(decoded.faults[0].index, ShardIndex(2));
-    assert_eq!(decoded.faults[0].kind, FaultKind::Missing);
+    match result {
+        DecodedStripe::Repaired {
+            data: recovered,
+            faults,
+        } => {
+            assert_eq!(recovered, data);
+            assert_eq!(faults.len(), 1);
+            assert_eq!(faults[0].index, ShardIndex(2));
+            assert_eq!(faults[0].kind, FaultKind::Missing);
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    }
 }
 
 #[test]
@@ -537,14 +585,72 @@ fn requesting_fewer_than_k_blocks_cannot_decode_even_if_all_arrive() {
     let requested = [ShardIndex(0), ShardIndex(1)];
     let mut received = all_received(&encoded);
     received.truncate(2);
-    let err = decode_stripe(&code, &requested, &received, data.len())
-        .expect_err("two blocks cannot decode 3+1");
+    let result =
+        decode_stripe(&code, &requested, &received, data.len()).expect("failed to decode stripe");
     assert!(matches!(
-        err,
-        StripeError::Unrecoverable {
+        result,
+        DecodedStripe::Unrecoverable {
             usable: 2,
             needed: 3,
             ..
         }
     ));
+}
+
+#[test]
+fn the_three_outcomes_of_decoding() {
+    // One stripe, three decodes. This test exists to show the shape of the
+    // result: the data is only reachable by naming the case.
+    let code = reed_solomon_code_for(3, 1);
+    let data = xorshift64_bytes(3 * 32, 17);
+    let encoded = encode_stripe(&code, &data, 32).expect("failed to encode stripe");
+    let requested = code.scheme().shard_indices();
+
+    // Intact: every requested block arrived and verified.
+    let result = decode_stripe(&code, &requested, &all_received(&encoded), data.len())
+        .expect("failed to decode stripe");
+    assert_eq!(result, DecodedStripe::Intact { data: data.clone() });
+
+    // Repaired: one block corrupt, the parity covers it. The data is exact
+    // and the fault list says what to rewrite.
+    let mut one_bad = all_received(&encoded);
+    one_bad[1].bytes[3] ^= 0x80;
+    let result =
+        decode_stripe(&code, &requested, &one_bad, data.len()).expect("failed to decode stripe");
+    match &result {
+        DecodedStripe::Repaired {
+            data: recovered,
+            faults,
+        } => {
+            assert_eq!(*recovered, data);
+            assert_eq!(faults.len(), 1);
+            assert_eq!(faults[0].index, ShardIndex(1));
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    }
+
+    // Unrecoverable: two blocks corrupt, one parity. No data at all.
+    let mut two_bad = all_received(&encoded);
+    two_bad[1].bytes[3] ^= 0x80;
+    two_bad[2].bytes[3] ^= 0x80;
+    let result =
+        decode_stripe(&code, &requested, &two_bad, data.len()).expect("failed to decode stripe");
+    match &result {
+        DecodedStripe::Unrecoverable {
+            usable,
+            needed,
+            faults,
+        } => {
+            assert_eq!(*usable, 2);
+            assert_eq!(*needed, 3);
+            assert_eq!(faults.len(), 2);
+        }
+        other => panic!("expected Unrecoverable, got {other:?}"),
+    }
+
+    // Err is reserved for misuse, not for damaged data.
+    assert_eq!(
+        decode_stripe(&code, &requested, &[], 0),
+        Err(StripeError::Empty)
+    );
 }

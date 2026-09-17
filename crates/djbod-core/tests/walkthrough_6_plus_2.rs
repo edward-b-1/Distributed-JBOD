@@ -5,7 +5,7 @@
 
 use djbod_core::checksum::{block_matches_checksum, checksum_block, BlockChecksum};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
-use djbod_core::stripe::{decode_stripe, encode_stripe, FaultKind, ReceivedBlock};
+use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ReceivedBlock};
 
 #[test]
 fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
@@ -121,13 +121,14 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     received[2].bytes[5] ^= 0b0000_0100;
 
     // With only five usable blocks of the six needed, this cannot decode.
-    // The error lists shard 2 as a checksum mismatch and nothing else:
-    // shards 6 and 7 were not requested, so their absence is not a fault.
+    // The result is Unrecoverable and lists shard 2 as a checksum mismatch
+    // and nothing else: shards 6 and 7 were not requested, so their
+    // absence is not a fault.
     let data_indices = code.scheme().data_shard_indices();
-    let err = decode_stripe(&code, &data_indices, &received, object_bytes.len())
-        .expect_err("five usable blocks cannot decode");
-    let faults = match err {
-        djbod_core::stripe::StripeError::Unrecoverable {
+    let result = decode_stripe(&code, &data_indices, &received, object_bytes.len())
+        .expect("failed to decode stripe");
+    let faults = match result {
+        DecodedStripe::Unrecoverable {
             usable,
             needed,
             faults,
@@ -144,9 +145,8 @@ fn the_same_walkthrough_through_the_stripe_layer() {
 
     // Case B: the caller goes back for one parity block and says so in the
     // requested list. Now six blocks are usable and the data decodes
-    // exactly. The only fault reported is the corrupt shard 2. A fail-stop
-    // caller can treat any non-empty fault list as an error without
-    // filtering it.
+    // exactly, as Repaired. The only fault reported is the corrupt shard 2.
+    // A fail-stop caller matches on Intact alone and never sees this data.
     let mut requested = data_indices.clone();
     requested.push(ShardIndex(6));
     received.push(ReceivedBlock {
@@ -154,13 +154,15 @@ fn the_same_walkthrough_through_the_stripe_layer() {
         bytes: encoded.blocks[6].clone(),
         stored_checksum: encoded.checksums[6],
     });
-    let decoded = decode_stripe(&code, &requested, &received, object_bytes.len())
+    let result = decode_stripe(&code, &requested, &received, object_bytes.len())
         .expect("failed to decode stripe");
-    assert_eq!(decoded.data, object_bytes);
-    assert_eq!(decoded.faults.len(), 1);
-    assert_eq!(decoded.faults[0].index, ShardIndex(2));
-    assert!(matches!(
-        decoded.faults[0].kind,
-        FaultKind::ChecksumMismatch { .. }
-    ));
+    match result {
+        DecodedStripe::Repaired { data, faults } => {
+            assert_eq!(data, object_bytes);
+            assert_eq!(faults.len(), 1);
+            assert_eq!(faults[0].index, ShardIndex(2));
+            assert!(matches!(faults[0].kind, FaultKind::ChecksumMismatch { .. }));
+        }
+        other => panic!("expected Repaired, got {other:?}"),
+    }
 }

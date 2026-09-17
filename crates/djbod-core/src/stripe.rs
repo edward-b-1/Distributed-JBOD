@@ -59,13 +59,28 @@ pub struct ReceivedBlock {
     pub stored_checksum: BlockChecksum,
 }
 
-/// The object bytes of a decoded stripe, and every requested block that
-/// was missing or unusable. An empty `faults` means every requested block
-/// arrived intact.
+/// The outcome of decoding a stripe. The three cases are distinct variants
+/// so that a caller cannot reach the data without naming the case it is
+/// in. The fail-stop read path (SPEC 11.4) accepts only `Intact`; a repair
+/// job (SPEC 18.4) wants `Repaired`, which carries both the correct data
+/// and the list of shards to rewrite.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DecodedStripe {
-    pub data: Vec<u8>,
-    pub faults: Vec<BlockFault>,
+pub enum DecodedStripe {
+    /// Every requested block arrived with the right length and a matching
+    /// checksum. Nothing was reconstructed.
+    Intact { data: Vec<u8> },
+    /// The data was recovered exactly, but only by treating the listed
+    /// blocks as erased and reconstructing around them.
+    Repaired {
+        data: Vec<u8>,
+        faults: Vec<BlockFault>,
+    },
+    /// Fewer than k blocks were usable. No data. The faults say why.
+    Unrecoverable {
+        usable: usize,
+        needed: usize,
+        faults: Vec<BlockFault>,
+    },
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -80,14 +95,6 @@ pub enum StripeError {
     Coding(#[from] CodingError),
     #[error("{0} was received but not requested")]
     UnrequestedBlock(ShardIndex),
-    #[error(
-        "stripe cannot be decoded: {usable} usable blocks, {needed} needed; faults: {faults:?}"
-    )]
-    Unrecoverable {
-        usable: usize,
-        needed: usize,
-        faults: Vec<BlockFault>,
-    },
 }
 
 /// The length of every block in a stripe holding `data_len` object
@@ -155,8 +162,10 @@ pub fn encode_stripe(
 /// 11.3) and must not be told the parity is missing. A received block whose
 /// index was not requested is a protocol error.
 ///
-/// If at least k blocks are usable the data is returned along with the
-/// list of faults; otherwise the error carries that list.
+/// The `Err` cases are misuse: an empty stripe, or indices that are out
+/// of range, duplicated, or not requested. Every outcome of examining the
+/// blocks themselves, including failure to recover, is a variant of
+/// [`DecodedStripe`].
 pub fn decode_stripe(
     code: &ReedSolomonCode,
     requested: &[ShardIndex],
@@ -235,7 +244,7 @@ pub fn decode_stripe(
     }
 
     if usable.len() < scheme.data_shards() {
-        return Err(StripeError::Unrecoverable {
+        return Ok(DecodedStripe::Unrecoverable {
             usable: usable.len(),
             needed: scheme.data_shards(),
             faults,
@@ -250,5 +259,9 @@ pub fn decode_stripe(
     }
     data.truncate(data_len);
 
-    Ok(DecodedStripe { data, faults })
+    if faults.is_empty() {
+        Ok(DecodedStripe::Intact { data })
+    } else {
+        Ok(DecodedStripe::Repaired { data, faults })
+    }
 }
