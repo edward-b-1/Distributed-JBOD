@@ -92,7 +92,10 @@ fn encode_is_systematic_data_shards_unchanged() {
         }
         let shards = encode(k, m, len, 7);
         for i in 0..k {
-            assert_eq!(shards[i], originals[i], "scheme {k}+{m}: data shard {i} was modified by encode");
+            assert_eq!(
+                shards[i], originals[i],
+                "scheme {k}+{m}: data shard {i} was modified by encode"
+            );
         }
         assert_eq!(shards.len(), k + m);
     }
@@ -117,7 +120,8 @@ fn every_erasure_pattern_up_to_m_reconstructs_exactly() {
         let n = k + m;
         for lost in 1..=m {
             for pattern in combinations(n, lost) {
-                let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
+                let mut damaged: Vec<Option<Vec<u8>>> =
+                    original.iter().cloned().map(Some).collect();
                 for &i in &pattern {
                     damaged[i] = None;
                 }
@@ -149,7 +153,10 @@ fn reconstruct_data_only_recovers_data_shards() {
     for i in 0..k {
         assert_eq!(damaged[i].as_ref().unwrap(), &original[i]);
     }
-    assert!(damaged[5].is_none(), "reconstruct_data should not rebuild parity");
+    assert!(
+        damaged[5].is_none(),
+        "reconstruct_data should not rebuild parity"
+    );
 }
 
 #[test]
@@ -161,7 +168,11 @@ fn more_than_m_erasures_is_refused_not_silently_wrong() {
         for i in 0..=m {
             damaged[i] = None;
         }
-        assert_eq!(rs.reconstruct(&mut damaged), Err(Error::TooFewShardsPresent), "scheme {k}+{m}");
+        assert_eq!(
+            rs.reconstruct(&mut damaged),
+            Err(Error::TooFewShardsPresent),
+            "scheme {k}+{m}"
+        );
     }
 }
 
@@ -185,7 +196,10 @@ fn undetected_corruption_is_not_caught_by_reconstruct() {
         p[0][100] ^= 0x01;
         p
     };
-    assert!(!rs.verify(&present).unwrap(), "verify should detect the flipped bit");
+    assert!(
+        !rs.verify(&present).unwrap(),
+        "verify should detect the flipped bit"
+    );
 
     // But reconstruct trusts shard 0 and rebuilds shard 2 wrongly.
     rs.reconstruct(&mut damaged).unwrap();
@@ -227,12 +241,17 @@ fn encoding_is_bytewise_independent_so_stripes_can_stream() {
             second.push(vec![0u8; len / 2]);
         }
         rs.encode(&mut first).expect("failed to encode first half");
-        rs.encode(&mut second).expect("failed to encode second half");
+        rs.encode(&mut second)
+            .expect("failed to encode second half");
 
         for j in 0..m {
             let mut joined = first[k + j].clone();
             joined.extend_from_slice(&second[k + j]);
-            assert_eq!(joined, whole[k + j], "scheme {k}+{m}: parity {j} not bytewise independent");
+            assert_eq!(
+                joined,
+                whole[k + j],
+                "scheme {k}+{m}: parity {j} not bytewise independent"
+            );
         }
     }
 }
@@ -245,8 +264,13 @@ fn odd_and_tiny_shard_lengths_work() {
             let original = encode(k, m, len, len as u64);
             let mut damaged: Vec<Option<Vec<u8>>> = original.iter().cloned().map(Some).collect();
             damaged[0] = None;
-            rs.reconstruct(&mut damaged).expect("failed to reconstruct shards");
-            assert_eq!(damaged[0].as_ref().unwrap(), &original[0], "scheme {k}+{m}, len {len}");
+            rs.reconstruct(&mut damaged)
+                .expect("failed to reconstruct shards");
+            assert_eq!(
+                damaged[0].as_ref().unwrap(),
+                &original[0],
+                "scheme {k}+{m}, len {len}"
+            );
         }
     }
 }
@@ -266,11 +290,19 @@ fn parity_rows_are_prefix_stable_across_m() {
         for m in 2..=6 {
             let wide = encode(k, m, len, 83 + k as u64);
             assert_eq!(&wide[..k], &narrow[..k], "data differs; test setup error");
-            assert_eq!(wide[k], narrow[k], "k={k}: first parity differs between m=1 and m={m}");
+            assert_eq!(
+                wide[k], narrow[k],
+                "k={k}: first parity differs between m=1 and m={m}"
+            );
             // and every prefix between them
             let mid = encode(k, m - 1, len, 83 + k as u64);
             for j in 0..m - 1 {
-                assert_eq!(wide[k + j], mid[k + j], "k={k}: parity {j} differs between m={} and m={m}", m - 1);
+                assert_eq!(
+                    wide[k + j],
+                    mid[k + j],
+                    "k={k}: parity {j} differs between m={} and m={m}",
+                    m - 1
+                );
             }
         }
     }
@@ -298,7 +330,11 @@ fn first_parity_shard_is_plain_xor_only_for_some_k() {
             xor_schemes.push(k);
         }
     }
-    assert_eq!(xor_schemes, vec![1, 3], "set of k for which parity 0 is plain XOR changed (observed value)");
+    assert_eq!(
+        xor_schemes,
+        vec![1, 3],
+        "set of k for which parity 0 is plain XOR changed (observed value)"
+    );
 }
 
 #[test]
@@ -306,14 +342,21 @@ fn k_equals_one_is_replication() {
     for m in 1..=3 {
         let shards = encode(1, m, 4096, 101);
         for j in 0..m {
-            assert_eq!(shards[1 + j], shards[0], "1+{m}: parity shard {j} is not a copy of the data");
+            assert_eq!(
+                shards[1 + j],
+                shards[0],
+                "1+{m}: parity shard {j} is not a copy of the data"
+            );
         }
     }
 }
 
 #[test]
 fn m_equals_zero_is_rejected_by_library_and_needs_a_wrapper_special_case() {
-    assert_eq!(ReedSolomon::new(3, 0).err(), Some(Error::TooFewParityShards));
+    assert_eq!(
+        ReedSolomon::new(3, 0).err(),
+        Some(Error::TooFewParityShards)
+    );
 }
 
 #[test]

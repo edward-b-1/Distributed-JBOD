@@ -7,3 +7,8 @@ license.workspace = true
 
 [dependencies]
 reed-solomon-erasure = { workspace = true }
+xxhash-rust = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

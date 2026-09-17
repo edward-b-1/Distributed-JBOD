@@ -351,10 +351,10 @@ metadata record alone.
 8.3.1 [D] Every shard block carries a 64-bit checksum computed over the
 stored (padded) block.
 
-8.3.2 [P] Algorithm: XXH3-64, fixed by format version 1. Alternative:
-CRC-64. Either is many times faster than disk. A cryptographic hash is not
-required because the native protocol does not admit untrusted writers in
-v1.
+8.3.2 [D] Algorithm: XXH3-64, fixed by format version 1. A cryptographic
+hash is not required because the native protocol does not admit untrusted
+writers in v1. Implemented in `crates/djbod-core/src/checksum.rs`, pinned
+by a test against the published XXH3 value for empty input.
 
 8.3.3 [D] Checksums are stored contiguously in a table, not interleaved
 with the blocks, so that every block begins on a 4096-byte boundary. Where

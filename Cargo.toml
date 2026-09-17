@@ -9,3 +9,12 @@ license = "MIT"
 
 [workspace.dependencies]
 reed-solomon-erasure = "6.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+thiserror = "2"
+
+# Project style: an explicit index loop is preferred over an iterator chain
+# when the index itself is meaningful (a shard index, a position in a
+# pattern). Clippy's suggestion to rewrite such loops with enumerate() and
+# skip() is not wanted.
+[workspace.lints.clippy]
+needless_range_loop = "allow"
