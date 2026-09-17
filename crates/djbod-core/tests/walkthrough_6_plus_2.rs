@@ -101,9 +101,8 @@ fn six_plus_two_corrupt_block_becomes_an_erasure_and_is_repaired() {
 #[test]
 fn the_same_walkthrough_through_the_stripe_layer() {
     // The stripe layer does steps 2 to 9 in two calls. This test shows
-    // what it reports, and in particular the behaviour behind the open API
-    // question: faults are judged against the whole scheme, so blocks the
-    // caller never asked for are reported as Missing.
+    // what it reports. Faults are judged against the blocks the caller
+    // requested, so blocks it never asked for are not mentioned.
     let code = ReedSolomonCode::new(Scheme::new(6, 2).expect("failed to construct scheme"));
     let object_bytes = b"block-0.block-1.block-2.block-3.block-4.block-5.";
     let encoded = encode_stripe(&code, object_bytes, 8).expect("failed to encode stripe");
@@ -122,9 +121,10 @@ fn the_same_walkthrough_through_the_stripe_layer() {
     received[2].bytes[5] ^= 0b0000_0100;
 
     // With only five usable blocks of the six needed, this cannot decode.
-    // The error lists shard 2 as a checksum mismatch and shards 6 and 7 as
-    // Missing, although the caller chose not to fetch 6 and 7.
-    let err = decode_stripe(&code, &received, object_bytes.len())
+    // The error lists shard 2 as a checksum mismatch and nothing else:
+    // shards 6 and 7 were not requested, so their absence is not a fault.
+    let data_indices = code.scheme().data_shard_indices();
+    let err = decode_stripe(&code, &data_indices, &received, object_bytes.len())
         .expect_err("five usable blocks cannot decode");
     let faults = match err {
         djbod_core::stripe::StripeError::Unrecoverable {
@@ -138,28 +138,29 @@ fn the_same_walkthrough_through_the_stripe_layer() {
         }
         other => panic!("expected Unrecoverable, got {other:?}"),
     };
-    assert_eq!(faults.len(), 3);
+    assert_eq!(faults.len(), 1);
     assert_eq!(faults[0].index, ShardIndex(2));
     assert!(matches!(faults[0].kind, FaultKind::ChecksumMismatch { .. }));
-    assert_eq!(faults[1].index, ShardIndex(6));
-    assert_eq!(faults[1].kind, FaultKind::Missing);
-    assert_eq!(faults[2].index, ShardIndex(7));
-    assert_eq!(faults[2].kind, FaultKind::Missing);
 
-    // Case B: the caller goes back for one parity block. Now six blocks are
-    // usable and the data decodes exactly. Shard 7 is still reported
-    // Missing even though nothing was wrong with it; it was simply not
-    // fetched. This is the report a fail-stop caller would have to filter.
+    // Case B: the caller goes back for one parity block and says so in the
+    // requested list. Now six blocks are usable and the data decodes
+    // exactly. The only fault reported is the corrupt shard 2. A fail-stop
+    // caller can treat any non-empty fault list as an error without
+    // filtering it.
+    let mut requested = data_indices.clone();
+    requested.push(ShardIndex(6));
     received.push(ReceivedBlock {
         index: ShardIndex(6),
         bytes: encoded.blocks[6].clone(),
         stored_checksum: encoded.checksums[6],
     });
-    let decoded =
-        decode_stripe(&code, &received, object_bytes.len()).expect("failed to decode stripe");
+    let decoded = decode_stripe(&code, &requested, &received, object_bytes.len())
+        .expect("failed to decode stripe");
     assert_eq!(decoded.data, object_bytes);
-    assert_eq!(decoded.faults.len(), 2);
+    assert_eq!(decoded.faults.len(), 1);
     assert_eq!(decoded.faults[0].index, ShardIndex(2));
-    assert_eq!(decoded.faults[1].index, ShardIndex(7));
-    assert_eq!(decoded.faults[1].kind, FaultKind::Missing);
+    assert!(matches!(
+        decoded.faults[0].kind,
+        FaultKind::ChecksumMismatch { .. }
+    ));
 }

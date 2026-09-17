@@ -59,9 +59,9 @@ pub struct ReceivedBlock {
     pub stored_checksum: BlockChecksum,
 }
 
-/// The object bytes of a decoded stripe, and every block that had to be
-/// treated as erased to produce them. An empty `faults` means every data
-/// block arrived intact and nothing was reconstructed.
+/// The object bytes of a decoded stripe, and every requested block that
+/// was missing or unusable. An empty `faults` means every requested block
+/// arrived intact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedStripe {
     pub data: Vec<u8>,
@@ -78,6 +78,8 @@ pub enum StripeError {
     TooLarge { actual: usize, max: usize },
     #[error(transparent)]
     Coding(#[from] CodingError),
+    #[error("{0} was received but not requested")]
+    UnrequestedBlock(ShardIndex),
     #[error(
         "stripe cannot be decoded: {usable} usable blocks, {needed} needed; faults: {faults:?}"
     )]
@@ -142,16 +144,22 @@ pub fn encode_stripe(
     })
 }
 
-/// Recover the `data_len` object bytes of a stripe from whatever blocks
-/// were received.
+/// Recover the `data_len` object bytes of a stripe from the blocks that
+/// were received, out of the blocks that were `requested`.
 ///
-/// Every block is checked before it is trusted. A block is usable only if
-/// it has the right length and its bytes match its stored checksum. Any
-/// other block, and any index for which nothing was received, is an
-/// erasure. If at least k blocks are usable the data is returned along
-/// with the list of erasures; otherwise the error carries that list.
+/// Every received block is checked before it is trusted. A block is usable
+/// only if it has the right length and its bytes match its stored
+/// checksum. Any other received block is a fault, and so is any requested
+/// index for which nothing was received. Indices that were not requested
+/// are not faults: the read path fetches only the k data blocks (SPEC
+/// 11.3) and must not be told the parity is missing. A received block whose
+/// index was not requested is a protocol error.
+///
+/// If at least k blocks are usable the data is returned along with the
+/// list of faults; otherwise the error carries that list.
 pub fn decode_stripe(
     code: &ReedSolomonCode,
+    requested: &[ShardIndex],
     received: &[ReceivedBlock],
     data_len: usize,
 ) -> Result<DecodedStripe, StripeError> {
@@ -161,11 +169,26 @@ pub fn decode_stripe(
     }
     let block_len = block_length_for(code, data_len);
 
+    // Note which indices were requested, rejecting protocol errors.
+    let mut was_requested: Vec<bool> = vec![false; scheme.total_shards()];
+    for index in requested {
+        if !scheme.contains(*index) {
+            return Err(CodingError::IndexOutOfRange(*index).into());
+        }
+        if was_requested[index.as_usize()] {
+            return Err(CodingError::DuplicateIndex(*index).into());
+        }
+        was_requested[index.as_usize()] = true;
+    }
+
     // Index the received blocks by shard index, rejecting protocol errors.
     let mut by_index: Vec<Option<&ReceivedBlock>> = vec![None; scheme.total_shards()];
     for block in received {
         if !scheme.contains(block.index) {
             return Err(CodingError::IndexOutOfRange(block.index).into());
+        }
+        if !was_requested[block.index.as_usize()] {
+            return Err(StripeError::UnrequestedBlock(block.index));
         }
         if by_index[block.index.as_usize()].is_some() {
             return Err(CodingError::DuplicateIndex(block.index).into());
@@ -173,10 +196,13 @@ pub fn decode_stripe(
         by_index[block.index.as_usize()] = Some(block);
     }
 
-    // Decide, for every shard of the scheme, whether it is usable.
+    // Decide, for every requested shard, whether it is usable.
     let mut usable: Vec<(ShardIndex, &[u8])> = Vec::with_capacity(scheme.total_shards());
     let mut faults: Vec<BlockFault> = Vec::new();
     for index in scheme.shard_indices() {
+        if !was_requested[index.as_usize()] {
+            continue;
+        }
         let Some(block) = by_index[index.as_usize()] else {
             faults.push(BlockFault {
                 index,
