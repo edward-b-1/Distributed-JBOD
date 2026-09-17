@@ -53,10 +53,13 @@ fn xorshift64_bytes(len: usize, seed: u64) -> Vec<u8> {
 /// and encode. Returns all k+m shards.
 fn encode(k: usize, m: usize, len: usize, seed: u64) -> Vec<Vec<u8>> {
     let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
-    let mut shards: Vec<Vec<u8>> = (0..k)
-        .map(|i| xorshift64_bytes(len, seed ^ (i as u64 + 1)))
-        .collect();
-    shards.extend((0..m).map(|_| vec![0u8; len]));
+    let mut shards: Vec<Vec<u8>> = Vec::with_capacity(k + m);
+    for i in 0..k {
+        shards.push(xorshift64_bytes(len, seed ^ (i as u64 + 1)));
+    }
+    for _ in 0..m {
+        shards.push(vec![0u8; len]);
+    }
     rs.encode(&mut shards).expect("failed to encode shards");
     shards
 }
@@ -83,7 +86,10 @@ fn combinations(n: usize, size: usize) -> Vec<Vec<usize>> {
 fn encode_is_systematic_data_shards_unchanged() {
     for &(k, m) in SCHEMES {
         let len = 4096;
-        let originals: Vec<Vec<u8>> = (0..k).map(|i| xorshift64_bytes(len, 7 ^ (i as u64 + 1))).collect();
+        let mut originals: Vec<Vec<u8>> = Vec::with_capacity(k);
+        for i in 0..k {
+            originals.push(xorshift64_bytes(len, 7 ^ (i as u64 + 1)));
+        }
         let shards = encode(k, m, len, 7);
         for i in 0..k {
             assert_eq!(shards[i], originals[i], "scheme {k}+{m}: data shard {i} was modified by encode");
@@ -210,12 +216,17 @@ fn encoding_is_bytewise_independent_so_stripes_can_stream() {
         let len = 2048;
         let whole = encode(k, m, len, 71);
 
-        let mut first: Vec<Vec<u8>> = whole[..k].iter().map(|s| s[..len / 2].to_vec()).collect();
-        first.extend((0..m).map(|_| vec![0u8; len / 2]));
+        let mut first: Vec<Vec<u8>> = Vec::with_capacity(k + m);
+        let mut second: Vec<Vec<u8>> = Vec::with_capacity(k + m);
+        for data_shard in &whole[..k] {
+            first.push(data_shard[..len / 2].to_vec());
+            second.push(data_shard[len / 2..].to_vec());
+        }
+        for _ in 0..m {
+            first.push(vec![0u8; len / 2]);
+            second.push(vec![0u8; len / 2]);
+        }
         rs.encode(&mut first).expect("failed to encode first half");
-
-        let mut second: Vec<Vec<u8>> = whole[..k].iter().map(|s| s[len / 2..].to_vec()).collect();
-        second.extend((0..m).map(|_| vec![0u8; len / 2]));
         rs.encode(&mut second).expect("failed to encode second half");
 
         for j in 0..m {
@@ -330,8 +341,13 @@ fn throughput_at_one_mebibyte_blocks() {
     let len = 1 << 20;
     for &(k, m) in &[(3usize, 1usize), (4, 2), (10, 4)] {
         let rs = ReedSolomon::new(k, m).expect("failed to initialize ReedSolomon");
-        let mut shards: Vec<Vec<u8>> = (0..k).map(|i| xorshift64_bytes(len, i as u64)).collect();
-        shards.extend((0..m).map(|_| vec![0u8; len]));
+        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(k + m);
+        for i in 0..k {
+            shards.push(xorshift64_bytes(len, i as u64));
+        }
+        for _ in 0..m {
+            shards.push(vec![0u8; len]);
+        }
         let rounds = 20;
 
         let t = Instant::now();
