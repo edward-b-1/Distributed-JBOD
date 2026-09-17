@@ -8,8 +8,10 @@ use uuid::Uuid;
 use crate::erasure::{Scheme, SchemeError};
 use crate::record::DeviceId;
 
-pub const MIN_BLOCK_SIZE: u64 = 64 * 1024;
-pub const MAX_BLOCK_SIZE: u64 = 64 * 1024 * 1024;
+/// Smallest permitted shard block size, in bytes: 64 KiB (SPEC 6.2.4).
+pub const MIN_BLOCK_SIZE_BYTES: u64 = 64 * 1024;
+/// Largest permitted shard block size, in bytes: 64 MiB (SPEC 6.2.4).
+pub const MAX_BLOCK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A node's identity in the cluster document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -53,6 +55,7 @@ pub struct ClusterDocument {
     pub cluster_id: Uuid,
     pub k: u8,
     pub m: u8,
+    /// Shard block size B, in bytes.
     pub block_size: u64,
     pub independence_level: IndependenceLevel,
     /// Fraction of each device's capacity kept free (5.5).
@@ -66,7 +69,7 @@ pub enum ClusterDocumentError {
     #[error("invalid scheme: {0}")]
     InvalidScheme(#[from] SchemeError),
     #[error(
-        "block size {0} must be a multiple of 4096 between {MIN_BLOCK_SIZE} and {MAX_BLOCK_SIZE}"
+        "block size {0} must be a multiple of 4096 between {MIN_BLOCK_SIZE_BYTES} and {MAX_BLOCK_SIZE_BYTES}"
     )]
     BadBlockSize(u64),
     #[error("headroom must be between 0 and 0.5")]
@@ -85,8 +88,8 @@ impl ClusterDocument {
     pub fn validate(&self) -> Result<(), ClusterDocumentError> {
         Scheme::new(self.k, self.m)?;
         if !self.block_size.is_multiple_of(4096)
-            || self.block_size < MIN_BLOCK_SIZE
-            || self.block_size > MAX_BLOCK_SIZE
+            || self.block_size < MIN_BLOCK_SIZE_BYTES
+            || self.block_size > MAX_BLOCK_SIZE_BYTES
         {
             return Err(ClusterDocumentError::BadBlockSize(self.block_size));
         }
