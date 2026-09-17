@@ -41,25 +41,25 @@ pub const HEADER_LEN: u64 = 4096;
 pub const FOOTER_FIXED_LEN: u64 = 32;
 pub const TRAILER_LEN: u64 = 16;
 
-// Header field offsets (SPEC 9.3.2).
-const HDR_MAGIC: usize = 0;
-const HDR_FORMAT_VERSION: usize = 8;
-const HDR_CHECKSUM_ALGORITHM: usize = 12;
-const HDR_FLAGS: usize = 16;
-const HDR_K: usize = 20;
-const HDR_M: usize = 21;
-const HDR_SHARD_INDEX: usize = 22;
-const HDR_BLOCK_LENGTH: usize = 24;
-const HDR_KEY_HASH: usize = 32;
-const HDR_VERSION_ID: usize = 64;
-const HDR_CHECKSUM: usize = 80;
+// Byte offsets of the header fields within the header page (SPEC 9.3.2).
+const OFF_HEADER_MAGIC: usize = 0;
+const OFF_HEADER_FORMAT_VERSION: usize = 8;
+const OFF_HEADER_CHECKSUM_ALGORITHM: usize = 12;
+const OFF_HEADER_FLAGS: usize = 16;
+const OFF_HEADER_K: usize = 20;
+const OFF_HEADER_M: usize = 21;
+const OFF_HEADER_SHARD_INDEX: usize = 22;
+const OFF_HEADER_BLOCK_LENGTH: usize = 24;
+const OFF_HEADER_KEY_HASH: usize = 32;
+const OFF_HEADER_VERSION_ID: usize = 64;
+const OFF_HEADER_CHECKSUM: usize = 80;
 
-// Footer field offsets, relative to the footer start.
-const FTR_BLOCK_COUNT: usize = 0;
-const FTR_LAST_BLOCK_LENGTH: usize = 8;
-const FTR_OBJECT_SIZE: usize = 16;
-const FTR_CHECKSUM: usize = 24;
-const FTR_TABLE: usize = 32;
+// Byte offsets of the footer fields, relative to the start of the footer.
+const OFF_FOOTER_BLOCK_COUNT: usize = 0;
+const OFF_FOOTER_LAST_BLOCK_LENGTH: usize = 8;
+const OFF_FOOTER_OBJECT_SIZE: usize = 16;
+const OFF_FOOTER_CHECKSUM: usize = 24;
+const OFF_FOOTER_TABLE: usize = 32;
 
 /// What is known when a shard file is created.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,22 +165,22 @@ impl ShardFileHeader {
     /// Serialize to the 4096-byte header page.
     pub fn encode(&self) -> Vec<u8> {
         let mut page = vec![0u8; HEADER_LEN as usize];
-        page[HDR_MAGIC..HDR_MAGIC + 8].copy_from_slice(&MAGIC);
-        write_u32(&mut page, HDR_FORMAT_VERSION, FORMAT_VERSION);
+        page[OFF_HEADER_MAGIC..OFF_HEADER_MAGIC + 8].copy_from_slice(&MAGIC);
+        write_u32(&mut page, OFF_HEADER_FORMAT_VERSION, FORMAT_VERSION);
         write_u32(
             &mut page,
-            HDR_CHECKSUM_ALGORITHM,
+            OFF_HEADER_CHECKSUM_ALGORITHM,
             CHECKSUM_ALGORITHM_XXH3_64,
         );
-        write_u32(&mut page, HDR_FLAGS, 0);
-        page[HDR_K] = self.scheme.data_shards() as u8;
-        page[HDR_M] = self.scheme.parity_shards() as u8;
-        page[HDR_SHARD_INDEX] = self.shard_index.0;
-        write_u64(&mut page, HDR_BLOCK_LENGTH, self.block_length);
-        page[HDR_KEY_HASH..HDR_KEY_HASH + 32].copy_from_slice(&self.key_hash.0);
-        page[HDR_VERSION_ID..HDR_VERSION_ID + 16].copy_from_slice(&self.version_id.0);
-        let checksum = checksum_with_field_zeroed(&page, HDR_CHECKSUM);
-        write_u64(&mut page, HDR_CHECKSUM, checksum.0);
+        write_u32(&mut page, OFF_HEADER_FLAGS, 0);
+        page[OFF_HEADER_K] = self.scheme.data_shards() as u8;
+        page[OFF_HEADER_M] = self.scheme.parity_shards() as u8;
+        page[OFF_HEADER_SHARD_INDEX] = self.shard_index.0;
+        write_u64(&mut page, OFF_HEADER_BLOCK_LENGTH, self.block_length);
+        page[OFF_HEADER_KEY_HASH..OFF_HEADER_KEY_HASH + 32].copy_from_slice(&self.key_hash.0);
+        page[OFF_HEADER_VERSION_ID..OFF_HEADER_VERSION_ID + 16].copy_from_slice(&self.version_id.0);
+        let checksum = checksum_with_field_zeroed(&page, OFF_HEADER_CHECKSUM);
+        write_u64(&mut page, OFF_HEADER_CHECKSUM, checksum.0);
         page
     }
 
@@ -189,38 +189,38 @@ impl ShardFileHeader {
         if page.len() != HEADER_LEN as usize {
             return Err(ShardFileError::TooShort(page.len() as u64));
         }
-        if page[HDR_MAGIC..HDR_MAGIC + 8] != MAGIC {
+        if page[OFF_HEADER_MAGIC..OFF_HEADER_MAGIC + 8] != MAGIC {
             return Err(ShardFileError::BadMagic);
         }
-        let format_version = read_u32(page, HDR_FORMAT_VERSION);
+        let format_version = read_u32(page, OFF_HEADER_FORMAT_VERSION);
         if format_version != FORMAT_VERSION {
             return Err(ShardFileError::UnsupportedFormatVersion(format_version));
         }
-        let checksum_algorithm = read_u32(page, HDR_CHECKSUM_ALGORITHM);
+        let checksum_algorithm = read_u32(page, OFF_HEADER_CHECKSUM_ALGORITHM);
         if checksum_algorithm != CHECKSUM_ALGORITHM_XXH3_64 {
             return Err(ShardFileError::UnsupportedChecksumAlgorithm(
                 checksum_algorithm,
             ));
         }
-        let stored = BlockChecksum(read_u64(page, HDR_CHECKSUM));
-        if checksum_with_field_zeroed(page, HDR_CHECKSUM) != stored {
+        let stored = BlockChecksum(read_u64(page, OFF_HEADER_CHECKSUM));
+        if checksum_with_field_zeroed(page, OFF_HEADER_CHECKSUM) != stored {
             return Err(ShardFileError::HeaderChecksumMismatch);
         }
 
-        let scheme = Scheme::new(page[HDR_K], page[HDR_M])?;
-        let shard_index = ShardIndex(page[HDR_SHARD_INDEX]);
+        let scheme = Scheme::new(page[OFF_HEADER_K], page[OFF_HEADER_M])?;
+        let shard_index = ShardIndex(page[OFF_HEADER_SHARD_INDEX]);
         if !scheme.contains(shard_index) {
             return Err(ShardFileError::ShardIndexOutOfRange(shard_index));
         }
         let mut key_hash = [0u8; 32];
-        key_hash.copy_from_slice(&page[HDR_KEY_HASH..HDR_KEY_HASH + 32]);
+        key_hash.copy_from_slice(&page[OFF_HEADER_KEY_HASH..OFF_HEADER_KEY_HASH + 32]);
         let mut version_id = [0u8; 16];
-        version_id.copy_from_slice(&page[HDR_VERSION_ID..HDR_VERSION_ID + 16]);
+        version_id.copy_from_slice(&page[OFF_HEADER_VERSION_ID..OFF_HEADER_VERSION_ID + 16]);
 
         Ok(ShardFileHeader {
             scheme,
             shard_index,
-            block_length: read_u64(page, HDR_BLOCK_LENGTH),
+            block_length: read_u64(page, OFF_HEADER_BLOCK_LENGTH),
             key_hash: KeyHash(key_hash),
             version_id: VersionId(version_id),
         })
@@ -237,16 +237,20 @@ impl ShardFileFooter {
     pub fn encode_with_trailer(&self, footer_offset: u64) -> Vec<u8> {
         let footer_len = self.encoded_length() as usize;
         let mut bytes = vec![0u8; footer_len + TRAILER_LEN as usize];
-        write_u64(&mut bytes, FTR_BLOCK_COUNT, self.block_count);
-        write_u64(&mut bytes, FTR_LAST_BLOCK_LENGTH, self.last_block_length);
-        write_u64(&mut bytes, FTR_OBJECT_SIZE, self.object_size);
+        write_u64(&mut bytes, OFF_FOOTER_BLOCK_COUNT, self.block_count);
+        write_u64(
+            &mut bytes,
+            OFF_FOOTER_LAST_BLOCK_LENGTH,
+            self.last_block_length,
+        );
+        write_u64(&mut bytes, OFF_FOOTER_OBJECT_SIZE, self.object_size);
         for (i, checksum) in self.checksums.iter().enumerate() {
-            write_u64(&mut bytes, FTR_TABLE + 8 * i, checksum.0);
+            write_u64(&mut bytes, OFF_FOOTER_TABLE + 8 * i, checksum.0);
         }
         write_u64(&mut bytes, footer_len, footer_len as u64);
         write_u64(&mut bytes, footer_len + 8, footer_offset);
-        let checksum = checksum_with_field_zeroed(&bytes, FTR_CHECKSUM);
-        write_u64(&mut bytes, FTR_CHECKSUM, checksum.0);
+        let checksum = checksum_with_field_zeroed(&bytes, OFF_FOOTER_CHECKSUM);
+        write_u64(&mut bytes, OFF_FOOTER_CHECKSUM, checksum.0);
         bytes
     }
 
@@ -256,11 +260,11 @@ impl ShardFileFooter {
         if footer_len < FOOTER_FIXED_LEN || !(footer_len - FOOTER_FIXED_LEN).is_multiple_of(8) {
             return Err(ShardFileError::BadFooterLength(footer_len));
         }
-        let stored = BlockChecksum(read_u64(bytes, FTR_CHECKSUM));
-        if checksum_with_field_zeroed(bytes, FTR_CHECKSUM) != stored {
+        let stored = BlockChecksum(read_u64(bytes, OFF_FOOTER_CHECKSUM));
+        if checksum_with_field_zeroed(bytes, OFF_FOOTER_CHECKSUM) != stored {
             return Err(ShardFileError::FooterChecksumMismatch);
         }
-        let block_count = read_u64(bytes, FTR_BLOCK_COUNT);
+        let block_count = read_u64(bytes, OFF_FOOTER_BLOCK_COUNT);
         let table_entries = (footer_len - FOOTER_FIXED_LEN) / 8;
         if block_count != table_entries {
             return Err(ShardFileError::InconsistentFooter(format!(
@@ -272,12 +276,12 @@ impl ShardFileFooter {
         }
         let mut checksums = Vec::with_capacity(block_count as usize);
         for i in 0..block_count as usize {
-            checksums.push(BlockChecksum(read_u64(bytes, FTR_TABLE + 8 * i)));
+            checksums.push(BlockChecksum(read_u64(bytes, OFF_FOOTER_TABLE + 8 * i)));
         }
         Ok(ShardFileFooter {
             block_count,
-            last_block_length: read_u64(bytes, FTR_LAST_BLOCK_LENGTH),
-            object_size: read_u64(bytes, FTR_OBJECT_SIZE),
+            last_block_length: read_u64(bytes, OFF_FOOTER_LAST_BLOCK_LENGTH),
+            object_size: read_u64(bytes, OFF_FOOTER_OBJECT_SIZE),
             checksums,
         })
     }
