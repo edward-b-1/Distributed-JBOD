@@ -356,9 +356,9 @@ hash is not required because the native protocol does not admit untrusted
 writers in v1. Implemented in `crates/djbod-core/src/checksum.rs`, pinned
 by a test against the published XXH3 value for empty input.
 
-8.3.3 [D] Checksums are stored contiguously in a table, not interleaved
-with the blocks, so that every block begins on a 4096-byte boundary. Where
-the table lives depends on the resolution of 9.3.
+8.3.3 [D] Checksums are stored contiguously in a table in the shard
+file's footer (9.3.2), not interleaved with the blocks, so that every
+block begins on a 4096-byte boundary.
 
 8.3.4 [D] A checksum mismatch on read is treated as an erasure of that
 block. The read is not served from the corrupt block.
@@ -484,38 +484,70 @@ advantage of per-block files, rewriting a single corrupt block, can be
 recovered later by allowing the repair job alone to overwrite one block in
 place, since the header's checksum for that block verifies the result.
 
-9.3.2 [P] Proposed shard file format:
+9.3.2 [D] **Shard file format, version 1.** Three parts: a fixed-size
+header written first, holding what is known when the write begins (the
+file's identity); the blocks; and a footer written last, holding what is
+known only when the write ends (the lengths and the checksum table). A
+16-byte trailer locates the footer. All integers are little-endian.
 
 ```
-offset 0        header, padded to a multiple of 4096 bytes
-    magic                      8 bytes   identifies a distributed-jbod shard file
-    format version             4 bytes
-    reserved                   4 bytes
-    block count                8 bytes
-    block length B             8 bytes
-    last block length          8 bytes
-    header checksum            8 bytes   (over the header, table included)
-    checksum table             8 bytes × block count
+HEADER, one 4096-byte page at file offset 0, written first
+  0    8   magic               fixed ASCII, identifies a shard file
+  8    4   format version      1
+ 12    4   checksum algorithm  1 = XXH3-64
+ 16    4   flags               0, reserved
+ 20    1   k
+ 21    1   m
+ 22    1   shard index
+ 23    1   reserved
+ 24    8   block length        B
+ 32   32   key hash            SHA-256 of the key (9.1.2)
+ 64   16   version id          ULID (9.2.3)
+ 80    8   header checksum     XXH3-64 over the page, this field zeroed
+ 88 .. 4095  zero
 
-offset H        shard block 0
-offset H + B    shard block 1
-...
-offset H + (n-1)B   shard block n-1 (last block length bytes, padded per 8.2.5)
+BLOCKS
+  block i at file offset 4096 + i × B
+  block n-1 is `last block length` bytes (1 .. B), padded per 8.2.5
+
+FOOTER, at file offset F, immediately after the last block, written last
+  0    8   block count         n, at least 1
+  8    8   last block length   1 .. B
+ 16    8   object size         total object bytes, for the recovery tool
+ 24    8   footer checksum     XXH3-64 over footer and trailer, this field zeroed
+ 32   8n   checksum table      XXH3-64 of block i at entry i
+
+TRAILER, the last 16 bytes of the file
+  0    8   footer length       L = 32 + 8n
+  8    8   footer offset       F
+
+invariant: F + L + 16 == file length
 ```
 
-The header size H is the smallest multiple of 4096 that holds the fixed
-fields and the table. For `B = 1 MiB` one 4 KiB header covers objects up
-to about 500 MiB per shard; larger objects use a larger header.
+Reading: `fstat` for the length, read the trailer, check the invariant,
+read L bytes at F, verify the footer checksum, then read block i at
+`4096 + i × B` and verify it against table entry i. The header is read
+when identity matters (recovery, scrubbing, orphan cleanup) and to
+cross-check block length and shard index against the footer and the
+metadata record.
+
+Why this shape: the header is aligned so every block starts on a 4096-byte
+boundary (8.2.2), and because it is written at file creation even a
+half-written temporary file identifies itself (10.11). The footer carries
+everything that depends on the object's length, so the format itself never
+needs the length up front; unknown-length streaming (22) would change the
+write path but not the file. The footer is not padded: it is small and read
+once, and the last block already ends at an arbitrary offset.
 
 9.3.3 [D] Shard files are immutable once written. They are written to a
 temporary name, fsynced, and renamed into place. They are never modified.
 
 9.3.4 [D] Shard blocks start at offsets that are multiples of 4096.
 
-9.3.5 [X] Fields identifying the object (key hash, version, shard index,
-`k`, `m`, and the UUIDs of the sibling devices) could be added to the
-header to make a shard self-describing without its metadata record. Parked
-pending further discussion.
+9.3.5 [D] The header identifies the object (key hash, version id), the
+shard (index, `k`, `m`, block length), and the algorithms, so a shard file
+is self-describing without its metadata record. The UUIDs of the sibling
+devices are not included; placement lives only in the record.
 
 ### 9.4 Metadata record
 
@@ -1077,7 +1109,6 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Inline reconstruction on read (16.5).
 - Scrubber (20.1).
 - Rebalance (18.7).
-- Self-describing shard headers (9.3.5).
 - Non-systematic encoding option (8.1.6).
 - Optional parity verification on read, for deployments that want it.
 - Range reads and multipart upload.
@@ -1220,7 +1251,8 @@ Object: 10 MiB.
 - Stripe 4: remaining 1 MiB split into three blocks of 349,526 bytes
   (padded), plus one parity block of the same size.
 - Four shard files, each holding four blocks: three of 1 MiB and one of
-  349,526 bytes, plus a 4 KiB header. Each shard file is about 3.34 MiB.
+  349,526 bytes, plus a 4 KiB header and an 80-byte footer and trailer.
+  Each shard file is about 3.34 MiB.
 - Stored total: about 13.4 MiB for 10 MiB of data, a ratio of 1.33.
 - Four metadata records of a few hundred bytes each, one per holder.
 - Read: fetch shard blocks 0, 1, 2 for each stripe from three devices,
