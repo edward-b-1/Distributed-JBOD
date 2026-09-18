@@ -1435,7 +1435,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-core` | On-disk format (device identity, shard file, metadata record), key hash, block checksums, Reed-Solomon wrapper, stripe encode and decode. No networking. Fully unit-tested, including round-trips through the code with every erasure pattern up to `m`. |
 | `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3, data frames, stream ends. Runtime-agnostic (bytes in, messages out). Shared by node, client, and tools. |
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
-| `djbod-cli` | Command-line client and administrative commands over the native protocol. |
+| `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
 
 C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.
@@ -1497,8 +1497,10 @@ synchronous. Runtime flavour is a one-line choice: `current_thread` gives
 the single-OS-thread event loop originally envisaged, `multi_thread` adds
 CPU parallelism for encoding on machines with cores to spare.
 
-C.4.2 **Milestone 2 status, 18 September 2026: node and coordinator
-complete, command-line client outstanding.** `djbod-proto` (frames,
+C.4.2 **Milestone 2 status, 18 September 2026: complete.** The `djbod`
+command-line client (crate `djbod-cli`) drives a node from a shell and is
+exercised by tests that run the built binary against a node started
+in-process. `djbod-proto` (frames,
 `Hello`, every message), `djbod-node` (configuration, device and document
 state, server with connection and request spans, node-to-node operations,
 and the coordinator serving `Status`, `PutObject`, `GetObject`,

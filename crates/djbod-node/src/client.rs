@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 
 use thiserror::Error;
-use tokio::io::BufReader;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use uuid::Uuid;
@@ -258,6 +258,9 @@ impl Connection {
     }
 }
 
+/// Body chunk size used by the streaming helpers: one frame per chunk.
+pub const DEFAULT_BODY_CHUNK: usize = 1 << 20;
+
 impl Connection {
     /// Upload a whole object held in memory, in body chunks of `chunk`
     /// bytes. Returns the version id.
@@ -268,19 +271,62 @@ impl Connection {
         chunk: usize,
         content_type: Option<String>,
     ) -> Result<djbod_core::version::VersionId, ClientError> {
+        let mut cursor = body;
+        self.put_object_from_reader(key, body.len() as u64, &mut cursor, chunk, content_type)
+            .await
+    }
+
+    /// Upload `size` bytes read from `source`, in body chunks of `chunk`
+    /// bytes, holding at most one chunk in memory (SPEC 3.6). Returns the
+    /// version id. Reading fewer than `size` bytes from `source` is an
+    /// error the coordinator reports, since the declared size is binding.
+    pub async fn put_object_from_reader<R: AsyncRead + Unpin>(
+        &mut self,
+        key: &str,
+        size: u64,
+        source: &mut R,
+        chunk: usize,
+        content_type: Option<String>,
+    ) -> Result<djbod_core::version::VersionId, ClientError> {
         let id = self
             .send_request(Request::PutObject {
                 key: key.to_string(),
-                size: body.len() as u64,
+                size,
                 content_type,
                 user_metadata: Default::default(),
             })
             .await?;
-        for (sequence, piece) in body.chunks(chunk.max(1)).enumerate() {
-            self.send_data(id, body_frame(sequence as u64, piece.to_vec()))
+        let chunk = chunk.max(1);
+        let mut remaining = size;
+        let mut sequence: u64 = 0;
+        let mut buffer = vec![0u8; chunk];
+        while remaining > 0 {
+            let want = (remaining as usize).min(chunk);
+            let read = source
+                .read(&mut buffer[..want])
+                .await
+                .map_err(WireError::Io)?;
+            if read == 0 {
+                // Source ended early. Tell the coordinator so it aborts the
+                // holders, then report what it says.
+                self.send_end(
+                    id,
+                    StreamEnd::failed(ErrorDetail::new(
+                        djbod_proto::message::ErrorCode::WriteFailed,
+                        format!("source ended with {remaining} of {size} bytes unsent"),
+                    )),
+                )
                 .await?;
+                break;
+            }
+            self.send_data(id, body_frame(sequence, buffer[..read].to_vec()))
+                .await?;
+            sequence += 1;
+            remaining -= read as u64;
         }
-        self.send_end(id, StreamEnd::ok()).await?;
+        if remaining == 0 {
+            self.send_end(id, StreamEnd::ok()).await?;
+        }
         // Success is a Response. A refusal after the body started flowing
         // arrives as an EndOfStream carrying the error, after which the
         // coordinator closes the connection.
@@ -308,13 +354,26 @@ impl Connection {
         }
     }
 
-    /// Download a whole object into memory, verifying each body chunk in
-    /// transit and requiring the stream to end cleanly (which is where
-    /// the coordinator reports the whole-object check, SPEC 11.7).
+    /// Download a whole object into memory. See `get_object_to_writer`.
     pub async fn get_object(
         &mut self,
         key: &str,
     ) -> Result<(djbod_core::record::MetadataRecord, Vec<u8>), ClientError> {
+        let mut body = Vec::new();
+        let record = self.get_object_to_writer(key, &mut body).await?;
+        Ok((record, body))
+    }
+
+    /// Download an object, writing its body to `sink` as it arrives while
+    /// verifying each chunk in transit, and requiring the stream to end
+    /// cleanly, which is where the coordinator reports the whole-object
+    /// check (SPEC 11.7). Bytes may already have been written to `sink`
+    /// when an error is returned; the caller must discard them.
+    pub async fn get_object_to_writer<W: AsyncWrite + Unpin>(
+        &mut self,
+        key: &str,
+        sink: &mut W,
+    ) -> Result<djbod_core::record::MetadataRecord, ClientError> {
         let id = self
             .send_request(Request::GetObject {
                 key: key.to_string(),
@@ -329,7 +388,6 @@ impl Connection {
                 })
             }
         };
-        let mut body = Vec::with_capacity(record.size as usize);
         let mut expected_sequence = 0;
         loop {
             match self.read_stream_item(id).await? {
@@ -346,13 +404,14 @@ impl Connection {
                         )));
                     }
                     expected_sequence += 1;
-                    body.extend_from_slice(&data.bytes);
+                    sink.write_all(&data.bytes).await.map_err(WireError::Io)?;
                 }
                 StreamItem::End(end) => {
                     if let Some(error) = end.error {
                         return Err(ClientError::StreamFailed(error));
                     }
-                    return Ok((record, body));
+                    sink.flush().await.map_err(WireError::Io)?;
+                    return Ok(record);
                 }
             }
         }
