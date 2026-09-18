@@ -18,10 +18,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+rand = { workspace = true }
+xxhash-rust = { workspace = true }
+time = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-time = { workspace = true }
 
 [lints]
 workspace = true

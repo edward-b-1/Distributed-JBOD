@@ -258,6 +258,107 @@ impl Connection {
     }
 }
 
+impl Connection {
+    /// Upload a whole object held in memory, in body chunks of `chunk`
+    /// bytes. Returns the version id.
+    pub async fn put_object(
+        &mut self,
+        key: &str,
+        body: &[u8],
+        chunk: usize,
+        content_type: Option<String>,
+    ) -> Result<djbod_core::version::VersionId, ClientError> {
+        let id = self
+            .send_request(Request::PutObject {
+                key: key.to_string(),
+                size: body.len() as u64,
+                content_type,
+                user_metadata: Default::default(),
+            })
+            .await?;
+        for (sequence, piece) in body.chunks(chunk.max(1)).enumerate() {
+            self.send_data(id, body_frame(sequence as u64, piece.to_vec()))
+                .await?;
+        }
+        self.send_end(id, StreamEnd::ok()).await?;
+        // Success is a Response. A refusal after the body started flowing
+        // arrives as an EndOfStream carrying the error, after which the
+        // coordinator closes the connection.
+        match read_message(&mut self.reader).await? {
+            Message::Response {
+                id: got,
+                response: Response::PutObject { version },
+            } if got == id => Ok(version),
+            Message::Response {
+                response: Response::Error(detail),
+                ..
+            } => Err(ClientError::Remote(detail)),
+            Message::EndOfStream { end, .. } => {
+                Err(ClientError::StreamFailed(end.error.unwrap_or_else(|| {
+                    ErrorDetail::new(
+                        djbod_proto::message::ErrorCode::ProtocolViolation,
+                        "upload ended without a version",
+                    )
+                })))
+            }
+            other => Err(ClientError::UnexpectedMessage {
+                expected: "PutObject",
+                got: describe(&other),
+            }),
+        }
+    }
+
+    /// Download a whole object into memory, verifying each body chunk in
+    /// transit and requiring the stream to end cleanly (which is where
+    /// the coordinator reports the whole-object check, SPEC 11.7).
+    pub async fn get_object(
+        &mut self,
+        key: &str,
+    ) -> Result<(djbod_core::record::MetadataRecord, Vec<u8>), ClientError> {
+        let id = self
+            .send_request(Request::GetObject {
+                key: key.to_string(),
+            })
+            .await?;
+        let record = match self.read_response(id).await? {
+            Response::GetObject { record } => record,
+            other => {
+                return Err(ClientError::UnexpectedMessage {
+                    expected: "GetObject",
+                    got: format!("{other:?}"),
+                })
+            }
+        };
+        let mut body = Vec::with_capacity(record.size as usize);
+        let mut expected_sequence = 0;
+        loop {
+            match self.read_stream_item(id).await? {
+                StreamItem::Data(data) => {
+                    if data.sequence != expected_sequence
+                        || checksum_block(&data.bytes) != data.checksum
+                    {
+                        return Err(ClientError::StreamFailed(ErrorDetail::new(
+                            djbod_proto::message::ErrorCode::ProtocolViolation,
+                            format!(
+                                "body chunk {} out of order or corrupt in transit",
+                                data.sequence
+                            ),
+                        )));
+                    }
+                    expected_sequence += 1;
+                    body.extend_from_slice(&data.bytes);
+                }
+                StreamItem::End(end) => {
+                    if let Some(error) = end.error {
+                        return Err(ClientError::StreamFailed(error));
+                    }
+                    return Ok((record, body));
+                }
+            }
+        }
+    }
+}
+
 /// A checksummed data frame for a chunk of object body.
 pub fn body_frame(sequence: u64, bytes: Vec<u8>) -> DataFrame {
     DataFrame {

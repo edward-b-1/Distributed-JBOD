@@ -1493,6 +1493,15 @@ synchronous. Runtime flavour is a one-line choice: `current_thread` gives
 the single-OS-thread event loop originally envisaged, `multi_thread` adds
 CPU parallelism for encoding on machines with cores to spare.
 
+C.4.2 **Milestone 2 status, 18 September 2026: node and coordinator
+complete, command-line client outstanding.** `djbod-proto` (frames,
+`Hello`, every message), `djbod-node` (configuration, device and document
+state, server with connection and request spans, node-to-node operations,
+and the coordinator serving `Status`, `PutObject`, `GetObject`,
+`HeadObject`, `DeleteObject`, and `ListKeys` for a cluster of one node by
+fanning node-to-node operations out over loopback). Settled in code: 10.1,
+10.5, 10.6, 10.11, 15.1, 19.1.2, 19.1.5, 20.4.
+
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
 condition in 16.1 has a test that provokes it. Corruption tests flip bytes

@@ -58,6 +58,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
     let config = NodeConfig {
         node_id: Uuid::new_v4(),
         listen: addr,
+        advertise: None,
         state_dir: state.path().to_path_buf(),
         devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
         bootstrap_peers: vec![],
@@ -869,20 +870,6 @@ async fn a_sender_that_abandons_a_shard_leaves_nothing_and_abort_shard_is_idempo
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn client_operations_are_not_served_yet() {
-    let test = start_node(1, 1, 0).await;
-    let mut conn = test.connect_as_client().await;
-    match conn.request(Request::Status).await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::ProtocolViolation),
-        other => panic!("expected refusal, got {other:?}"),
-    }
-    // Still connected.
-    conn.request(Request::LocalStatus)
-        .await
-        .expect("local status");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_frame_between_operations_closes_the_connection() {
     let test = start_node(1, 1, 0).await;
     let mut conn = test.connect_as_client().await;
@@ -912,6 +899,7 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
     let config = NodeConfig {
         node_id: Uuid::new_v4(),
         listen: "127.0.0.1:0".parse().expect("addr"),
+        advertise: None,
         state_dir: state.path().to_path_buf(),
         devices: vec![a.path().to_path_buf(), b.path().to_path_buf()],
         bootstrap_peers: vec![],

@@ -15,8 +15,19 @@ use djbod_node::server;
 #[derive(Parser)]
 #[command(name = "djbod-node", about = "Distributed-JBOD node")]
 struct Cli {
+    /// Log output format (SPEC 20.4.3).
+    #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
+    log_format: LogFormat,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum LogFormat {
+    /// Human-readable lines on standard error.
+    Text,
+    /// One JSON object per line, for a log collector.
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -47,13 +58,21 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
     let cli = Cli::parse();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    match cli.log_format {
+        LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        LogFormat::Json => tracing_subscriber::fmt()
+            .json()
+            .with_env_filter(filter)
+            .init(),
+    }
+    // A panic leaves a line in the same stream as everything else
+    // (SPEC 20.4.5).
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!(panic = %info, "panic");
+    }));
     match cli.command {
         Command::InitCluster {
             config,

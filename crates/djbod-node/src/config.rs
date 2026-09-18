@@ -3,6 +3,8 @@
 //! ```toml
 //! node_id = "2f1c6c3e-..."          # UUID, generated once per node
 //! listen = "0.0.0.0:5263"           # optional; default port 5263
+//! advertise = "10.0.0.1:5263"       # optional; the address other nodes use to reach
+//!                                   # this one; defaults to `listen`
 //! state_dir = "/var/lib/djbod"      # holds this node's copy of the cluster document
 //! devices = ["/mnt/disk0/data", "/mnt/disk1/data"]
 //! bootstrap_peers = ["10.0.0.2:5263"]   # optional; empty for the first node
@@ -30,6 +32,10 @@ pub struct NodeConfig {
     pub node_id: Uuid,
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// The address recorded in the cluster document for this node. Set it
+    /// when `listen` is a wildcard address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertise: Option<SocketAddr>,
     pub state_dir: PathBuf,
     pub devices: Vec<PathBuf>,
     #[serde(default)]
@@ -93,6 +99,11 @@ impl NodeConfig {
         Ok(())
     }
 
+    /// The address other nodes, and this node itself, connect to.
+    pub fn advertised_address(&self) -> SocketAddr {
+        self.advertise.unwrap_or(self.listen)
+    }
+
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).expect("a node configuration always serializes")
     }
@@ -145,6 +156,7 @@ devices = ["/mnt/a", "/mnt/a"]
         let config = NodeConfig {
             node_id: Uuid::from_u128(7),
             listen: "127.0.0.1:5263".parse().expect("addr"),
+            advertise: None,
             state_dir: PathBuf::from("/tmp/state"),
             devices: vec![PathBuf::from("/mnt/a")],
             bootstrap_peers: vec!["10.0.0.2:5263".to_string()],

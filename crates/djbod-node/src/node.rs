@@ -18,6 +18,7 @@ use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::DeviceId;
 
 use crate::config::NodeConfig;
+use crate::ulid::VersionGenerator;
 
 pub const CLUSTER_DOCUMENT_FILE: &str = "cluster.json";
 
@@ -71,6 +72,7 @@ pub struct Node {
     config: NodeConfig,
     document: RwLock<ClusterDocument>,
     devices: HashMap<DeviceId, Arc<Device>>,
+    versions: VersionGenerator,
 }
 
 impl Node {
@@ -92,6 +94,10 @@ impl Node {
 
     pub fn document_version(&self) -> u64 {
         self.document.read().expect("document lock").version
+    }
+
+    pub fn versions(&self) -> &VersionGenerator {
+        &self.versions
     }
 
     pub fn device(&self, id: DeviceId) -> Option<Arc<Device>> {
@@ -135,7 +141,7 @@ impl Node {
             headroom: parameters.headroom,
             nodes: vec![NodeEntry {
                 id: node_id,
-                addresses: vec![config.listen.to_string()],
+                addresses: vec![config.advertised_address().to_string()],
             }],
             devices: devices
                 .iter()
@@ -211,6 +217,7 @@ impl Node {
             config,
             document: RwLock::new(document),
             devices: by_id,
+            versions: VersionGenerator::new(),
         })
     }
 
