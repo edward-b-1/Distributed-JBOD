@@ -71,7 +71,10 @@ pub enum NodeError {
 pub struct Node {
     config: NodeConfig,
     document: RwLock<ClusterDocument>,
-    devices: HashMap<DeviceId, Arc<Device>>,
+    /// In configuration file order, which is the order an administrator
+    /// expects to see them listed.
+    devices: Vec<Arc<Device>>,
+    devices_by_id: HashMap<DeviceId, Arc<Device>>,
     versions: VersionGenerator,
 }
 
@@ -101,13 +104,12 @@ impl Node {
     }
 
     pub fn device(&self, id: DeviceId) -> Option<Arc<Device>> {
-        self.devices.get(&id).cloned()
+        self.devices_by_id.get(&id).cloned()
     }
 
+    /// This node's devices in configuration file order.
     pub fn devices(&self) -> Vec<Arc<Device>> {
-        let mut all: Vec<Arc<Device>> = self.devices.values().cloned().collect();
-        all.sort_by_key(|d| d.id());
-        all
+        self.devices.clone()
     }
 
     fn document_path(config: &NodeConfig) -> PathBuf {
@@ -227,6 +229,7 @@ impl Node {
                 "the cluster has fewer active devices than k + m; every write will fail with InsufficientDevices until devices are added"
             );
         }
+        let mut ordered = Vec::with_capacity(devices.len());
         let mut by_id = HashMap::with_capacity(devices.len());
         for device in devices {
             if document.device(device.id()).is_none() {
@@ -235,12 +238,15 @@ impl Node {
                     path: device.root().to_path_buf(),
                 });
             }
-            by_id.insert(device.id(), Arc::new(device));
+            let device = Arc::new(device);
+            by_id.insert(device.id(), device.clone());
+            ordered.push(device);
         }
         Ok(Node {
             config,
             document: RwLock::new(document),
-            devices: by_id,
+            devices: ordered,
+            devices_by_id: by_id,
             versions: VersionGenerator::new(),
         })
     }
