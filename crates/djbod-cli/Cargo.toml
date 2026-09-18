@@ -1,0 +1,26 @@
+[package]
+name = "djbod-cli"
+description = "Command-line client for Distributed-JBOD"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "djbod"
+path = "src/main.rs"
+
+[dependencies]
+djbod-core = { workspace = true }
+djbod-proto = { workspace = true }
+djbod-node = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -255,6 +255,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "djbod-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "djbod-core",
+ "djbod-node",
+ "djbod-proto",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "djbod-core"
 version = "0.1.0"
 dependencies = [
