@@ -1041,9 +1041,13 @@ inspected before the next is run:
 - **`djbod cluster drain <device>`** moves data: for every version that
   lists a `draining` device, re-place its shard (18.8.2) onto an eligible
   device. It refuses to run against a device that is not `draining`, so
-  the state change is always an explicit, separate step. It runs to
-  completion, prints progress per version, and is safe to interrupt and
-  rerun. `--node <id>` drains every `draining` device of a node in turn.
+  the state change is always an explicit, separate step. It makes one
+  pass: it scans once for the versions listing the device, attempts each
+  exactly once, and finishes when the list is exhausted, whatever the
+  outcome for individual versions, so it cannot loop. The list cannot
+  grow while it runs, because a `draining` device receives no new shards.
+  It prints progress per version and is safe to interrupt and rerun; a
+  rerun is the administrator's decision, not the tool's. `--node <id>` drains every `draining` device of a node in turn.
   A version the cluster cannot rebuild (more than m damaged shards) is
   reported and left.
 - **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
@@ -1060,9 +1064,10 @@ inspected before the next is run:
 as a write does (10.4, 10.5): an `active` device with room for the shard
 file within its headroom, not already holding a shard of that version.
 So a drain cannot fill a device past its headroom or breach device-level
-independence. If no eligible target exists for a version, it is skipped
-and reported; the drain continues with the rest and at the end lists what
-could not be moved. Nothing is lost: the device stays `draining` and keeps
+independence. If no eligible target exists for a version, or the chosen
+target refuses for lack of room because a concurrent write filled it, the
+version is skipped and reported; the drain continues with the rest and at
+the end lists what could not be moved. Nothing is lost: the device stays `draining` and keeps
 serving what it holds. The administrator adds capacity and reruns, or
 sets the device back to `active`, leaving shards already moved where they
 went. Before moving anything, `drain` estimates: it sums the shard bytes
