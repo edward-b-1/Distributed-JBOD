@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use djbod_core::checksum::checksum_block;
 use djbod_core::erasure::ShardIndex;
+use djbod_core::record::DeviceId;
 use djbod_core::stripe::ShardBlock;
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{DataFrame, ErrorDetail, Message, Request, Response, StreamEnd};
@@ -478,12 +479,48 @@ impl Connection {
         &mut self,
         id: u32,
     ) -> Result<Result<djbod_proto::message::ScrubEvent, StreamEnd>, ClientError> {
+        self.next_event(id).await
+    }
+
+    /// Start a drain (SPEC 18.2.1) and return the request id to read
+    /// events with.
+    pub async fn start_drain(
+        &mut self,
+        device: DeviceId,
+        partial: bool,
+    ) -> Result<u32, ClientError> {
+        let id = self
+            .send_request(Request::Drain { device, partial })
+            .await?;
+        match self.read_response(id).await? {
+            Response::DrainStarted => Ok(id),
+            other => Err(ClientError::UnexpectedMessage {
+                expected: "DrainStarted",
+                got: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// The next drain event, or the stream's end.
+    pub async fn next_drain_event(
+        &mut self,
+        id: u32,
+    ) -> Result<Result<djbod_proto::message::DrainEvent, StreamEnd>, ClientError> {
+        self.next_event(id).await
+    }
+
+    /// The next CBOR event of a streaming administrative operation, or
+    /// the stream's end.
+    async fn next_event<E: serde::de::DeserializeOwned>(
+        &mut self,
+        id: u32,
+    ) -> Result<Result<E, StreamEnd>, ClientError> {
         match self.read_stream_item(id).await? {
             StreamItem::Data(data) => {
                 if checksum_block(&data.bytes) != data.checksum {
                     return Err(ClientError::StreamFailed(ErrorDetail::new(
                         djbod_proto::message::ErrorCode::ProtocolViolation,
-                        "scrub event corrupt in transit",
+                        "event corrupt in transit",
                     )));
                 }
                 let event = djbod_proto::codec::decode_cbor(&data.bytes).map_err(|e| {

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
 
-use djbod_core::cluster::{ClusterDocument, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{ErrorCode, ErrorDetail, Request, Response};
@@ -84,6 +84,8 @@ pub enum MembershipError {
     Node(#[from] NodeError),
     #[error("device {path} is already initialised and in the document")]
     AlreadyMember { path: PathBuf },
+    #[error("{0} is not in the cluster document")]
+    UnknownDevice(DeviceId),
 }
 
 fn first_address(document: &ClusterDocument, node: NodeId) -> Result<SocketAddr, MembershipError> {
@@ -395,6 +397,41 @@ async fn propose_with_retry(
                 *current = fetch_document(peer, cluster_id).await?;
                 Node::save_document_for(config, current)?;
             }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+/// Change one device's state in the document (18.2.1) and nothing else.
+/// Returns the document that now holds the state and whether a new
+/// version was proposed; asking for the state a device already has is a
+/// no-op, so the command is safe to repeat.
+pub async fn set_device_state(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    device: DeviceId,
+    state: DeviceState,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        let Some(entry) = current.device(device) else {
+            return Err(MembershipError::UnknownDevice(device));
+        };
+        if entry.state == state {
+            return Ok((current, false));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        for candidate in next.devices.iter_mut() {
+            if candidate.id == device {
+                candidate.state = state;
+            }
+        }
+        match propose(&current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }

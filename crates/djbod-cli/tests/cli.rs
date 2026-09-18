@@ -209,3 +209,52 @@ async fn missing_connection_details_are_explained() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(err.contains("--node"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_state_and_drain_from_the_command_line() {
+    let test = start_node(5, 3, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(300_000, 5)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok, "{err}");
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let device = record["shards"][0]["device"]
+        .as_str()
+        .expect("device")
+        .to_string();
+
+    let (ok, out, err) = djbod(&test, &["cluster", "drain", &device]);
+    assert!(!ok, "{out}");
+    assert!(err.contains("set-state"), "{err}");
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-state", &device, "draining"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("is now draining"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "set-state", &device, "draining"]);
+    assert!(ok);
+    assert!(out.contains("already draining"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("draining"), "{out}");
+
+    let (ok, out, err) = djbod(&test, &["cluster", "drain", &device]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("1 version(s)"), "{out}");
+    assert!(out.contains("moved    k  shard 0 -> "), "{out}");
+    assert!(err.contains("1 moved, 0 skipped"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok, "{err}");
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(record["revision"], 1);
+    assert_ne!(
+        record["shards"][0]["device"].as_str().expect("device"),
+        device
+    );
+
+    let (ok, out, _) = djbod(&test, &["cluster", "set-state", &device, "active"]);
+    assert!(ok);
+    assert!(out.contains("is now active"), "{out}");
+}
