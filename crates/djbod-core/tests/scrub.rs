@@ -92,6 +92,7 @@ fn store(
         shards,
         content_type: None,
         user_metadata: BTreeMap::new(),
+        revision: 0,
     };
     for device in devices {
         device.write_record(&record).expect("write record");

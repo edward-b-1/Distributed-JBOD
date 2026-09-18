@@ -66,6 +66,7 @@ fn sample_record() -> MetadataRecord {
         ],
         content_type: Some("image/jpeg".to_string()),
         user_metadata: BTreeMap::new(),
+        revision: 0,
     }
 }
 
@@ -333,6 +334,11 @@ fn every_request_round_trips() {
         Request::RepairObject {
             key: "k".to_string(),
         },
+        Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 2,
+            target: Some(device(9)),
+        },
         Request::LocalStatus,
         Request::LocalLookup { key_hash },
         Request::LocalList(ListQuery {
@@ -466,7 +472,14 @@ fn every_response_round_trips() {
                 },
             ],
             record_copies_rewritten: vec![device(3)],
+            stale_copies_removed: vec![],
         }),
+        Response::MoveShard {
+            record: sample_record(),
+            source: device(2),
+            source_cleaned: true,
+            rebuilt: false,
+        },
         Response::LocalStatus {
             node: node(1),
             document_version: 7,

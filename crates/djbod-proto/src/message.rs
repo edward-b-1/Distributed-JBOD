@@ -149,6 +149,16 @@ pub enum Request {
     RepairObject {
         key: String,
     },
+    /// Move one shard of a key's newest version to another device
+    /// (SPEC 18.8.2): the re-placement primitive behind drain, repair to a
+    /// different device, and rebalance. Administrative.
+    MoveShard {
+        key: String,
+        shard_index: u8,
+        /// The destination, or `None` to choose as a write would (10.4).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<DeviceId>,
+    },
     /// Scrub the whole cluster (SPEC 20.1.2): every node's local scrub
     /// plus the cross-node checks, optionally repairing. Answered with
     /// `ScrubStarted`, then a stream of CBOR `ScrubEvent` data frames,
@@ -269,6 +279,10 @@ pub struct RepairReport {
     /// been rewritten from the agreeing copies (SPEC 18.4.2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_copies_rewritten: Vec<DeviceId>,
+    /// Devices from which a stale lower-revision copy, left by an
+    /// interrupted re-placement, was removed (SPEC 18.8.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale_copies_removed: Vec<DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +319,18 @@ pub enum Response {
         truncated: bool,
     },
     RepairObject(RepairReport),
+    MoveShard {
+        /// The record at its new revision.
+        record: MetadataRecord,
+        /// The device the shard came from.
+        source: DeviceId,
+        /// Whether the source's copy was removed; if not, the scrub will
+        /// report it as stale and repair will remove it.
+        source_cleaned: bool,
+        /// Whether the shard was copied from the source or rebuilt from
+        /// the other shards because the source was unreachable or damaged.
+        rebuilt: bool,
+    },
     /// Followed by a stream of `ScrubEvent` frames.
     ScrubStarted,
 
@@ -378,6 +404,16 @@ pub enum ClusterFinding {
         version: VersionId,
         device: DeviceId,
         shard_index: u8,
+    },
+    /// A copy of the record at a lower placement revision than the
+    /// current one, on a device the current revision no longer lists:
+    /// left behind by an interrupted re-placement (SPEC 18.8.1).
+    StaleCopy {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        revision: u64,
+        current_revision: u64,
     },
     /// A holder listed in the record could not be asked.
     HolderUnavailable {

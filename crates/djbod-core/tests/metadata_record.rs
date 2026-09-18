@@ -55,6 +55,7 @@ fn sample_record() -> MetadataRecord {
         ],
         content_type: Some("image/jpeg".to_string()),
         user_metadata: BTreeMap::new(),
+        revision: 0,
     }
 }
 
@@ -65,6 +66,27 @@ fn json_round_trips_exactly() {
     let json = record.to_json();
     let parsed = MetadataRecord::from_json(&json).expect("failed to parse record");
     assert_eq!(parsed, record);
+}
+
+#[test]
+fn revision_is_omitted_when_zero_and_covered_by_the_checksum() {
+    let record = sample_record();
+    assert!(!record.to_json().contains("\"revision\""));
+
+    let mut moved = record.clone();
+    moved.revision = 1;
+    moved.shards[1].device = device(9);
+    let json = moved.to_json();
+    assert!(json.contains("\"revision\": 1"), "{json}");
+    let parsed = MetadataRecord::from_json(&json).expect("failed to parse record");
+    assert_eq!(parsed, moved);
+    assert_ne!(moved.checksum(), record.checksum());
+
+    // The two describe the same body and differ only in placement.
+    assert!(moved.same_body(&record));
+    let mut other = record.clone();
+    other.size += 1;
+    assert!(!other.same_body(&record));
 }
 
 #[test]

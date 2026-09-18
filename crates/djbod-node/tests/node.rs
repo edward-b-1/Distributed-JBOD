@@ -173,6 +173,7 @@ fn record_for(
             .collect(),
         content_type: None,
         user_metadata: BTreeMap::new(),
+        revision: 0,
     }
 }
 

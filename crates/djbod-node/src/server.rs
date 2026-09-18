@@ -179,6 +179,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
         DeleteObject { .. } => "DeleteObject",
         ListKeys(_) => "ListKeys",
         RepairObject { .. } => "RepairObject",
+        MoveShard { .. } => "MoveShard",
         Scrub { .. } => "Scrub",
         LocalScrub { .. } => "LocalScrub",
         LocalStatus => "LocalStatus",
@@ -202,7 +203,8 @@ fn request_key(request: &djbod_proto::message::Request) -> Option<&str> {
         | GetObject { key }
         | HeadObject { key }
         | DeleteObject { key }
-        | RepairObject { key } => Some(key.as_str()),
+        | RepairObject { key }
+        | MoveShard { key, .. } => Some(key.as_str()),
         _ => None,
     }
 }

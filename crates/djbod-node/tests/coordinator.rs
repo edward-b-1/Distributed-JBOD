@@ -2,18 +2,21 @@
 //! driven through the client connection: the milestone 2 goal.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
+use djbod_core::erasure::ShardIndex;
 use djbod_core::keyhash::hash_key;
 use djbod_core::layout::shard_file_name;
-use djbod_core::record::DeviceId;
+use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::version::VersionId;
 use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_proto::message::{ErrorCode, ListQuery, Request, Response};
+use djbod_proto::message::{ClusterFinding, ErrorCode, ListQuery, Request, Response, ScrubEvent};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -757,4 +760,270 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         }
         other => panic!("expected refusal, got {other:?}"),
     }
+}
+
+async fn run_scrub(client: &mut Connection, repair: bool) -> Vec<ScrubEvent> {
+    let id = client.start_scrub(None, repair).await.expect("start scrub");
+    let mut events = Vec::new();
+    loop {
+        match client.next_scrub_event(id).await.expect("scrub event") {
+            Ok(event) => events.push(event),
+            Err(end) => {
+                assert!(end.error.is_none(), "{end:?}");
+                return events;
+            }
+        }
+    }
+}
+
+fn no_findings(events: &[ScrubEvent]) -> bool {
+    !events.iter().any(|e| {
+        matches!(
+            e,
+            ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_)
+        )
+    })
+}
+
+fn record_path(test: &TestNode, device: DeviceId, key: &str, version: &VersionId) -> PathBuf {
+    test.node
+        .device(device)
+        .expect("device")
+        .object_directory(&hash_key(key.as_bytes()))
+        .join(djbod_core::layout::record_file_name(version))
+}
+
+fn spare_device(test: &TestNode, record: &MetadataRecord) -> DeviceId {
+    test.node
+        .devices()
+        .into_iter()
+        .map(|d| d.id())
+        .find(|d| record.shard_on(*d).is_none())
+        .expect("one device holds nothing")
+}
+
+#[allow(clippy::result_large_err)]
+async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ClientError> {
+    match client
+        .request(Request::HeadObject {
+            key: key.to_string(),
+        })
+        .await?
+    {
+        Response::HeadObject { record } => Ok(record),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize + 17, 41);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let before = head(&mut client, "k").await.expect("head");
+    assert_eq!(before.revision, 0);
+    let spare = spare_device(&test, &before);
+    let source = before.shards[1].device;
+    let old_shard = std::fs::read(test.shard_path(source, "k", &before)).expect("read shard");
+    let old_record =
+        std::fs::read(record_path(&test, source, "k", &before.version)).expect("read record");
+
+    // A holder is not an eligible destination.
+    match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 1,
+            target: Some(before.shards[0].device),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::InsufficientDevices)
+        }
+        other => panic!("expected InsufficientDevices, got {other:?}"),
+    }
+
+    // Automatic choice: the only device that holds nothing.
+    let after = match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 1,
+            target: None,
+        })
+        .await
+        .expect("move")
+    {
+        Response::MoveShard {
+            record,
+            source: reported_source,
+            source_cleaned,
+            rebuilt,
+        } => {
+            assert_eq!(reported_source, source);
+            assert!(source_cleaned);
+            assert!(
+                !rebuilt,
+                "the source was intact and should have been copied"
+            );
+            record
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(after.revision, 1);
+    assert_eq!(after.device_for(ShardIndex(1)), Some(spare));
+    assert!(after.same_body(&before));
+    assert_eq!(
+        std::fs::read(test.shard_path(spare, "k", &after)).expect("moved shard"),
+        old_shard
+    );
+    assert!(!test.shard_path(source, "k", &before).exists());
+    assert!(!record_path(&test, source, "k", &before.version).exists());
+    for shard in &after.shards {
+        let copy = MetadataRecord::from_json(
+            &std::fs::read_to_string(record_path(&test, shard.device, "k", &after.version))
+                .expect("record copy"),
+        )
+        .expect("parse");
+        assert_eq!(copy, after);
+    }
+    assert_eq!(head(&mut client, "k").await.expect("head"), after);
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let events = run_scrub(&mut client, false).await;
+    assert!(no_findings(&events), "{events:?}");
+
+    // An interrupted re-placement: one holder still has the revision 0
+    // copy. Reads fail until repair finishes the move forwards (18.8.1).
+    let lagging = after.shards[0].device;
+    std::fs::write(
+        record_path(&test, lagging, "k", &after.version),
+        &old_record,
+    )
+    .expect("write");
+    match head(&mut client, "k").await {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
+            assert!(
+                detail.message.contains("3 record copies found, 4 expected"),
+                "{}",
+                detail.message
+            );
+        }
+        other => panic!("expected RecordsInconsistent, got {other:?}"),
+    }
+    let report = repair(&mut client, "k").await;
+    assert_eq!(report.record_copies_rewritten, vec![lagging]);
+    assert!(report.stale_copies_removed.is_empty());
+    assert!(report.shards.iter().all(|s| !s.rewritten));
+    assert_eq!(head(&mut client, "k").await.expect("head"), after);
+
+    // A stale copy: the source comes back with its old record and shard.
+    // Reads ignore it, the scrub reports it, repair removes it.
+    std::fs::create_dir_all(
+        test.shard_path(source, "k", &before)
+            .parent()
+            .expect("key directory"),
+    )
+    .expect("mkdir");
+    std::fs::write(test.shard_path(source, "k", &before), &old_shard).expect("write shard");
+    std::fs::write(
+        record_path(&test, source, "k", &before.version),
+        &old_record,
+    )
+    .expect("write");
+    assert_eq!(head(&mut client, "k").await.expect("head"), after);
+    let events = run_scrub(&mut client, false).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::ClusterFinding(ClusterFinding::StaleCopy {
+                key,
+                device,
+                revision: 0,
+                current_revision: 1,
+                ..
+            }) if key == "k" && *device == source
+        )),
+        "{events:?}"
+    );
+    let report = repair(&mut client, "k").await;
+    assert_eq!(report.stale_copies_removed, vec![source]);
+    assert!(!test.shard_path(source, "k", &before).exists());
+    assert!(!record_path(&test, source, "k", &before.version).exists());
+    let events = run_scrub(&mut client, false).await;
+    assert!(no_findings(&events), "{events:?}");
+
+    // The cleaned source is free again, so an automatic choice lands there
+    // and the revision keeps counting.
+    match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 0,
+            target: None,
+        })
+        .await
+        .expect("move")
+    {
+        Response::MoveShard { record, .. } => {
+            assert_eq!(record.revision, 2);
+            assert_eq!(record.device_for(ShardIndex(0)), Some(source));
+        }
+        other => panic!("{other:?}"),
+    }
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(3 * 3 * BLOCK as usize, 42);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let before = head(&mut client, "k").await.expect("head");
+    let source = before.shards[2].device;
+    let spare = spare_device(&test, &before);
+
+    // Flip a byte in the second block of the source shard: the copy fails
+    // on that block's checksum and the move falls back to a rebuild.
+    let path = test.shard_path(source, "k", &before);
+    let mut bytes = std::fs::read(&path).expect("read");
+    bytes[4096 + BLOCK as usize + 5] ^= 0x80;
+    std::fs::write(&path, &bytes).expect("write");
+
+    let after = match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 2,
+            target: Some(spare),
+        })
+        .await
+        .expect("move")
+    {
+        Response::MoveShard {
+            record,
+            source_cleaned,
+            rebuilt,
+            ..
+        } => {
+            assert!(rebuilt);
+            assert!(source_cleaned);
+            record
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(after.revision, 1);
+    assert_eq!(after.device_for(ShardIndex(2)), Some(spare));
+    assert!(!path.exists());
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let events = run_scrub(&mut client, false).await;
+    assert!(no_findings(&events), "{events:?}");
 }

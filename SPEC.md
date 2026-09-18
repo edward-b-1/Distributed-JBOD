@@ -699,6 +699,9 @@ k, m                integers, the global values when written (6.3)
 block_size          integer, B when written
 shards              array of { index, device }, exactly k+m entries, one per
                     shard index, each device distinct
+revision            integer, the placement revision (18.8.1); 0 when the
+                    version is first written and then omitted from the
+                    file, incremented by every re-placement
 content_type        string, optional
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer
@@ -738,7 +741,9 @@ by an fsync of the directory.
 
 9.4.4 [D] Because the record is on every holder, and every read must reach
 every node, the read path checks that all copies agree. Disagreement is an
-error (section 16).
+error (section 16). Copies at a lower placement revision than the highest
+one found are the leftovers of a re-placement and are ignored, as 18.8.1
+sets out; the k+m copies of the highest revision must agree.
 
 ## 10. Write path (PUT)
 
@@ -1094,9 +1099,10 @@ than m damaged shards, or a checksum mismatch, is an error and nothing
 changes. Then each damaged shard is re-encoded stripe by stripe and
 written through `PutShard` to the device the record names, replacing the
 old file atomically when the new one is complete and verified. The
-response reports every shard's condition and whether it was rewritten.
-Rewriting to a different device (18.3 after device loss) waits on the
-drain and re-placement machinery of milestone 4.
+response reports every shard's condition and whether it was rewritten,
+which record copies were rewritten (18.4.2), and which stale copies were
+removed (18.8.1). Rewriting to a different device is `MoveShard`
+(18.8.2).
 
 18.4.2 [D] **Missing record copies.** Reads require all k+m record copies
 to be present and to agree (9.4.4). Repair is the one operation allowed
@@ -1124,7 +1130,7 @@ Not in v1.
 18.8 [D] Drain, repair, and rebalance are all instances of one operation:
 produce shard `i` of version `v` on device `d`, then update the record.
 
-18.8.1 [P] **Record revision.** The metadata record gains a `revision`
+18.8.1 [D] **Record revision.** The metadata record gains a `revision`
 field, 0 when a version is first written and incremented by every
 re-placement. The version id still identifies the body; the revision
 identifies its placement. Copies of one version may then legitimately
@@ -1137,17 +1143,27 @@ differ in revision during a re-placement, and the rules become:
   in which a re-placement has written its new record to some holders but
   not all, which is fail-stop behaving as designed, and succeeds once the
   window closes.
-- **Repair** (18.4.2 amended): trust the highest revision whose copies
-  agree and number at least k, as now, and additionally probe that every
-  device it lists holds its shard; if it does not, but the next lower
-  revision's copies do, the re-placement never completed and repair
-  finishes it forwards (writes the missing shard, then the missing
-  copies), never backwards.
+- **Repair** (18.4.2 amended): trust the highest revision present,
+  provided its copies agree and that, together with the lower-revision
+  copies describing the same body (same version, key, size, checksum,
+  and scheme), they number at least k. A re-placement interrupted after
+  its first `PutMeta` leaves one copy of the new revision; the old
+  revision's copies vouch for the body, and the new copy's placement is
+  the truth to complete towards. Repair then reads every shard the
+  trusted record lists, rebuilding any that is missing or damaged onto
+  the device it names, and rewrites the missing record copies: it
+  finishes the re-placement forwards, never backwards.
 - **Scrub**: a lower-revision copy on a device the highest revision no
   longer lists is reported as a stale copy and deleted by repair.
 
-18.8.2 [P] **Re-placement of shard `i` of version `v` from device `d` to
-device `d'`.** Every step is idempotent so the whole is safe to rerun:
+18.8.2 [D] **Re-placement of shard `i` of version `v` from device `d` to
+device `d'`.** The operation is `MoveShard` (19.1.3), served by any node.
+The administrator names `d'`, or leaves the choice to the coordinator,
+which picks the active device with the most free room that holds no
+shard of `v`, as a write would (11.1); an automatic choice needs every
+node's free-space report and so fails while any node is unreachable,
+while an explicit `d'` needs only its own node. Every step is idempotent
+so the whole is safe to rerun:
 
 1. Produce the shard on `d'` through `PutShard`: copied block by block from
    `d` if `d` is reachable and intact, otherwise reconstructed from k
@@ -1163,7 +1179,11 @@ device `d'`.** Every step is idempotent so the whole is safe to rerun:
 
 A crash after step 1 leaves an extra shard on `d'` that the scrub reports
 as a shard without a record; after step 3 begins, reads of `v` fail until
-the remaining `PutMeta`s land, and repair completes them (18.8.1).
+the remaining `PutMeta`s land, and repair completes them (18.8.1). The
+lookup that starts the operation is fail-stop like any other (16.1): a
+shard can be moved off a failed *device* while its node answers, which is
+the case 18.3 needs; moving one off a node that is down waits for the
+node, or for the forced removal of 6.2.6.3.
 
 18.9 [P] **Re-encode (change `k` or `m`).** Built on 18.8.2: a version at
 the old scheme is read once, re-encoded stripe by stripe to the new
@@ -1263,6 +1283,12 @@ coordinator, and those nodes send to each other. Every response is either
   version with its condition (intact, unreadable, or corrupt blocks by
   stripe) and whether it was rewritten. Section 18.4.1.
 
+`MoveShard`
+: Request: key, shard index, optional destination device UUID. Performs
+  18.8.2 on the newest version of the key. Response: the new record, the
+  source device, whether the source's copy was removed, and whether the
+  shard was rebuilt from the other shards rather than copied.
+
 `Scrub`
 : Request: rate limit, whether to repair. Response: `ScrubStarted`, then a
   stream of CBOR `ScrubEvent` data frames: each node's findings and
@@ -1335,7 +1361,10 @@ coordinator, and those nodes send to each other. Every response is either
 
 `PutMeta`
 : Request: device UUID, key hash, version id, metadata record. The node
-  writes it with the procedure of 9.4.3. Response: none.
+  writes it with the procedure of 9.4.3. An existing copy of the version
+  is replaced only by an equal record (idempotent) or by a higher
+  placement revision of the same body (18.8.2); anything else is refused.
+  Response: none.
 
 `GetMeta`
 : Request: device UUID, key hash, version id. Response: the record, or
@@ -1830,6 +1859,16 @@ document order, sync, content comparison at equal versions), 18.1.1
 join|add-device`, `djbod cluster show|sync`. Seven multi-node tests run
 several nodes in one process. Remaining: step (d), the cluster-wide scrub
 (20.1.2), once the local engine (PR 16) has merged.
+
+C.4.4 **Milestone 4 status, 18 September 2026: step (a) complete.** The
+record carries `revision` (9.4.2, 18.8.1); `versions_of` applies the
+amended read rule; `RepairObject` trusts the highest revision, completes
+an interrupted re-placement forwards, and removes stale copies; the
+cluster scrub reports `StaleCopy`; `MoveShard` (18.8.2) is
+`coordinator::move_shard` and `djbod move-shard <key> <index> [--to
+<device>]`, copying from the source when it is intact and rebuilding from
+the other shards otherwise. Next: step (b), `set-state`, `drain`,
+`remove-device`, `remove-node`.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
