@@ -331,7 +331,21 @@ time. Because of 6.2.6.1 this is always safe and always converges.
 
 6.2.6.3 [P] **A node that is permanently gone** cannot acknowledge, so no
 document change can complete while it is listed. `djbod cluster
-remove-node <id> --force` handles it:
+remove-node <id>` has two modes, and the tool decides which applies by
+trying to reach the node:
+
+- **Reachable**: the drain path (18.2.1). Its shards are copied off, its
+  devices marked `removed`, and the node removed from the document with
+  its own acknowledgement. No parity is consumed and nothing is rebuilt.
+- **Unreachable, with `--force`**: the path below. Its shards are treated
+  as lost and rebuilt from parity elsewhere.
+- **Reachable, with `--force`**: refused. A node that answers must be
+  drained, not written off; forcing it would spend parity to rebuild
+  shards that could simply be copied, and would leave the node serving
+  a document that no longer lists it until it noticed.
+
+`--force` therefore never runs against a live node, and the forced path
+is:
 
 1. **Show the cost first.** Using the reachable nodes' records, count the
    versions with one or more shards on the dead node's devices and, among
@@ -1031,8 +1045,27 @@ version; the command is safe to interrupt and rerun, since each
 re-placement is complete or not (18.8.2) and the scan simply finds less
 to do. A device with a live shard the cluster cannot rebuild (more than m
 damaged shards in that version) is reported and left `draining`. Draining
-a node is `djbod cluster drain --node <id>`, which drains its devices in
-turn and then proposes a document without the node.
+a node is `djbod cluster remove-node <id>` without `--force`, which drains
+its devices in turn and then proposes a document without the node, with
+the node's own acknowledgement like any other change.
+
+18.2.2 [P] **Running out of room.** Re-placement chooses a target exactly
+as a write does (10.4, 10.5): an `active` device with room for the shard
+file within its headroom, not the draining device, and not already
+holding a shard of that version. So a drain cannot fill a device past its
+headroom or breach device-level independence. If no eligible target
+exists for a version, that version is skipped and reported; the drain
+continues with the rest, and at the end lists what could not be moved and
+leaves the device `draining`. Nothing is lost: a `draining` device still
+serves reads and repairs, it merely receives no new shards. The
+administrator adds capacity and reruns, or reverses with `djbod cluster
+undrain <device>`, which sets the device back to `active` (shards already
+moved stay where they went). Before moving anything, `drain` estimates:
+it sums the shard bytes on the device and compares with the free space on
+eligible targets, and separately checks that at least k+m active devices
+remain after this one, since otherwise no version has a legal target.
+Either shortfall is reported up front and the drain refuses to start
+unless `--partial` is given.
 
 18.3 [D] **Repair after loss.** Identical to drain except that the shard is
 reconstructed from k surviving shards rather than copied.
