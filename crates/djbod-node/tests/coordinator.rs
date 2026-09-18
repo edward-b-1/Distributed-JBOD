@@ -494,3 +494,190 @@ async fn replication_and_jbod_schemes_work_too() {
         assert_eq!(record.m, m);
     }
 }
+
+async fn repair(client: &mut Connection, key: &str) -> djbod_proto::message::RepairReport {
+    match client
+        .request(Request::RepairObject {
+            key: key.to_string(),
+        })
+        .await
+        .expect("repair")
+    {
+        Response::RepairObject(report) => report,
+        other => panic!("expected RepairObject, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
+    use djbod_proto::message::ShardCondition;
+    let test = start_node(4, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(5 * 3 * BLOCK as usize + 999, 21);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record } => record,
+        other => panic!("{other:?}"),
+    };
+
+    // Nothing to do on an intact object.
+    let report = repair(&mut client, "k").await;
+    assert!(report
+        .shards
+        .iter()
+        .all(|s| s.condition == ShardCondition::Intact && !s.rewritten));
+
+    // Corrupt two blocks of data shard 2.
+    let device = record
+        .device_for(djbod_core::erasure::ShardIndex(2))
+        .expect("device");
+    let path = test.shard_path(device, "k", &record);
+    let before = std::fs::read(&path).expect("read");
+    let mut bytes = before.clone();
+    bytes[4096 + BLOCK as usize + 7] ^= 0x01; // stripe 1
+    bytes[4096 + 4 * BLOCK as usize + 7] ^= 0x01; // stripe 4
+    std::fs::write(&path, &bytes).expect("write");
+    assert!(matches!(
+        client.get_object("k").await,
+        Err(ClientError::StreamFailed(_))
+    ));
+    // A failed stream closes the connection; open another.
+    let mut client = test.client().await;
+
+    let report = repair(&mut client, "k").await;
+    let shard2 = report
+        .shards
+        .iter()
+        .find(|s| s.index == 2)
+        .expect("shard 2");
+    assert_eq!(
+        shard2.condition,
+        ShardCondition::CorruptBlocks {
+            stripes: vec![1, 4]
+        }
+    );
+    assert!(shard2.rewritten);
+    assert_eq!(report.shards.iter().filter(|s| s.rewritten).count(), 1);
+    // The rewritten file is byte-for-byte what was there before the damage.
+    assert_eq!(std::fs::read(&path).expect("read"), before);
+    let (_, got) = client.get_object("k").await.expect("get after repair");
+    assert_eq!(got, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_recreates_a_missing_or_structurally_broken_shard() {
+    use djbod_proto::message::ShardCondition;
+    let test = start_node(4, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize, 22);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record } => record,
+        other => panic!("{other:?}"),
+    };
+
+    // Delete the parity shard's file entirely.
+    let parity_device = record
+        .device_for(djbod_core::erasure::ShardIndex(3))
+        .expect("device");
+    let parity_path = test.shard_path(parity_device, "k", &record);
+    let parity_before = std::fs::read(&parity_path).expect("read");
+    std::fs::remove_file(&parity_path).expect("remove");
+
+    // Append a byte to data shard 0, as a text editor would.
+    let data_device = record
+        .device_for(djbod_core::erasure::ShardIndex(0))
+        .expect("device");
+    let data_path = test.shard_path(data_device, "k", &record);
+    let data_before = std::fs::read(&data_path).expect("read");
+    let mut extended = data_before.clone();
+    extended.push(b'\n');
+    std::fs::write(&data_path, &extended).expect("write");
+
+    // Two damaged shards with m = 1 is beyond repair.
+    match client
+        .request(Request::RepairObject {
+            key: "k".to_string(),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch)
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    // Neither file was touched.
+    assert!(!parity_path.exists());
+    assert_eq!(std::fs::read(&data_path).expect("read"), extended);
+
+    // Restore the parity file; now one shard is damaged and repair succeeds.
+    std::fs::write(&parity_path, &parity_before).expect("restore");
+    let report = repair(&mut client, "k").await;
+    let shard0 = report
+        .shards
+        .iter()
+        .find(|s| s.index == 0)
+        .expect("shard 0");
+    assert!(matches!(
+        shard0.condition,
+        ShardCondition::Unreadable { .. }
+    ));
+    assert!(shard0.rewritten);
+    assert_eq!(std::fs::read(&data_path).expect("read"), data_before);
+    assert_eq!(client.get_object("k").await.expect("get").1, body);
+
+    // And a missing file alone is recreated identically.
+    std::fs::remove_file(&parity_path).expect("remove");
+    let report = repair(&mut client, "k").await;
+    let shard3 = report
+        .shards
+        .iter()
+        .find(|s| s.index == 3)
+        .expect("shard 3");
+    assert!(matches!(
+        shard3.condition,
+        ShardCondition::Unreadable { .. }
+    ));
+    assert!(shard3.rewritten);
+    assert_eq!(std::fs::read(&parity_path).expect("read"), parity_before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_of_a_missing_key_and_an_empty_object() {
+    let test = start_node(2, 1, 1).await;
+    let mut client = test.client().await;
+    match client
+        .request(Request::RepairObject {
+            key: "nothing".to_string(),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+    client
+        .put_object("empty", &[], CHUNK, None)
+        .await
+        .expect("put");
+    let report = repair(&mut client, "empty").await;
+    assert_eq!(report.shards.len(), 2);
+    assert!(report.shards.iter().all(|s| !s.rewritten));
+}

@@ -17,7 +17,8 @@ use djbod_proto::frame::{
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
     DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    MessageError, Request, Response, StreamEnd, DATA_PREFIX_LEN,
+    MessageError, RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd,
+    DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -329,6 +330,9 @@ fn every_request_round_trips() {
             start_after: None,
             limit: Some(100),
         }),
+        Request::RepairObject {
+            key: "k".to_string(),
+        },
         Request::LocalStatus,
         Request::LocalLookup { key_hash },
         Request::LocalList(ListQuery {
@@ -434,6 +438,34 @@ fn every_response_round_trips() {
             keys: vec![entry.clone()],
             truncated: false,
         },
+        Response::RepairObject(RepairReport {
+            key: "k".to_string(),
+            version: VersionId([1u8; 16]),
+            shards: vec![
+                ShardRepair {
+                    index: 0,
+                    device: device(1),
+                    condition: ShardCondition::Intact,
+                    rewritten: false,
+                },
+                ShardRepair {
+                    index: 1,
+                    device: device(2),
+                    condition: ShardCondition::CorruptBlocks {
+                        stripes: vec![2, 5],
+                    },
+                    rewritten: true,
+                },
+                ShardRepair {
+                    index: 2,
+                    device: device(3),
+                    condition: ShardCondition::Unreadable {
+                        reason: "no such file".to_string(),
+                    },
+                    rewritten: true,
+                },
+            ],
+        }),
         Response::LocalStatus {
             node: node(1),
             document_version: 7,

@@ -178,6 +178,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
         HeadObject { .. } => "HeadObject",
         DeleteObject { .. } => "DeleteObject",
         ListKeys(_) => "ListKeys",
+        RepairObject { .. } => "RepairObject",
         LocalStatus => "LocalStatus",
         LocalLookup { .. } => "LocalLookup",
         LocalList(_) => "LocalList",
@@ -195,9 +196,11 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
 fn request_key(request: &djbod_proto::message::Request) -> Option<&str> {
     use djbod_proto::message::Request::*;
     match request {
-        PutObject { key, .. } | GetObject { key } | HeadObject { key } | DeleteObject { key } => {
-            Some(key.as_str())
-        }
+        PutObject { key, .. }
+        | GetObject { key }
+        | HeadObject { key }
+        | DeleteObject { key }
+        | RepairObject { key } => Some(key.as_str()),
         _ => None,
     }
 }

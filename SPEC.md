@@ -923,6 +923,21 @@ reconstructed from k surviving shards rather than copied.
 by the checksum. The shard file is reconstructed from k valid shards and
 rewritten on the same or another device.
 
+18.4.1 [D] **`RepairObject`**, the administrative operation implementing
+18.3 and 18.4 for one key, served by any node like the other client
+operations. It reads every shard of the newest version in full: a shard
+whose file cannot be opened is unreadable, a shard with any block failing
+its checksum is corrupt, and an unreachable holder is a fail-stop error.
+Every stripe is decoded from the intact blocks and the whole object is
+checked against the record's checksum before anything is written; more
+than m damaged shards, or a checksum mismatch, is an error and nothing
+changes. Then each damaged shard is re-encoded stripe by stripe and
+written through `PutShard` to the device the record names, replacing the
+old file atomically when the new one is complete and verified. The
+response reports every shard's condition and whether it was rewritten.
+Rewriting to a different device (18.3 after device loss) waits on the
+drain and re-placement machinery of milestone 4.
+
 18.5 [P] Finding the versions that reference a device is a scan of all
 metadata records on all devices, run as a background job.
 
@@ -1025,6 +1040,11 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: optional prefix, optional start-after key, optional limit.
   Response: sorted list of keys and, for each, size and version id; plus a
   flag saying whether more remain. Section 15.
+
+`RepairObject`
+: Request: key. Response: a report listing every shard of the newest
+  version with its condition (intact, unreadable, or corrupt blocks by
+  stripe) and whether it was rewritten. Section 18.4.1.
 
 `PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
@@ -1441,7 +1461,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-core` | On-disk format (device identity, shard file, metadata record), key hash, block checksums, Reed-Solomon wrapper, stripe encode and decode. No networking. Fully unit-tested, including round-trips through the code with every erasure pattern up to `m`. |
 | `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3, data frames, stream ends. Runtime-agnostic (bytes in, messages out). Shared by node, client, and tools. |
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
-| `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
+| `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
 
 C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.
