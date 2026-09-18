@@ -280,7 +280,7 @@ typos.
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
 
-6.2.6 [P] **Changing the document without a master.** Any process holding
+6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's
 command, or a joining node. The procedure:
 
@@ -312,14 +312,17 @@ not consulted for anything else; it is an ordering rule derived from the
 document, and when it leaves the cluster the next-listed node takes its
 place by the same rule.
 
-6.2.6.1 [P] **Nodes only move forward.** A node never accepts a version
+6.2.6.1 [D] **Nodes only move forward.** A node never accepts a version
 lower than or equal to its own, and versions are produced serially by the
 rule above, so at most one document exists for any version number. It
 follows that a node may safely adopt any higher-numbered document it is
 shown for its cluster: that document was accepted by the first-listed node
 and is the only possible successor. A node uses this at startup (18.1.2).
+As a guard against the impossible, a bug or a hand-edited file, every
+proposal and every sync first compares the documents of all nodes
+reporting the same version and refuses to act if any two differ.
 
-6.2.6.2 [P] **Stragglers.** If an apply fails part way, some nodes hold N+1
+6.2.6.2 [D] **Stragglers.** If an apply fails part way, some nodes hold N+1
 and some hold N. Requests between them fail with
 `DocumentVersionMismatch` until resolved (6.2.7), which is the fail-stop
 rule doing its job. `djbod cluster sync` fetches every node's document
@@ -962,7 +965,7 @@ by the client.
 18.1 [D] **Add a device or node.** Update the cluster document. The new
 device becomes eligible for new shards immediately. No data moves.
 
-18.1.1 [P] **Joining a node.** `djbod-node join --config node.toml
+18.1.1 [D] **Joining a node.** `djbod-node join --config node.toml
 --peer <address> --cluster <id>` on the new machine:
 
 1. Connect to the peer as a client with the given cluster id (19.1.5 checks
@@ -979,7 +982,7 @@ than read from `bootstrap_peers` because joining is a one-time
 administrative act and the cluster id is the administrator's proof of
 intent to join this cluster and not another one on the same network.
 
-18.1.2 [P] **Startup.** `run` loads the local document, then asks each
+18.1.2 [D] **Startup.** `run` loads the local document, then asks each
 configured bootstrap peer for its document. A peer reporting a different
 cluster id is an error. A peer holding a higher version is adopted
 (6.2.6.1). A peer holding a lower version is left alone; it will adopt on
@@ -988,7 +991,7 @@ and ignored, since a node must be able to start alone. The node then
 checks that it and all its devices appear in the document it holds
 (refusing to start otherwise, as now) and serves.
 
-18.1.3 [P] **Adding a device to an existing node** is a document change
+18.1.3 [D] **Adding a device to an existing node** is a document change
 listing the new device, made by `djbod cluster add-device` on that node
 after `djbod-node init-device <path>` has initialised the directory. The
 node picks the device up on its next start; hot-adding without a restart
@@ -1633,6 +1636,14 @@ and the coordinator serving `Status`, `PutObject`, `GetObject`,
 `HeadObject`, `DeleteObject`, and `ListKeys` for a cluster of one node by
 fanning node-to-node operations out over loopback). Settled in code: 10.1,
 10.5, 10.6, 10.11, 15.1, 19.1.2, 19.1.5, 20.4.
+
+C.4.3 **Milestone 3 status, 18 September 2026: steps (a) to (c)
+complete.** `djbod_node::membership` implements 6.2.6 (propose in
+document order, sync, content comparison at equal versions), 18.1.1
+(join), 18.1.2 (startup adoption), and 18.1.3 (add-device); `djbod-node
+join|add-device`, `djbod cluster show|sync`. Seven multi-node tests run
+several nodes in one process. Remaining: step (d), the cluster-wide scrub
+(20.1.2), once the local engine (PR 16) has merged.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
