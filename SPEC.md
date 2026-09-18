@@ -291,8 +291,12 @@ command, or a joining node. The procedure:
 2. **Apply in document order.** Send `ApplyClusterConfig(N+1)` to the
    nodes in the order the current document lists them, one at a time,
    and stop at the first refusal. A node accepts only a document naming
-   its cluster whose version is exactly its own plus one (6.2.7), saves
-   it durably, then switches.
+   its cluster whose version is higher than its own (6.2.6.1), saves it
+   durably, then switches. "Higher" rather than "exactly plus one" so
+   that a straggler two versions behind can catch up in one step
+   (6.2.6.2); the serialisation below does not depend on the stricter
+   rule, since a competing N+1 arriving at a node already holding N+1 is
+   not higher and is refused.
 3. **Report.** Success means every node accepted. A refusal by the first
    node means someone else's N+1 got there first: fetch the new document
    and try again from step 1. A failure after the first node leaves
@@ -333,7 +337,10 @@ is a known limitation of v1.
 
 6.2.7 [D] All nodes must hold the same document version to serve requests.
 A node that finds itself holding a different version from a peer during a
-request returns an error.
+request returns an error, and a node refuses the `Hello` of a node peer
+holding a different version (19.1.5). The coordinator reports such a
+refusal as `DocumentVersionMismatch` with the peer's own message, not as
+the peer being unreachable.
 
 ### 6.3 Per-object (in the metadata record)
 
