@@ -312,6 +312,22 @@ impl Device {
         object_directory(&self.root, DEFAULT_BUCKET, key_hash)
     }
 
+    /// Every key directory on this device, in path order.
+    pub fn key_directories(&self) -> Result<Vec<PathBuf>, DeviceError> {
+        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
+        let mut out = Vec::new();
+        for first in read_dir_sorted(&bucket)? {
+            for second in read_dir_sorted(&first)? {
+                for key_dir in read_dir_sorted(&second)? {
+                    if key_dir.is_dir() {
+                        out.push(key_dir);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Begin writing one shard file. Creates the object directory if
     /// needed, creates the temporary file, reserves its full length
     /// (10.6), and writes the header. `ENOSPC` surfaces as an I/O error.
@@ -534,7 +550,7 @@ fn remove_if_present(path: &Path) -> Result<(), DeviceError> {
     }
 }
 
-fn read_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>, DeviceError> {
+pub(crate) fn read_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>, DeviceError> {
     let mut paths = Vec::new();
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,

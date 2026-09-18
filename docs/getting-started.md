@@ -187,6 +187,23 @@ will save it with a trailing newline or re-encoded bytes, which changes
 its length; the node reports that as a trailer that does not describe the
 file, and `repair` fixes it just the same.
 
+**Finding damage before a client does.** Repair fixes what a read has
+tripped over; a scrub finds damage first. Today the check is a
+single-machine, offline tool:
+
+```sh
+target/release/djbod-node scrub --config /tmp/djbod/node.toml
+```
+
+It reads every record and every block on this machine's devices against
+their checksums and prints one line per finding, exit code 2 if anything
+is wrong, 0 if clean. It reads the disks directly and needs no running
+node. `--rate-mib 50` caps the read rate, and `--json` gives one object
+per finding. Fix what it finds with `djbod repair <key>`.
+
+The cluster-wide scrub, `djbod scrub`, which sweeps every node from one
+command and repairs what it finds, arrives with multi-node support.
+
 **A missing shard.** Delete a `.shard` file and `get` fails with
 `NotFound` naming the device that lost it; `repair` recreates the file.
 
