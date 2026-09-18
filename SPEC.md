@@ -1214,6 +1214,8 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Administration web UI (20.3).
 - TLS with per-node certificates listed in the cluster document, and
   client authentication (19.1.6). Optional for trusted-LAN deployments.
+- Users and permissions: who may read or write which keys, once clients
+  are authenticated. Distinct from authentication and may be dropped.
 - S3 translation layer (19.2). Separate stream of work.
 - Packing shard files into large volume files to reduce inode and fsync
   cost. The logical layout in section 9 is designed to survive this change
