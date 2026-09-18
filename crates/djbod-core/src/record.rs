@@ -7,6 +7,20 @@
 //! encoding parameters the version was written with (6.3), so a recovery
 //! tool needs no cluster configuration and the global values can change
 //! without making old objects unreadable.
+//!
+//! On disk the record is wrapped with a checksum of itself (9.4.5):
+//!
+//! ```json
+//! { "record": { ...the fields below... }, "checksum": "16 hex characters" }
+//! ```
+//!
+//! The checksum is XXH3-64 over the record's *canonical* form, not over
+//! the file's bytes, so the file may be pretty-printed and its keys may be
+//! in any order. Canonical form: JSON with object keys sorted bytewise, no
+//! whitespace, integers in decimal, strings with JSON's minimal escaping,
+//! optional fields omitted when absent. Modelled on the JSON
+//! Canonicalization Scheme (RFC 8785) for the value types used here, which
+//! exclude floats.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +29,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::checksum::BlockChecksum;
+use crate::checksum::{checksum_block, BlockChecksum};
 use crate::erasure::{Scheme, SchemeError, ShardIndex};
 use crate::keyhash::{hash_key, KeyHash};
 use crate::version::VersionId;
@@ -71,6 +85,13 @@ pub struct MetadataRecord {
 pub enum RecordError {
     #[error("not valid JSON or not a metadata record: {0}")]
     Json(String),
+    #[error(
+        "record checksum {stored:?} does not match its contents, which checksum to {computed:?}"
+    )]
+    ChecksumMismatch {
+        stored: BlockChecksum,
+        computed: BlockChecksum,
+    },
     #[error("system field is {0:?}, not {SYSTEM_NAME:?}")]
     WrongSystem(String),
     #[error("unsupported record format version {0}")]
@@ -91,18 +112,84 @@ pub enum RecordError {
     DuplicateDevice(DeviceId),
 }
 
+/// The on-disk form: the record and a checksum of its canonical form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct StoredRecord {
+    record: MetadataRecord,
+    checksum: BlockChecksum,
+}
+
+/// Write a JSON value in canonical form: keys sorted bytewise, no
+/// whitespace. Numbers and strings are written as serde_json writes them,
+/// which for the integers and strings in a record is the canonical
+/// spelling.
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).expect("a string always serializes"));
+                out.push(':');
+                write_canonical(&map[*key], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 impl MetadataRecord {
-    /// Serialize as indented JSON, for humans as much as for machines.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("a metadata record always serializes")
+    /// The canonical form the record checksum covers (9.4.5).
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let value = serde_json::to_value(self).expect("a metadata record always serializes");
+        let mut out = String::new();
+        write_canonical(&value, &mut out);
+        out.into_bytes()
     }
 
-    /// Parse and validate.
+    /// XXH3-64 over the canonical form.
+    pub fn checksum(&self) -> BlockChecksum {
+        checksum_block(&self.canonical_bytes())
+    }
+
+    /// Serialize the on-disk form as indented JSON, for humans as much as
+    /// for machines. The checksum is computed here.
+    pub fn to_json(&self) -> String {
+        let stored = StoredRecord {
+            record: self.clone(),
+            checksum: self.checksum(),
+        };
+        serde_json::to_string_pretty(&stored).expect("a metadata record always serializes")
+    }
+
+    /// Parse the on-disk form, verify its checksum, and validate.
     pub fn from_json(json: &str) -> Result<MetadataRecord, RecordError> {
-        let record: MetadataRecord =
+        let stored: StoredRecord =
             serde_json::from_str(json).map_err(|e| RecordError::Json(e.to_string()))?;
-        record.validate()?;
-        Ok(record)
+        let computed = stored.record.checksum();
+        if computed != stored.checksum {
+            return Err(RecordError::ChecksumMismatch {
+                stored: stored.checksum,
+                computed,
+            });
+        }
+        stored.record.validate()?;
+        Ok(stored.record)
     }
 
     /// Check the invariants a record must satisfy regardless of where it

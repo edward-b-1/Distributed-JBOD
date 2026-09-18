@@ -586,7 +586,8 @@ devices are not included; placement lives only in the record.
 ### 9.4 Metadata record
 
 9.4.1 [D] One record per version, in a human-readable format (JSON),
-stored on every device holding a shard of that version.
+stored on every device holding a shard of that version, wrapped with a
+checksum of itself (9.4.5).
 
 9.4.2 [P] Fields:
 
@@ -619,6 +620,21 @@ format version; the key hash must equal the hash of the key (9.1.6); the
 scheme must be valid and the block size a positive multiple of 4096; the
 shard list must contain every index `0 .. k+m-1` exactly once on distinct
 devices. A record failing any check is treated as corrupt (16.1).
+
+9.4.5 [D] **Record checksum.** The file holds
+`{ "record": { ... }, "checksum": "<16 hex>" }`, where the checksum is
+XXH3-64 over the record's canonical form: JSON with object keys sorted
+bytewise, no whitespace, integers in decimal, strings with JSON's minimal
+escaping, and absent optional fields omitted, modelled on the JSON
+Canonicalization Scheme (RFC 8785) for the value types a record uses,
+which exclude floats. Because the checksum covers the canonical form and
+not the file's bytes, the file is written indented for humans and remains
+valid if reformatted or if its keys are reordered, while any change to a
+value is caught. A record failing its checksum is treated as corrupt
+(16.1). This gives records what blocks already have: a device can verify
+its records alone during a scrub (20.1), and when the k+m copies of a
+record disagree (9.4.4) the checksum says which copy is wrong, so repair
+knows which to rewrite.
 
 9.4.3 [D] The record is written after all shard files of the version are
 durable, using the same temporary-name, fsync, rename procedure, followed

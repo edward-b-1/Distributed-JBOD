@@ -70,6 +70,12 @@ fn json_round_trips_exactly() {
 #[test]
 fn json_is_readable_and_uses_the_specified_text_forms() {
     let json = sample_record().to_json();
+    // Wrapped with its checksum, indented for humans.
+    assert!(json.starts_with("{\n  \"record\": {"));
+    assert!(json.contains(&format!(
+        "\"checksum\": \"{}\"",
+        sample_record().checksum().to_hex()
+    )));
     // Field names and text forms a human would grep for on a disk.
     assert!(json.contains("\"system\": \"distributed-jbod\""));
     assert!(json.contains("\"key\": \"photos/2026/cat.jpg\""));
@@ -228,6 +234,86 @@ fn malformed_json_and_bad_text_forms_are_rejected() {
     let bad_date = json.replace("2026-09-17T10:15:30Z", "yesterday");
     assert!(matches!(
         MetadataRecord::from_json(&bad_date),
+        Err(RecordError::Json(_))
+    ));
+}
+
+#[test]
+fn canonical_form_has_sorted_keys_and_no_whitespace() {
+    let canonical = String::from_utf8(sample_record().canonical_bytes()).expect("utf-8");
+    assert!(!canonical.contains(' '));
+    assert!(!canonical.contains('\n'));
+    assert!(canonical.starts_with("{\"block_size\":1048576,\"bucket\":\"default\","));
+    // Nested objects are canonical too: shard entries sort "device" before "index".
+    assert!(canonical.contains("{\"device\":\"10000000-0000-0000-0000-000000000001\",\"index\":0}"));
+    // Absent optional fields do not appear.
+    assert!(!canonical.contains("user_metadata"));
+    // Stable across calls.
+    assert_eq!(
+        sample_record().canonical_bytes(),
+        sample_record().canonical_bytes()
+    );
+}
+
+#[test]
+fn checksum_ignores_whitespace_and_key_order_but_not_content() {
+    let record = sample_record();
+    let json = record.to_json();
+
+    // Reformatting the file does not break the checksum.
+    let value: serde_json::Value = serde_json::from_str(&json).expect("parse");
+    let compact = serde_json::to_string(&value).expect("serialize");
+    assert!(!compact.contains('\n'));
+    assert_eq!(
+        MetadataRecord::from_json(&compact).expect("compact parses"),
+        record
+    );
+
+    // Nor does reordering keys: rebuild the record object with keys reversed.
+    let mut reordered = String::from("{\"checksum\": ");
+    reordered.push_str(&serde_json::to_string(&value["checksum"]).expect("serialize"));
+    reordered.push_str(", \"record\": {");
+    let record_map = value["record"].as_object().expect("record is an object");
+    let mut keys: Vec<&String> = record_map.keys().collect();
+    keys.sort();
+    keys.reverse();
+    for (i, key) in keys.iter().enumerate() {
+        if i > 0 {
+            reordered.push(',');
+        }
+        reordered.push_str(&format!(
+            "\"{key}\": {}",
+            serde_json::to_string(&record_map[*key]).expect("serialize")
+        ));
+    }
+    reordered.push_str("}}");
+    assert_eq!(
+        MetadataRecord::from_json(&reordered).expect("reordered parses"),
+        record
+    );
+
+    // But a changed value is caught, even one that is otherwise valid.
+    let tampered = json.replace("\"size\": 10485760", "\"size\": 10485761");
+    assert_ne!(tampered, json);
+    assert!(matches!(
+        MetadataRecord::from_json(&tampered),
+        Err(RecordError::ChecksumMismatch { .. })
+    ));
+
+    // And a damaged checksum field is caught.
+    let checksum_hex = record.checksum().to_hex();
+    let mut flipped = checksum_hex.clone().into_bytes();
+    flipped[0] = if flipped[0] == b'0' { b'1' } else { b'0' };
+    let bad_checksum = json.replace(&checksum_hex, &String::from_utf8(flipped).expect("utf-8"));
+    assert!(matches!(
+        MetadataRecord::from_json(&bad_checksum),
+        Err(RecordError::ChecksumMismatch { .. })
+    ));
+
+    // A record without the wrapper is not accepted.
+    let bare = serde_json::to_string(&value["record"]).expect("serialize");
+    assert!(matches!(
+        MetadataRecord::from_json(&bare),
         Err(RecordError::Json(_))
     ));
 }
