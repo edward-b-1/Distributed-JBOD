@@ -330,22 +330,17 @@ and pushes the highest version to every node behind it, one version at a
 time. Because of 6.2.6.1 this is always safe and always converges.
 
 6.2.6.3 [P] **A node that is permanently gone** cannot acknowledge, so no
-document change can complete while it is listed. `djbod cluster
-remove-node <id>` has two modes, and the tool decides which applies by
-trying to reach the node:
+document change can complete while it is listed, and it cannot be drained
+because its shards cannot be read. `djbod cluster remove-node <id>
+--force` is for that case only. It first tries to reach the node and
+refuses if it answers: a live node is removed by `set-state`, `drain`, and
+plain `remove-node` (18.2.1), which spends no parity. Forcing a live node
+would rebuild from parity what could simply be copied, and would leave it
+serving under a document that no longer lists it.
 
-- **Reachable**: the drain path (18.2.1). Its shards are copied off, its
-  devices marked `removed`, and the node removed from the document with
-  its own acknowledgement. No parity is consumed and nothing is rebuilt.
-- **Unreachable, with `--force`**: the path below. Its shards are treated
-  as lost and rebuilt from parity elsewhere.
-- **Reachable, with `--force`**: refused. A node that answers must be
-  drained, not written off; forcing it would spend parity to rebuild
-  shards that could simply be copied, and would leave the node serving
-  a document that no longer lists it until it noticed.
 
-`--force` therefore never runs against a live node, and the forced path
-is:
+
+The forced path:
 
 1. **Show the cost first.** Using the reachable nodes' records, count the
    versions with one or more shards on the dead node's devices and, among
@@ -1034,37 +1029,48 @@ places that shard on another eligible device, and updates the metadata
 record on all holders. When no record references the device, it is set to
 `removed` and may be detached. Draining a node is draining all its devices.
 
-18.2.1 [P] **`djbod cluster drain <device>`** runs the drain as one
-administrative command that proceeds to completion: (1) propose a document
-marking the device `draining` (6.2.6); (2) list every key, and for every
-version that lists the device, re-place its shard (18.8.2) onto an
-eligible device chosen as for a write (10.4, 10.5), excluding the
-version's other holders; (3) when a full scan finds no version listing
-the device, propose a document marking it `removed`. Progress prints per
-version; the command is safe to interrupt and rerun, since each
-re-placement is complete or not (18.8.2) and the scan simply finds less
-to do. A device with a live shard the cluster cannot rebuild (more than m
-damaged shards in that version) is reported and left `draining`. Draining
-a node is `djbod cluster remove-node <id>` without `--force`, which drains
-its devices in turn and then proposes a document without the node, with
-the node's own acknowledgement like any other change.
+18.2.1 [P] **Three commands, one job each.** State, movement, and
+membership are separate, so each command is small and each can be
+inspected before the next is run:
+
+- **`djbod cluster set-state <device> draining|active`** changes the
+  device's state in the cluster document (6.2.6) and nothing else. No data
+  moves. A `draining` device receives no new shards from anyone: not from
+  client writes, not from repairs, not from other devices' drains, because
+  placement (10.4) considers only `active` devices. It still serves reads
+  and repairs of what it holds. Setting it back to `active` is the same
+  command and likewise moves nothing.
+- **`djbod cluster drain <device>`** moves data: for every version that
+  lists a `draining` device, re-place its shard (18.8.2) onto an eligible
+  device. It refuses to run against a device that is not `draining`, so
+  the state change is always an explicit, separate step. It runs to
+  completion, prints progress per version, and is safe to interrupt and
+  rerun. `--node <id>` drains every `draining` device of a node in turn.
+  A version the cluster cannot rebuild (more than m damaged shards) is
+  reported and left.
+- **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
+  change membership only. They scan every record in the cluster (18.5)
+  and refuse if any still lists the device, or any of the node's devices;
+  otherwise they propose a document marking the device `removed`, or
+  dropping the node and its devices, with the node's own acknowledgement
+  like any other change. A live node is therefore removed by `set-state`,
+  `drain`, `remove-node`, each of which can be checked with `status` and
+  `scrub` in between. A dead node is the one case that skips the scan:
+  6.2.6.3.
 
 18.2.2 [P] **Running out of room.** Re-placement chooses a target exactly
 as a write does (10.4, 10.5): an `active` device with room for the shard
-file within its headroom, not the draining device, and not already
-holding a shard of that version. So a drain cannot fill a device past its
-headroom or breach device-level independence. If no eligible target
-exists for a version, that version is skipped and reported; the drain
-continues with the rest, and at the end lists what could not be moved and
-leaves the device `draining`. Nothing is lost: a `draining` device still
-serves reads and repairs, it merely receives no new shards. The
-administrator adds capacity and reruns, or reverses with `djbod cluster
-undrain <device>`, which sets the device back to `active` (shards already
-moved stay where they went). Before moving anything, `drain` estimates:
-it sums the shard bytes on the device and compares with the free space on
-eligible targets, and separately checks that at least k+m active devices
-remain after this one, since otherwise no version has a legal target.
-Either shortfall is reported up front and the drain refuses to start
+file within its headroom, not already holding a shard of that version.
+So a drain cannot fill a device past its headroom or breach device-level
+independence. If no eligible target exists for a version, it is skipped
+and reported; the drain continues with the rest and at the end lists what
+could not be moved. Nothing is lost: the device stays `draining` and keeps
+serving what it holds. The administrator adds capacity and reruns, or
+sets the device back to `active`, leaving shards already moved where they
+went. Before moving anything, `drain` estimates: it sums the shard bytes
+on the device against the free space on eligible targets, and checks that
+at least k+m `active` devices exist, since otherwise no version has a
+legal target. Either shortfall is reported and the drain refuses to start
 unless `--partial` is given.
 
 18.3 [D] **Repair after loss.** Identical to drain except that the shard is
@@ -1761,9 +1767,10 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    21.1.
 4. **Administration.** In order: (a) record revision and the re-placement
    primitive (18.8.1, 18.8.2), with the amended read and repair rules;
-   (b) `djbod cluster drain` (18.2.1) and `remove-node --force`
-   (6.2.6.3); (c) `djbod-recover` (20.2.2); (d) re-encode (18.9); (e) the
-   size limits into the cluster document (21.4). Rebalance stays deferred.
+   (b) `set-state`, `drain`, `remove-device`, `remove-node` (18.2.1) and
+   `remove-node --force` (6.2.6.3); (c) `djbod-recover` (20.2.2); (d)
+   re-encode (18.9); (e) the size limits into the cluster document (21.4).
+   Rebalance stays deferred.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
