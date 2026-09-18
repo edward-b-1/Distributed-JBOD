@@ -1,7 +1,7 @@
 //! A node's state: its configuration, its devices, and its copy of the
 //! cluster document (SPEC 5, 6.2).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -181,22 +181,28 @@ impl Node {
         devices: Vec<Device>,
     ) -> Result<Node, NodeError> {
         // Two configured paths on one filesystem are one disk (5.3).
-        for (i, a) in devices.iter().enumerate() {
-            for b in &devices[..i] {
-                if a.filesystem_id() == b.filesystem_id() {
-                    if config.allow_shared_filesystem {
-                        tracing::warn!(
-                            a = %a.root().display(),
-                            b = %b.root().display(),
-                            "devices share a filesystem; allow_shared_filesystem is set, so losing that disk loses both"
-                        );
-                    } else {
-                        return Err(NodeError::SameFilesystem {
-                            a: a.root().to_path_buf(),
-                            b: b.root().to_path_buf(),
-                        });
-                    }
-                }
+        let mut by_filesystem: BTreeMap<u64, Vec<&Device>> = BTreeMap::new();
+        for device in &devices {
+            by_filesystem
+                .entry(device.filesystem_id())
+                .or_default()
+                .push(device);
+        }
+        for group in by_filesystem.values().filter(|g| g.len() > 1) {
+            if config.allow_shared_filesystem {
+                let paths: Vec<String> = group
+                    .iter()
+                    .map(|d| d.root().display().to_string())
+                    .collect();
+                tracing::warn!(
+                    devices = %paths.join(", "),
+                    "these devices share one filesystem; allow_shared_filesystem is set, so losing that disk loses all of them"
+                );
+            } else {
+                return Err(NodeError::SameFilesystem {
+                    a: group[0].root().to_path_buf(),
+                    b: group[1].root().to_path_buf(),
+                });
             }
         }
         let node_id = NodeId(config.node_id);
