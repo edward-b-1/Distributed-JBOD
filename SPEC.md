@@ -280,15 +280,67 @@ typos.
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
 
-6.2.6 [O] The mechanism by which the cluster document is changed and
-propagated without a master. Proposed for v1: an administrative command,
-issued through any node, that requires every node in the current document
-to be reachable and to acknowledge the new version before the change is
-considered applied. This is consistent with the fail-stop rule.
+6.2.6 [P] **Changing the document without a master.** Any process holding
+the current document may propose the next version: an administrator's
+command, or a joining node. The procedure:
+
+1. **Check.** Fetch the document from every node in the current
+   document (`GetClusterConfig`). All must be reachable and all must hold
+   the same version N; otherwise stop and report which node holds what
+   (see 6.2.6.2). Build version N+1 from that document.
+2. **Apply in document order.** Send `ApplyClusterConfig(N+1)` to the
+   nodes in the order the current document lists them, one at a time,
+   and stop at the first refusal. A node accepts only a document naming
+   its cluster whose version is higher than its own (6.2.6.1), saves it
+   durably, then switches. "Higher" rather than "exactly plus one" so
+   that a straggler two versions behind can catch up in one step
+   (6.2.6.2); the serialisation below does not depend on the stricter
+   rule, since a competing N+1 arriving at a node already holding N+1 is
+   not higher and is refused.
+3. **Report.** Success means every node accepted. A refusal by the first
+   node means someone else's N+1 got there first: fetch the new document
+   and try again from step 1. A failure after the first node leaves
+   stragglers at N, which 6.2.6.2 resolves.
+
+Applying in document order is what makes concurrent proposals safe
+without a master. Two proposers who both saw version N both send their
+N+1 to the same first node; it accepts one and refuses the other with
+`NotNextVersion`, and the refused proposer has touched nothing. Two
+different documents with the same version number therefore cannot both
+enter the cluster. The first-listed node holds no role at run time and is
+not consulted for anything else; it is an ordering rule derived from the
+document, and when it leaves the cluster the next-listed node takes its
+place by the same rule.
+
+6.2.6.1 [P] **Nodes only move forward.** A node never accepts a version
+lower than or equal to its own, and versions are produced serially by the
+rule above, so at most one document exists for any version number. It
+follows that a node may safely adopt any higher-numbered document it is
+shown for its cluster: that document was accepted by the first-listed node
+and is the only possible successor. A node uses this at startup (18.1.2).
+
+6.2.6.2 [P] **Stragglers.** If an apply fails part way, some nodes hold N+1
+and some hold N. Requests between them fail with
+`DocumentVersionMismatch` until resolved (6.2.7), which is the fail-stop
+rule doing its job. `djbod cluster sync` fetches every node's document
+and pushes the highest version to every node behind it, one version at a
+time. Because of 6.2.6.1 this is always safe and always converges.
+
+6.2.6.3 [P] **A node that is permanently gone** cannot acknowledge, so no
+document change can complete while it is listed. Removing it therefore
+needs a `--force` that applies to every reachable node and lists the dead
+node as `removed`. If the dead node later returns it finds itself absent
+from a higher-numbered document and refuses to serve; its devices are
+re-initialised or discarded by hand. Deferred to milestone 4 with drain
+and removal (18.2); until then a dead node blocks document changes, which
+is a known limitation of v1.
 
 6.2.7 [D] All nodes must hold the same document version to serve requests.
 A node that finds itself holding a different version from a peer during a
-request returns an error.
+request returns an error, and a node refuses the `Hello` of a node peer
+holding a different version (19.1.5). The coordinator reports such a
+refusal as `DocumentVersionMismatch` with the peer's own message, not as
+the peer being unreachable.
 
 ### 6.3 Per-object (in the metadata record)
 
@@ -910,6 +962,38 @@ by the client.
 18.1 [D] **Add a device or node.** Update the cluster document. The new
 device becomes eligible for new shards immediately. No data moves.
 
+18.1.1 [P] **Joining a node.** `djbod-node join --config node.toml
+--peer <address> --cluster <id>` on the new machine:
+
+1. Connect to the peer as a client with the given cluster id (19.1.5 checks
+   it), fetch the current document, and save it to the state directory.
+2. Initialise every configured device with that cluster id (5.2.1).
+3. Propose version N+1 by the procedure of 6.2.6: the current document
+   plus this node (id and advertised address) and its devices as `active`.
+4. On success the node is a member; `run` may start. On a refusal by the
+   first node, refetch and retry. On any other failure, report and leave
+   the devices initialised, so a retry does not need empty directories.
+
+The peer address and cluster id are given on the command line rather
+than read from `bootstrap_peers` because joining is a one-time
+administrative act and the cluster id is the administrator's proof of
+intent to join this cluster and not another one on the same network.
+
+18.1.2 [P] **Startup.** `run` loads the local document, then asks each
+configured bootstrap peer for its document. A peer reporting a different
+cluster id is an error. A peer holding a higher version is adopted
+(6.2.6.1). A peer holding a lower version is left alone; it will adopt on
+its own startup or through `sync`. Peers that cannot be reached are logged
+and ignored, since a node must be able to start alone. The node then
+checks that it and all its devices appear in the document it holds
+(refusing to start otherwise, as now) and serves.
+
+18.1.3 [P] **Adding a device to an existing node** is a document change
+listing the new device, made by `djbod cluster add-device` on that node
+after `djbod-node init-device <path>` has initialised the directory. The
+node picks the device up on its next start; hot-adding without a restart
+is deferred.
+
 18.2 [D] **Drain a device.** Set its state to `draining`. It receives no
 new shards. A drain job finds every version with a shard on that device,
 places that shard on another eligible device, and updates the metadata
@@ -1046,6 +1130,11 @@ coordinator, and those nodes send to each other. Every response is either
   version with its condition (intact, unreadable, or corrupt blocks by
   stripe) and whether it was rewritten. Section 18.4.1.
 
+`Scrub` (milestone 3)
+: Request: rate limit, whether to repair. Response: the merged findings
+  of every node's `LocalScrub` plus the cross-node checks of 20.1.2, then
+  the repairs performed. Streams findings to the client as they arrive.
+
 `PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
   of k+m (device UUID, node address) chosen by 10.4 and 10.5. The
@@ -1080,6 +1169,12 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: optional prefix, optional start-after, optional limit.
   Response: for each matching record on any local device, the key, size,
   and version id. Duplicates across devices are the coordinator's problem.
+
+`LocalScrub` (milestone 3)
+: Request: rate limit. Response: a stream of findings from the local
+  scrub engine (20.1.2) over this node's devices as they arise, ending
+  with a summary. The only node-to-node operation whose response streams
+  control messages rather than blocks.
 
 `PutShard`
 : Request: device UUID, key hash, version id, shard index, block count,
@@ -1490,11 +1585,16 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    one machine, the native protocol, and a CLI. PUT, GET, DELETE, and LIST
    work end to end against a cluster of one node. Settles 21.5 (content
    length), 21.6 (reservation), and 21.9 (CBOR).
-3. **Cluster.** Cluster document, `Hello` checks between nodes,
-   broadcast lookup, placement across nodes, fail-stop error propagation.
-   Integration tests start several node processes on localhost with
-   directories as devices, kill one, and check every error in 16.1 is
-   produced with the detail in 16.2. Settles 21.1 and 21.8.
+3. **Cluster.** In order: (a) the document change procedure of 6.2.6
+   with `djbod cluster show|sync`; (b) `djbod-node join` and startup
+   adoption (18.1.1, 18.1.2); (c) multi-node integration tests: several
+   nodes in one test process on localhost ports, objects placed across
+   nodes, a node stopped and every error of 16.1 checked for the detail
+   of 16.2, stragglers created and synced; (d) the cluster-wide scrub,
+   `LocalScrub` and `djbod scrub` with repair (20.1.2), including the
+   write-collision guard of 20.1.2.1. The coordinator already fans out to
+   every node in the document and needs no change for (a) to (c). Settles
+   21.1.
 4. **Administration.** Drain, repair, re-encode, the recovery tool, and
    the scrubber. Settles 21.2 and 21.7.
 
