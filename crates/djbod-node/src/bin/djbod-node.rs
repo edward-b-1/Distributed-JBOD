@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;
+use tracing_subscriber::field::MakeExt as _;
 
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
@@ -65,10 +66,26 @@ async fn main() -> anyhow::Result<()> {
     // default is standard output. Colour and styling only when a person
     // is watching; a log file or the journal gets plain text.
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    // The default field formatter italicises field names on a terminal.
+    // This one writes `name=value` plainly, leaving the level colours and
+    // the dimmed target to the event formatter.
+    let plain_fields = tracing_subscriber::fmt::format::debug_fn(
+        |writer: &mut tracing_subscriber::fmt::format::Writer<'_>,
+         field: &tracing::field::Field,
+         value: &dyn std::fmt::Debug| {
+            if field.name() == "message" {
+                write!(writer, "{value:?}")
+            } else {
+                write!(writer, "{}={value:?}", field.name())
+            }
+        },
+    )
+    .delimited(" ");
     match cli.log_format {
         LogFormat::Text => tracing_subscriber::fmt()
             .with_writer(std::io::stderr)
             .with_ansi(ansi)
+            .fmt_fields(plain_fields)
             .with_env_filter(filter)
             .init(),
         LogFormat::Json => tracing_subscriber::fmt()
