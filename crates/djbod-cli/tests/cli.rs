@@ -307,7 +307,7 @@ async fn remove_device_from_the_command_line() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn set_scheme_reencodes_every_object_and_is_safe_to_rerun() {
+async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let test = start_node(6, 3, 1).await;
     let dir = tempfile::tempdir().expect("temp dir");
     let big = dir.path().join("big.bin");
@@ -340,9 +340,28 @@ async fn set_scheme_reencodes_every_object_and_is_safe_to_rerun() {
         "{err}"
     );
 
+    // The scheme change moves no data: the objects stay at 3+1, readable.
     let (ok, out, err) = djbod(&test, &["cluster", "set-scheme", "--k", "4", "--m", "2"]);
     assert!(ok, "{out}{err}");
     assert!(out.contains("scheme is now 4+2"), "{out}");
+    assert!(
+        out.contains("3 object(s) are stored at another scheme"),
+        "{out}"
+    );
+    let (ok, out, _) = djbod(&test, &["--json", "head", "big"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(record["k"], 3);
+    let copy = dir.path().join("big.before");
+    let (ok, _, err) = djbod(&test, &["get", "big", copy.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert_eq!(
+        std::fs::read(&copy).expect("read"),
+        std::fs::read(&big).expect("read")
+    );
+
+    let (ok, out, err) = djbod(&test, &["cluster", "reencode"]);
+    assert!(ok, "{out}{err}");
     assert_eq!(out.matches("re-encoded  ").count(), 3, "{out}");
     assert!(out.contains("re-encoded  big  3+1 -> 4+2"), "{out}");
     assert!(
@@ -385,10 +404,13 @@ async fn set_scheme_reencodes_every_object_and_is_safe_to_rerun() {
     let (ok, out, err) = djbod(&test, &["scrub"]);
     assert!(ok, "{out}{err}");
 
-    // A rerun changes nothing and re-encodes nothing.
+    // Reruns change nothing and re-encode nothing.
     let (ok, out, err) = djbod(&test, &["cluster", "set-scheme", "--k", "4", "--m", "2"]);
     assert!(ok, "{err}");
     assert!(out.contains("was already 4+2"), "{out}");
+    assert!(out.contains("every object is at this scheme"), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "reencode"]);
+    assert!(ok, "{err}");
     assert!(
         err.contains("3 object(s) examined, 0 re-encoded, 0 failed"),
         "{err}"

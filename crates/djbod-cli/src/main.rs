@@ -128,9 +128,9 @@ enum ClusterCommand {
         #[arg(long)]
         partial: bool,
     },
-    /// Change the global k and m (and optionally the block size), then
-    /// re-encode every object still at another scheme. Safe to interrupt
-    /// and rerun.
+    /// Change the global k and m (and optionally the block size). Moves no
+    /// data: new writes use the new scheme, existing objects keep theirs
+    /// until `reencode` is run.
     SetScheme {
         /// Data shards per stripe.
         #[arg(long)]
@@ -143,6 +143,9 @@ enum ClusterCommand {
         #[arg(long)]
         block_size: Option<u64>,
     },
+    /// Rewrite every object still at a scheme or block size other than
+    /// the document's, one at a time. Safe to interrupt and rerun.
+    Reencode,
     /// Mark a device removed. Refused while any object still has a shard
     /// on it: drain it first.
     RemoveDevice { device: Uuid },
@@ -716,7 +719,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         djbod_node::membership::set_scheme(node, cluster, *k, *m, *block_size)
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    if !cli.json {
+                    let behind = count_versions_behind(&cli, &document).await?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "k": document.k,
+                                "m": document.m,
+                                "block_size": document.block_size,
+                                "document_version": document.version,
+                                "changed": changed,
+                                "objects_at_other_schemes": behind,
+                            }))?
+                        );
+                    } else {
                         if changed {
                             println!(
                                 "scheme is now {}+{} with {} byte blocks (document version {}); new writes use it",
@@ -728,7 +744,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 document.k, document.m, document.block_size
                             );
                         }
+                        if behind > 0 {
+                            println!(
+                                "{behind} object(s) are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them"
+                            );
+                        } else {
+                            println!("every object is at this scheme");
+                        }
                     }
+                }
+                ClusterCommand::Reencode => {
+                    let document = djbod_node::membership::fetch_document(node, cluster)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let failures = reencode_all(&cli, &document).await?;
                     if failures > 0 {
                         std::process::exit(2);
@@ -835,22 +863,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The migration of SPEC 18.9: every version whose recorded scheme or
-/// block size differs from the document's is read once and written back
-/// as a new version under the same key, streamed through this process,
-/// keeping its content type and user metadata; the write replaces the old
-/// version. Returns how many objects could not be re-encoded.
-async fn reencode_all(
-    cli: &Cli,
+/// Whether a version is stored at the document's scheme and block size.
+fn at_current_scheme(
+    record: &djbod_core::record::MetadataRecord,
     document: &djbod_core::cluster::ClusterDocument,
-) -> anyhow::Result<usize> {
-    let mut lister = connect(cli).await?;
+) -> bool {
+    record.k == document.k && record.m == document.m && record.block_size == document.block_size
+}
+
+/// Every key in the cluster, in pages.
+async fn all_keys(cli: &Cli) -> anyhow::Result<Vec<String>> {
+    let mut conn = connect(cli).await?;
     let mut start_after: Option<String> = None;
-    let mut examined = 0usize;
-    let mut reencoded = 0usize;
-    let mut failures = 0usize;
+    let mut all = Vec::new();
     loop {
-        let (keys, truncated) = match lister
+        let (keys, truncated) = match conn
             .request(Request::ListKeys(ListQuery {
                 prefix: None,
                 start_after: start_after.clone(),
@@ -862,26 +889,68 @@ async fn reencode_all(
             Response::ListKeys { keys, truncated } => (keys, truncated),
             other => bail!("unexpected response {other:?}"),
         };
-        for entry in &keys {
+        start_after = keys.last().map(|e| e.key.clone());
+        all.extend(keys.into_iter().map(|e| e.key));
+        if !truncated || start_after.is_none() {
+            return Ok(all);
+        }
+    }
+}
+
+/// How many objects are stored at a scheme or block size other than the
+/// document's.
+async fn count_versions_behind(
+    cli: &Cli,
+    document: &djbod_core::cluster::ClusterDocument,
+) -> anyhow::Result<usize> {
+    let mut conn = connect(cli).await?;
+    let mut behind = 0usize;
+    for key in all_keys(cli).await? {
+        match conn
+            .request(Request::HeadObject { key })
+            .await
+            .map_err(remote)?
+        {
+            Response::HeadObject { record } => {
+                if !at_current_scheme(&record, document) {
+                    behind += 1;
+                }
+            }
+            other => bail!("unexpected response {other:?}"),
+        }
+    }
+    Ok(behind)
+}
+
+/// The migration of SPEC 18.9: every version whose recorded scheme or
+/// block size differs from the document's is read once and written back
+/// as a new version under the same key, streamed through this process,
+/// keeping its content type and user metadata; the write replaces the old
+/// version. Returns how many objects could not be re-encoded.
+async fn reencode_all(
+    cli: &Cli,
+    document: &djbod_core::cluster::ClusterDocument,
+) -> anyhow::Result<usize> {
+    let mut lister = connect(cli).await?;
+    let mut examined = 0usize;
+    let mut reencoded = 0usize;
+    let mut failures = 0usize;
+    for key in all_keys(cli).await? {
+        {
             examined += 1;
             let record = match lister
-                .request(Request::HeadObject {
-                    key: entry.key.clone(),
-                })
+                .request(Request::HeadObject { key: key.clone() })
                 .await
             {
                 Ok(Response::HeadObject { record }) => record,
                 Ok(other) => bail!("unexpected response {other:?}"),
                 Err(e) => {
                     failures += 1;
-                    println!("FAILED   {}  head: {}", entry.key, describe_error(&e));
+                    println!("FAILED   {key}  head: {}", describe_error(&e));
                     continue;
                 }
             };
-            if record.k == document.k
-                && record.m == document.m
-                && record.block_size == document.block_size
-            {
+            if at_current_scheme(&record, document) {
                 continue;
             }
             match reencode_one(cli, &record).await {
@@ -910,13 +979,6 @@ async fn reencode_all(
                     println!("FAILED   {}  {e:#}", record.key);
                 }
             }
-        }
-        if !truncated {
-            break;
-        }
-        start_after = keys.last().map(|e| e.key.clone());
-        if start_after.is_none() {
-            break;
         }
     }
     if !cli.json {

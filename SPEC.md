@@ -1223,18 +1223,20 @@ shard can be moved off a failed *device* while its node answers, which is
 the case 18.3 needs; moving one off a node that is down waits for the
 node, or for the forced removal of 6.2.6.3.
 
-18.9 [D] **Re-encode (change `k`, `m`, or `B`).** `djbod cluster
-set-scheme --k --m [--block-size]` proposes the document change and then
-runs the migration to completion; it is safe to interrupt and rerun,
-because a rerun proposes nothing (the document already holds the values)
-and re-encodes only what is still at another scheme.
+18.9 [D] **Re-encode (change `k`, `m`, or `B`).** Two commands, one job
+each, as in 18.2.1: `djbod cluster set-scheme --k --m [--block-size]`
+changes the document and moves no data; `djbod cluster reencode` rewrites
+what is still at another scheme, safe to interrupt and rerun, and may be
+run much later or never.
 
 1. The proposal is refused if fewer devices are `active` than the new
    k+m, since every write would then fail (7.3). From the moment it
-   applies, new writes use the new values.
+   applies, new writes use the new values. The command reports how many
+   objects are now stored at another scheme.
 2. Existing versions, identifiable by the values recorded in their
-   metadata (6.3), remain readable with their own values.
-3. The migration lists every key, reads each version whose recorded `k`,
+   metadata (6.3), remain readable with their own values, indefinitely. A
+   cluster may run with mixed schemes; nothing requires the migration.
+3. `reencode` lists every key, reads each version whose recorded `k`,
    `m`, or `B` differs from the document's, and writes it back under the
    same key as a new version, keeping its content type and user metadata.
    The write is an ordinary PUT: it goes to k'+m' freshly chosen devices
@@ -1946,9 +1948,9 @@ the other shards otherwise. Step (b): `membership::set_device_state` and
 (18.3) and `--wipe-removed-device` on `join`, `add-device`, and
 `init-cluster`. Step (c): the `djbod-recover` crate (20.2.2), `list` and
 `extract`, tested against device directories written by `djbod-core`.
-Step (d): `membership::set_scheme` and `djbod cluster set-scheme`, with
-the migration of 18.9 run by the client as a streamed GET into a PUT per
-version. Next: step (e), the size limits into the cluster document
+Step (d): `membership::set_scheme` and `djbod cluster set-scheme` change
+the document; `djbod cluster reencode` runs the migration of 18.9 as a
+streamed GET into a PUT per version. Next: step (e), the size limits into the cluster document
 (21.3).
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
