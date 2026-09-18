@@ -227,7 +227,10 @@ Configuration has three layers.
 
 6.1.1 [D] Node UUID, listen addresses, the list of device paths, one or
 more bootstrap peer addresses, and a state directory holding the node's
-copy of the cluster document. The file is TOML. The default listen port is
+copy of the cluster document. Optionally an advertise address: the
+address other nodes use to reach this one, recorded in the cluster
+document in place of the listen address, for nodes that listen on a
+wildcard or container-internal address. The file is TOML. The default listen port is
 5263, which IANA lists as unassigned (checked 18 September 2026) and which
 spells JBOD on a telephone keypad. 7400 was considered and rejected: it is
 the DDS/RTPS discovery port, in use wherever ROS 2 runs.
@@ -1245,6 +1248,7 @@ layout in section 9 uses fixed-length names and stays well within both.
 | 21.2 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
 | 21.3 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
 | 21.4 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.5 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
 
 ## 22. Deferred items
 
