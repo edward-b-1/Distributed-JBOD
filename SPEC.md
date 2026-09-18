@@ -330,13 +330,37 @@ and pushes the highest version to every node behind it, one version at a
 time. Because of 6.2.6.1 this is always safe and always converges.
 
 6.2.6.3 [P] **A node that is permanently gone** cannot acknowledge, so no
-document change can complete while it is listed. Removing it therefore
-needs a `--force` that applies to every reachable node and lists the dead
-node as `removed`. If the dead node later returns it finds itself absent
-from a higher-numbered document and refuses to serve; its devices are
-re-initialised or discarded by hand. Deferred to milestone 4 with drain
-and removal (18.2); until then a dead node blocks document changes, which
-is a known limitation of v1.
+document change can complete while it is listed, and it cannot be drained
+because its shards cannot be read. `djbod cluster remove-node <id>
+--force` is for that case only. It first tries to reach the node and
+refuses if it answers: a live node is removed by `set-state`, `drain`, and
+plain `remove-node` (18.2.1), which spends no parity. Forcing a live node
+would rebuild from parity what could simply be copied, and would leave it
+serving under a document that no longer lists it.
+
+The forced path:
+
+1. **Show the cost first.** Using the reachable nodes' records, count the
+   versions with one or more shards on the dead node's devices and, among
+   them, the versions with more than m shards there, which are
+   unrecoverable. Print both, list the unrecoverable keys, and require the
+   node id to be typed back before continuing. `--yes` skips the prompt
+   for scripts and is the only way to.
+2. **Propose without unanimity.** Build the next document with the node
+   and its devices marked `removed`, check that every *other* node holds
+   the current version, and apply in document order skipping the dead
+   node. The dead node is treated as having acknowledged.
+3. **Rebuild.** Run repair for every version that listed the dead node's
+   devices, re-placing each shard onto another device (18.8.2). This is
+   `djbod scrub --repair` restricted to those versions and runs as part of
+   the command, so the cluster is not left degraded silently.
+
+A partitioned node that was not actually dead cannot have accepted writes
+meanwhile (fail-stop), so no divergent data exists. When it reconnects it
+adopts the higher document, finds itself `removed`, and refuses to serve;
+`djbod-node run` says so and stops. Its devices refuse to be reinitialised
+unless `init-cluster` or `join` is given `--wipe-removed-device`, which is
+the one step that destroys data and says so.
 
 6.2.7 [D] All nodes must hold the same document version to serve requests.
 A node that finds itself holding a different version from a peer during a
@@ -1003,6 +1027,50 @@ places that shard on another eligible device, and updates the metadata
 record on all holders. When no record references the device, it is set to
 `removed` and may be detached. Draining a node is draining all its devices.
 
+18.2.1 [P] **Three commands, one job each.** State, movement, and
+membership are separate, so each command is small and each can be
+inspected before the next is run:
+
+- **`djbod cluster set-state <device> draining|active`** changes the
+  device's state in the cluster document (6.2.6) and nothing else. No data
+  moves. A `draining` device receives no new shards from anyone: not from
+  client writes, not from repairs, not from other devices' drains, because
+  placement (10.4) considers only `active` devices. It still serves reads
+  and repairs of what it holds. Setting it back to `active` is the same
+  command and likewise moves nothing.
+- **`djbod cluster drain <device>`** moves data: for every version that
+  lists a `draining` device, re-place its shard (18.8.2) onto an eligible
+  device. It refuses to run against a device that is not `draining`, so
+  the state change is always an explicit, separate step. It runs to
+  completion, prints progress per version, and is safe to interrupt and
+  rerun. `--node <id>` drains every `draining` device of a node in turn.
+  A version the cluster cannot rebuild (more than m damaged shards) is
+  reported and left.
+- **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
+  change membership only. They scan every record in the cluster (18.5)
+  and refuse if any still lists the device, or any of the node's devices;
+  otherwise they propose a document marking the device `removed`, or
+  dropping the node and its devices, with the node's own acknowledgement
+  like any other change. A live node is therefore removed by `set-state`,
+  `drain`, `remove-node`, each of which can be checked with `status` and
+  `scrub` in between. A dead node is the one case that skips the scan:
+  6.2.6.3.
+
+18.2.2 [P] **Running out of room.** Re-placement chooses a target exactly
+as a write does (10.4, 10.5): an `active` device with room for the shard
+file within its headroom, not already holding a shard of that version.
+So a drain cannot fill a device past its headroom or breach device-level
+independence. If no eligible target exists for a version, it is skipped
+and reported; the drain continues with the rest and at the end lists what
+could not be moved. Nothing is lost: the device stays `draining` and keeps
+serving what it holds. The administrator adds capacity and reruns, or
+sets the device back to `active`, leaving shards already moved where they
+went. Before moving anything, `drain` estimates: it sums the shard bytes
+on the device against the free space on eligible targets, and checks that
+at least k+m `active` devices exist, since otherwise no version has a
+legal target. Either shortfall is reported and the drain refuses to start
+unless `--partial` is given.
+
 18.3 [D] **Repair after loss.** Identical to drain except that the shard is
 reconstructed from k surviving shards rather than copied.
 
@@ -1051,7 +1119,54 @@ Not in v1.
 18.8 [D] Drain, repair, and rebalance are all instances of one operation:
 produce shard `i` of version `v` on device `d`, then update the record.
 
-18.9 [P] **Re-encode (change `k` or `m`).** A drain needs a spare eligible
+18.8.1 [P] **Record revision.** The metadata record gains a `revision`
+field, 0 when a version is first written and incremented by every
+re-placement. The version id still identifies the body; the revision
+identifies its placement. Copies of one version may then legitimately
+differ in revision during a re-placement, and the rules become:
+
+- **Reads** (9.4.4 amended): collect the copies; take the highest revision
+  present; require k+m copies of that revision, all equal; ignore
+  lower-revision copies. Fewer than k+m copies of the highest revision is
+  `RecordsInconsistent`, as now. A read therefore fails during the window
+  in which a re-placement has written its new record to some holders but
+  not all, which is fail-stop behaving as designed, and succeeds once the
+  window closes.
+- **Repair** (18.4.2 amended): trust the highest revision whose copies
+  agree and number at least k, as now, and additionally probe that every
+  device it lists holds its shard; if it does not, but the next lower
+  revision's copies do, the re-placement never completed and repair
+  finishes it forwards (writes the missing shard, then the missing
+  copies), never backwards.
+- **Scrub**: a lower-revision copy on a device the highest revision no
+  longer lists is reported as a stale copy and deleted by repair.
+
+18.8.2 [P] **Re-placement of shard `i` of version `v` from device `d` to
+device `d'`.** Every step is idempotent so the whole is safe to rerun:
+
+1. Produce the shard on `d'` through `PutShard`: copied block by block from
+   `d` if `d` is reachable and intact, otherwise reconstructed from k
+   intact shards as repair does. `d'` refuses if it already holds the
+   shard, which a rerun treats as done.
+2. Build the record at revision r+1 with `shards[i].device = d'`.
+3. `PutMeta` it to `d'`, then to every other holder in the new record.
+   `PutMeta` is amended to replace an existing copy when the incoming
+   revision is higher and the version id, key, and body checksum match,
+   and to refuse otherwise.
+4. Delete the shard and record from `d` (`DeleteVersion`), if `d` is
+   reachable. If it is not, the stale copy is found by a later scrub.
+
+A crash after step 1 leaves an extra shard on `d'` that the scrub reports
+as a shard without a record; after step 3 begins, reads of `v` fail until
+the remaining `PutMeta`s land, and repair completes them (18.8.1).
+
+18.9 [P] **Re-encode (change `k` or `m`).** Built on 18.8.2: a version at
+the old scheme is read once, re-encoded stripe by stripe to the new
+scheme, written to k'+m' devices under a new record revision naming the
+new scheme, and the shards no longer needed are deleted. `djbod cluster
+set-scheme --k --m` proposes the document change and then runs the
+migration to completion, safe to interrupt and rerun. Original text
+follows. A drain needs a spare eligible
 device to receive each shard. A cluster with exactly k+m devices therefore
 cannot decommission one without either adding a device first or lowering
 `m`. Procedure for changing the global parameters:
@@ -1346,6 +1461,15 @@ for which k shards can be found among the given paths. Requires only the
 metadata records and shard files. This is the answer to the loss of
 human-readable on-disk layout, and the reason 6.3 records encoding
 parameters per version.
+
+20.2.2 [P] **`djbod-recover`**, built on `djbod-core` alone: `list
+<device-path>...` walks the given paths and prints every key and version
+found with how many of its shards are present; `extract <key> [--version
+<id>] --out <file> <device-path>...` finds the shards, verifies every
+block, decodes with any k of them, checks the whole-object checksum, and
+writes the file, refusing if fewer than k intact shards exist. Records
+with the highest revision win; damaged records and shards are reported
+and skipped. It never writes to a device.
 
 ### 20.3 Administration
 
@@ -1649,8 +1773,12 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    write-collision guard of 20.1.2.1. The coordinator already fans out to
    every node in the document and needs no change for (a) to (c). Settles
    21.1.
-4. **Administration.** Drain, repair, re-encode, the recovery tool, and
-   the scrubber. Settles 21.2 and 21.7.
+4. **Administration.** In order: (a) record revision and the re-placement
+   primitive (18.8.1, 18.8.2), with the amended read and repair rules;
+   (b) `set-state`, `drain`, `remove-device`, `remove-node` (18.2.1) and
+   `remove-node --force` (6.2.6.3); (c) `djbod-recover` (20.2.2); (d)
+   re-encode (18.9); (e) the size limits into the cluster document (21.4).
+   Rebalance stays deferred.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
