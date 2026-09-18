@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 /// The SHA-256 of a key.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyHash(pub [u8; 32]);
 
 impl std::fmt::Debug for KeyHash {

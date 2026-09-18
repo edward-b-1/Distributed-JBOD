@@ -320,6 +320,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "djbod-recover"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "djbod-core",
+ "tempfile",
+ "time",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
