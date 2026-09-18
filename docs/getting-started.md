@@ -277,6 +277,17 @@ It is safe to interrupt and rerun: a rerun re-encodes only what is left.
 Each re-encoded object gets a new version id, since to the store it is a
 new write of the same key.
 
+**Size limits.** The maximum key length (16 KiB by default) and object
+size (1 TiB) are fields of the cluster document, so they are the same on
+every node and need no rebuild to change:
+
+```sh
+target/release/djbod cluster set-limits --max-object-bytes 10737418240
+```
+
+They apply to new requests only. `cluster-config` shows the current
+values.
+
 **Removing a device or a node.** Once a device is drained, take it out of
 the cluster; the command refuses while any object still has a shard on
 it:

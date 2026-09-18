@@ -260,8 +260,11 @@ bootstrap peer.
 
 6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
-the node list (UUID, addresses), and the device list (UUID, owning node,
-state).
+the key length limit `max_key_bytes` (9.1.5) and the object size limit
+`max_object_bytes` (9.3.1), the node list (UUID, addresses), and the
+device list (UUID, owning node, state). The two limits were added after
+the first documents were written; a document without them means the
+defaults. `djbod cluster set-limits` changes them.
 
 The checksum algorithm and key hash algorithm are **not** configuration.
 They are fixed by the on-disk format version. Changing either is a format
@@ -272,10 +275,11 @@ encoded with the same parameters at the time it is written. There is no
 per-object redundancy policy. Changing them later is an administrative
 operation that re-encodes existing objects (18.9).
 
-6.2.4 [P] Sanity limits, enforced when the document is applied:
+6.2.4 [D] Sanity limits, enforced when the document is applied:
 `1 <= k <= 32`, `0 <= m <= 8`, `k + m <= 64`, `B` a multiple of 4096 with
-`64 KiB <= B <= 64 MiB`. The bounds are generous and exist only to reject
-typos.
+`64 KiB <= B <= 64 MiB`, `1 <= max_key_bytes <= 1 MiB` (a key travels
+inside one protocol frame), `max_object_bytes >= 1`. The bounds are
+generous and exist only to reject typos.
 
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
@@ -534,9 +538,12 @@ is uniformly distributed, so fan-out is even.
 record. A disk can be searched for an object by name with ordinary tools.
 
 9.1.5 [D] There is no fixed maximum key length. A configurable sanity limit
-rejects absurd keys by accident; proposed default 16 KiB. The key is stored
-only inside the metadata record and in the wire protocol, so no filesystem
-limit applies to it.
+rejects absurd keys by accident: `max_key_bytes` in the cluster document
+(6.2.2), default 16 KiB, changed with `djbod cluster set-limits`. Likewise
+the maximum object size is `max_object_bytes`, default 1 TiB. Both apply
+to new requests only; objects already stored are untouched. The key is
+stored only inside the metadata record and in the wire protocol, so no
+filesystem limit applies to it.
 
 9.1.6 [D] **Collisions.** With a 256-bit hash, two distinct keys share a
 directory only if SHA-256 collides, which has never been observed and
@@ -1641,7 +1648,7 @@ layout in section 9 uses fixed-length names and stays well within both.
 |---|----------|-------|----------------|
 | 21.1 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
 | 21.2 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
+| 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. | 6.2.2, 9.1.5 | Settled in milestone 4 (e): both are fields of the cluster document, defaulted when absent, changed with `djbod cluster set-limits`. |
 
 ## 22. Deferred items
 
@@ -1931,7 +1938,7 @@ join|add-device`, `djbod cluster show|sync`. Seven multi-node tests run
 several nodes in one process. Remaining: step (d), the cluster-wide scrub
 (20.1.2), once the local engine (PR 16) has merged.
 
-C.4.4 **Milestone 4 status, 18 September 2026: step (a) complete.** The
+C.4.4 **Milestone 4 status, 18 September 2026: complete.** The
 record carries `revision` (9.4.2, 18.8.1); `versions_of` applies the
 amended read rule; `RepairObject` trusts the highest revision, completes
 an interrupted re-placement forwards, and removes stale copies; the
@@ -1950,8 +1957,10 @@ the other shards otherwise. Step (b): `membership::set_device_state` and
 `extract`, tested against device directories written by `djbod-core`.
 Step (d): `membership::set_scheme` and `djbod cluster set-scheme` change
 the document; `djbod cluster reencode` runs the migration of 18.9 as a
-streamed GET into a PUT per version. Next: step (e), the size limits into the cluster document
-(21.3).
+streamed GET into a PUT per version. Step (e): `max_key_bytes` and
+`max_object_bytes` in the cluster document (6.2.2), `djbod-node
+init-cluster --max-key-bytes --max-object-bytes`, and `djbod cluster
+set-limits`; settles 21.3. Every step of C.4 is built.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure

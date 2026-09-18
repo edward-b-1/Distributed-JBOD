@@ -39,11 +39,6 @@ use crate::server::{our_hello, ConnectionEnd, Reader, Writer};
 use crate::ulid::VersionGenerator;
 use crate::wire::{read_message, write_message};
 
-/// Sanity limit on key length (SPEC 9.1.5).
-pub const MAX_KEY_BYTES: usize = 16 * 1024;
-/// Maximum object size (SPEC 9.3.1).
-pub const MAX_OBJECT_BYTES: u64 = 1 << 40;
-
 pub fn is_client_operation(request: &Request) -> bool {
     matches!(
         request,
@@ -360,16 +355,23 @@ fn stale_copies(current: &MetadataRecord, located: &[LocatedRecord]) -> Vec<(Dev
         .collect()
 }
 
-fn check_key(key: &str) -> Result<(), Failure> {
+/// The key sanity check of 9.1.5, against the limit in the cluster
+/// document.
+fn check_key(node: &Node, key: &str) -> Result<(), Failure> {
     if key.is_empty() {
         return Err(error(ErrorCode::ProtocolViolation, "key is empty"));
     }
-    if key.len() > MAX_KEY_BYTES {
+    let limit = node.document().max_key_bytes;
+    if key.len() as u64 > limit {
+        let shown: String = key.chars().take(64).collect();
         return Err(Failure::Error(ErrorDetail {
-            key: Some(key[..64].to_string() + "..."),
+            key: Some(shown + "..."),
             ..ErrorDetail::new(
                 ErrorCode::KeyTooLong,
-                format!("key is {} bytes; the limit is {MAX_KEY_BYTES}", key.len()),
+                format!(
+                    "key is {} bytes; the cluster's limit is {limit} (max_key_bytes)",
+                    key.len()
+                ),
             )
         }));
     }
@@ -378,7 +380,7 @@ fn check_key(key: &str) -> Result<(), Failure> {
 
 /// The newest version of `key`, or NotFound.
 async fn newest_version(node: &Arc<Node>, key: &str) -> Result<MetadataRecord, Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let versions = versions_of(key, located)?;
     versions.into_iter().next().ok_or_else(|| {
@@ -451,7 +453,7 @@ async fn head_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
 }
 
 async fn delete_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let key_hash = hash_key(key.as_bytes());
     let located = lookup(node, key_hash).await?;
     let versions = versions_of(key, located)?;
@@ -996,17 +998,17 @@ async fn prepare_put(
     versions: &VersionGenerator,
     params: &PutParams,
 ) -> Result<(Scheme, MetadataRecord, Vec<Holder>), Failure> {
-    check_key(&params.key)?;
-    if params.size > MAX_OBJECT_BYTES {
+    check_key(node, &params.key)?;
+    let document = node.document();
+    if params.size > document.max_object_bytes {
         return Err(error(
             ErrorCode::ObjectTooLarge,
             format!(
-                "object of {} bytes exceeds the maximum of {MAX_OBJECT_BYTES}",
-                params.size
+                "object of {} bytes exceeds the cluster's maximum of {} (max_object_bytes)",
+                params.size, document.max_object_bytes
             ),
         ));
     }
-    let document = node.document();
     let scheme = document
         .scheme()
         .map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
@@ -1307,7 +1309,7 @@ async fn repairable_record(
     node: &Arc<Node>,
     key: &str,
 ) -> Result<(MetadataRecord, Vec<DeviceId>, Vec<(DeviceId, u64)>), Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {

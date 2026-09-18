@@ -51,6 +51,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         m,
         block_size: 64 * 1024,
         headroom: 0.0,
+        ..ClusterParameters::default()
     };
     let node = Arc::new(Node::init_cluster(config, parameters).expect("init cluster"));
     tokio::spawn(server::serve(node.clone(), listener));
@@ -424,4 +425,48 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let record: serde_json::Value = serde_json::from_str(&out).expect("json");
     assert_eq!(record["k"], 4);
     assert_eq!(record["m"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_limits_from_the_command_line() {
+    let test = start_node(2, 1, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let big = dir.path().join("big.bin");
+    std::fs::write(&big, [1u8; 5000]).expect("write");
+
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "set-limits", "--max-object-bytes", "4096"],
+    );
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("max object size 4096 bytes (document version 2)"),
+        "{out}"
+    );
+    let (ok, _, err) = djbod(&test, &["put", "big", big.to_str().unwrap()]);
+    assert!(!ok);
+    assert!(err.contains("ObjectTooLarge"), "{err}");
+    assert!(err.contains("4096"), "{err}");
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-limits", "--max-key-bytes", "3"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("max key length 3 bytes"), "{out}");
+    let (ok, _, err) = djbod(&test, &["head", "four"]);
+    assert!(!ok);
+    assert!(err.contains("KeyTooLong"), "{err}");
+    let (ok, out, err) = djbod(&test, &["cluster", "set-limits", "--max-key-bytes", "3"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("nothing changed"), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-limits", "--max-key-bytes", "0"]);
+    assert!(!ok);
+    assert!(
+        err.contains("max_key_bytes 0 must be between 1 and"),
+        "{err}"
+    );
+    let (ok, _, _) = djbod(&test, &["cluster", "set-limits"]);
+    assert!(!ok, "one of the two flags is required");
+    let (ok, out, _) = djbod(&test, &["cluster-config"]);
+    assert!(ok);
+    assert!(out.contains("\"max_key_bytes\": 3"), "{out}");
+    assert!(out.contains("\"max_object_bytes\": 4096"), "{out}");
 }

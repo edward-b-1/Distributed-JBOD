@@ -49,6 +49,12 @@ enum Command {
         /// Fraction of each device kept free.
         #[arg(long, default_value_t = 0.05)]
         headroom: f64,
+        /// Sanity limit on key length, in bytes.
+        #[arg(long, default_value_t = djbod_core::cluster::DEFAULT_MAX_KEY_BYTES)]
+        max_key_bytes: u64,
+        /// Maximum object size, in bytes.
+        #[arg(long, default_value_t = djbod_core::cluster::DEFAULT_MAX_OBJECT_BYTES)]
+        max_object_bytes: u64,
         /// Erase devices that belonged to a cluster before. Destroys their
         /// data.
         #[arg(long)]
@@ -161,6 +167,8 @@ async fn main() -> anyhow::Result<()> {
             m,
             block_size,
             headroom,
+            max_key_bytes,
+            max_object_bytes,
             wipe_removed_device,
         } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
@@ -183,6 +191,8 @@ async fn main() -> anyhow::Result<()> {
                     m,
                     block_size,
                     headroom,
+                    max_key_bytes,
+                    max_object_bytes,
                 },
             )
             .context("initialising cluster")?;

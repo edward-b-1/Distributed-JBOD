@@ -561,6 +561,34 @@ pub async fn set_scheme(
     Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
+/// Change the key length and object size limits in the document (9.1.5,
+/// 9.3.1). Either may be left as it is. Returns the document and whether
+/// anything changed.
+pub async fn set_limits(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    max_key_bytes: Option<u64>,
+    max_object_bytes: Option<u64>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        let mut next = current.clone();
+        next.max_key_bytes = max_key_bytes.unwrap_or(current.max_key_bytes);
+        next.max_object_bytes = max_object_bytes.unwrap_or(current.max_object_bytes);
+        if next == current {
+            return Ok((current, false));
+        }
+        next.version += 1;
+        match propose(&current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
 // ------------------------------------------------------------- REMOVAL
 
 /// A version whose current record places shards on the devices being

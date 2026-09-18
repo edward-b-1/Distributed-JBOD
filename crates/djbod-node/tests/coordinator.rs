@@ -67,6 +67,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         m,
         block_size: BLOCK,
         headroom: 0.0,
+        ..ClusterParameters::default()
     };
     let node = Arc::new(Node::init_cluster(config, parameters).expect("init cluster"));
     tokio::spawn(server::serve(node.clone(), listener));
@@ -1368,4 +1369,52 @@ async fn repair_rebuilds_the_shards_of_a_device_that_left_the_document() {
     // Nothing more to do: a second repair finds every shard intact.
     let report = repair(&mut client, "k").await;
     assert!(report.shards.iter().all(|s| !s.rewritten));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn size_limits_come_from_the_cluster_document() {
+    let test = start_node(2, 1, 1).await;
+    let mut client = test.client().await;
+    let mut next = test.node.document();
+    next.version += 1;
+    next.max_key_bytes = 8;
+    next.max_object_bytes = 1000;
+    test.node.apply_document(next).expect("apply");
+
+    match client.put_object("short", &[7u8; 1000], CHUNK, None).await {
+        Ok(_) => {}
+        other => panic!("1000 bytes is within the limit: {other:?}"),
+    }
+    match client.put_object("short", &[7u8; 1001], CHUNK, None).await {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ObjectTooLarge);
+            assert!(detail.message.contains("1000"), "{}", detail.message);
+        }
+        other => panic!("expected ObjectTooLarge, got {other:?}"),
+    }
+    // A refused PUT closes the connection once the body starts arriving.
+    let mut client = test.client().await;
+    match client
+        .put_object("nine-long", &[7u8; 10], CHUNK, None)
+        .await
+    {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert_eq!(detail.code, ErrorCode::KeyTooLong);
+            assert!(detail.message.contains("limit is 8"), "{}", detail.message);
+        }
+        other => panic!("expected KeyTooLong, got {other:?}"),
+    }
+    let mut client = test.client().await;
+    match client
+        .request(Request::HeadObject {
+            key: "nine-long".to_string(),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
+        other => panic!("expected KeyTooLong, got {other:?}"),
+    }
+    // The object stored under the old limits is untouched.
+    let (_, got) = client.get_object("short").await.expect("get");
+    assert_eq!(got, vec![7u8; 1000]);
 }

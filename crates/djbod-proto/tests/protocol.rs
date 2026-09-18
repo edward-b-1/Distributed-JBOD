@@ -79,6 +79,8 @@ fn sample_document() -> ClusterDocument {
         block_size: 1 << 20,
         independence_level: IndependenceLevel::Device,
         headroom: 0.05,
+        max_key_bytes: 16 * 1024,
+        max_object_bytes: 1 << 40,
         nodes: vec![NodeEntry {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
