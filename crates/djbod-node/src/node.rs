@@ -1,7 +1,7 @@
 //! A node's state: its configuration, its devices, and its copy of the
 //! cluster document (SPEC 5, 6.2).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -71,7 +71,10 @@ pub enum NodeError {
 pub struct Node {
     config: NodeConfig,
     document: RwLock<ClusterDocument>,
-    devices: HashMap<DeviceId, Arc<Device>>,
+    /// In configuration file order, which is the order an administrator
+    /// expects to see them listed.
+    devices: Vec<Arc<Device>>,
+    devices_by_id: HashMap<DeviceId, Arc<Device>>,
     versions: VersionGenerator,
 }
 
@@ -101,13 +104,12 @@ impl Node {
     }
 
     pub fn device(&self, id: DeviceId) -> Option<Arc<Device>> {
-        self.devices.get(&id).cloned()
+        self.devices_by_id.get(&id).cloned()
     }
 
+    /// This node's devices in configuration file order.
     pub fn devices(&self) -> Vec<Arc<Device>> {
-        let mut all: Vec<Arc<Device>> = self.devices.values().cloned().collect();
-        all.sort_by_key(|d| d.id());
-        all
+        self.devices.clone()
     }
 
     fn document_path(config: &NodeConfig) -> PathBuf {
@@ -181,28 +183,53 @@ impl Node {
         devices: Vec<Device>,
     ) -> Result<Node, NodeError> {
         // Two configured paths on one filesystem are one disk (5.3).
-        for (i, a) in devices.iter().enumerate() {
-            for b in &devices[..i] {
-                if a.filesystem_id() == b.filesystem_id() {
-                    if config.allow_shared_filesystem {
-                        tracing::warn!(
-                            a = %a.root().display(),
-                            b = %b.root().display(),
-                            "devices share a filesystem; allow_shared_filesystem is set, so losing that disk loses both"
-                        );
-                    } else {
-                        return Err(NodeError::SameFilesystem {
-                            a: a.root().to_path_buf(),
-                            b: b.root().to_path_buf(),
-                        });
-                    }
-                }
+        let mut by_filesystem: BTreeMap<u64, Vec<&Device>> = BTreeMap::new();
+        for device in &devices {
+            by_filesystem
+                .entry(device.filesystem_id())
+                .or_default()
+                .push(device);
+        }
+        for group in by_filesystem.values().filter(|g| g.len() > 1) {
+            if config.allow_shared_filesystem {
+                let paths: Vec<String> = group
+                    .iter()
+                    .map(|d| d.root().display().to_string())
+                    .collect();
+                tracing::warn!(
+                    devices = %paths.join(", "),
+                    "these devices share one filesystem; allow_shared_filesystem is set, so losing that disk loses all of them"
+                );
+            } else {
+                return Err(NodeError::SameFilesystem {
+                    a: group[0].root().to_path_buf(),
+                    b: group[1].root().to_path_buf(),
+                });
             }
         }
         let node_id = NodeId(config.node_id);
         if document.node(node_id).is_none() {
             return Err(NodeError::NotAMember { node: node_id });
         }
+        // A cluster may legitimately have fewer active devices than the
+        // scheme needs, for example before other nodes join (7.3), but
+        // every write will fail until it does not, so say so loudly.
+        let active = document
+            .devices
+            .iter()
+            .filter(|d| d.state == DeviceState::Active)
+            .count();
+        let needed = document.k as usize + document.m as usize;
+        if active < needed {
+            tracing::warn!(
+                active_devices = active,
+                needed,
+                k = document.k,
+                m = document.m,
+                "the cluster has fewer active devices than k + m; every write will fail with InsufficientDevices until devices are added"
+            );
+        }
+        let mut ordered = Vec::with_capacity(devices.len());
         let mut by_id = HashMap::with_capacity(devices.len());
         for device in devices {
             if document.device(device.id()).is_none() {
@@ -211,12 +238,15 @@ impl Node {
                     path: device.root().to_path_buf(),
                 });
             }
-            by_id.insert(device.id(), Arc::new(device));
+            let device = Arc::new(device);
+            by_id.insert(device.id(), device.clone());
+            ordered.push(device);
         }
         Ok(Node {
             config,
             document: RwLock::new(document),
-            devices: by_id,
+            devices: ordered,
+            devices_by_id: by_id,
             versions: VersionGenerator::new(),
         })
     }

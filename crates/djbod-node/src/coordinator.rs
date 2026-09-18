@@ -361,7 +361,9 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
             }
         }
     }
-    devices.sort_by_key(|d| d.device);
+    // Grouped by node; within a node, the order that node listed them,
+    // which is its configuration order.
+    devices.sort_by_key(|d| d.node);
     Ok(Response::Status {
         cluster_id: document.cluster_id,
         document_version: document.version,
