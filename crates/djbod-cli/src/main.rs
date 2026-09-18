@@ -128,6 +128,21 @@ enum ClusterCommand {
         #[arg(long)]
         partial: bool,
     },
+    /// Change the global k and m (and optionally the block size), then
+    /// re-encode every object still at another scheme. Safe to interrupt
+    /// and rerun.
+    SetScheme {
+        /// Data shards per stripe.
+        #[arg(long)]
+        k: u8,
+        /// Parity shards per stripe.
+        #[arg(long)]
+        m: u8,
+        /// Shard block size in bytes; a multiple of 4096. Unchanged if
+        /// omitted.
+        #[arg(long)]
+        block_size: Option<u64>,
+    },
     /// Mark a device removed. Refused while any object still has a shard
     /// on it: drain it first.
     RemoveDevice { device: Uuid },
@@ -696,6 +711,29 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
+                ClusterCommand::SetScheme { k, m, block_size } => {
+                    let (document, changed) =
+                        djbod_node::membership::set_scheme(node, cluster, *k, *m, *block_size)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if !cli.json {
+                        if changed {
+                            println!(
+                                "scheme is now {}+{} with {} byte blocks (document version {}); new writes use it",
+                                document.k, document.m, document.block_size, document.version
+                            );
+                        } else {
+                            println!(
+                                "scheme was already {}+{} with {} byte blocks; nothing changed",
+                                document.k, document.m, document.block_size
+                            );
+                        }
+                    }
+                    let failures = reencode_all(&cli, &document).await?;
+                    if failures > 0 {
+                        std::process::exit(2);
+                    }
+                }
                 ClusterCommand::RemoveDevice { device } => {
                     let (document, changed) =
                         djbod_node::membership::remove_device(node, cluster, DeviceId(*device))
@@ -795,6 +833,139 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The migration of SPEC 18.9: every version whose recorded scheme or
+/// block size differs from the document's is read once and written back
+/// as a new version under the same key, streamed through this process,
+/// keeping its content type and user metadata; the write replaces the old
+/// version. Returns how many objects could not be re-encoded.
+async fn reencode_all(
+    cli: &Cli,
+    document: &djbod_core::cluster::ClusterDocument,
+) -> anyhow::Result<usize> {
+    let mut lister = connect(cli).await?;
+    let mut start_after: Option<String> = None;
+    let mut examined = 0usize;
+    let mut reencoded = 0usize;
+    let mut failures = 0usize;
+    loop {
+        let (keys, truncated) = match lister
+            .request(Request::ListKeys(ListQuery {
+                prefix: None,
+                start_after: start_after.clone(),
+                limit: Some(1000),
+            }))
+            .await
+            .map_err(remote)?
+        {
+            Response::ListKeys { keys, truncated } => (keys, truncated),
+            other => bail!("unexpected response {other:?}"),
+        };
+        for entry in &keys {
+            examined += 1;
+            let record = match lister
+                .request(Request::HeadObject {
+                    key: entry.key.clone(),
+                })
+                .await
+            {
+                Ok(Response::HeadObject { record }) => record,
+                Ok(other) => bail!("unexpected response {other:?}"),
+                Err(e) => {
+                    failures += 1;
+                    println!("FAILED   {}  head: {}", entry.key, describe_error(&e));
+                    continue;
+                }
+            };
+            if record.k == document.k
+                && record.m == document.m
+                && record.block_size == document.block_size
+            {
+                continue;
+            }
+            match reencode_one(cli, &record).await {
+                Ok(new_version) => {
+                    reencoded += 1;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "key": record.key,
+                                "from": format!("{}+{}", record.k, record.m),
+                                "to": format!("{}+{}", document.k, document.m),
+                                "old_version": record.version.to_text(),
+                                "new_version": new_version.to_text(),
+                            })
+                        );
+                    } else {
+                        println!(
+                            "re-encoded  {}  {}+{} -> {}+{}  (version {} -> {new_version})",
+                            record.key, record.k, record.m, document.k, document.m, record.version
+                        );
+                    }
+                }
+                Err(e) => {
+                    failures += 1;
+                    println!("FAILED   {}  {e:#}", record.key);
+                }
+            }
+        }
+        if !truncated {
+            break;
+        }
+        start_after = keys.last().map(|e| e.key.clone());
+        if start_after.is_none() {
+            break;
+        }
+    }
+    if !cli.json {
+        eprintln!("{examined} object(s) examined, {reencoded} re-encoded, {failures} failed");
+    }
+    Ok(failures)
+}
+
+/// Read one version and write it back under the same key: a GET streamed
+/// into a PUT through an in-process pipe, so no temporary file is needed
+/// and the object is verified on the way out and in.
+async fn reencode_one(
+    cli: &Cli,
+    record: &djbod_core::record::MetadataRecord,
+) -> anyhow::Result<djbod_core::version::VersionId> {
+    let mut reader_connection = connect(cli).await?;
+    let mut writer_connection = connect(cli).await?;
+    let (mut pipe_in, mut pipe_out) = tokio::io::duplex(4 * 1024 * 1024);
+    let key = record.key.clone();
+    let get = tokio::spawn(async move {
+        reader_connection
+            .get_object_to_writer(&key, &mut pipe_in)
+            .await
+    });
+    let put = writer_connection
+        .put_object_with_metadata(
+            &record.key,
+            record.size,
+            &mut pipe_out,
+            DEFAULT_BODY_CHUNK,
+            record.content_type.clone(),
+            record.user_metadata.clone(),
+        )
+        .await;
+    let got = get.await.context("the read task failed")?;
+    match (got, put) {
+        (Ok(read), Ok(version)) => {
+            if read.version != record.version {
+                bail!(
+                    "the object changed while being re-encoded (read version {}, expected {}); rerun",
+                    read.version,
+                    record.version
+                );
+            }
+            Ok(version)
+        }
+        (Err(e), _) => Err(anyhow::anyhow!("read failed: {}", describe_error(&e))),
+        (Ok(_), Err(e)) => Err(anyhow::anyhow!("write failed: {}", describe_error(&e))),
+    }
 }
 
 /// `cluster remove-node --force` (SPEC 6.2.6.3): show the cost, confirm,

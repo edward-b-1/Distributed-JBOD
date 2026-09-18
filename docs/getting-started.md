@@ -255,6 +255,22 @@ room, or fewer than k+m devices remain active, the drain refuses to start
 unless you pass `--partial`. `set-state <device-uuid> active` puts a
 device back into service; shards already moved stay where they went.
 
+**Changing k or m.** The scheme is global, and a cluster that has grown
+may want a wider one. One command changes the document and then rewrites
+every object still at the old scheme, one at a time, streaming each
+through the client:
+
+```sh
+target/release/djbod cluster set-scheme --k 4 --m 2
+```
+
+New writes use the new scheme from the moment the document changes;
+existing objects stay readable throughout, because each record carries
+the scheme it was written with. The command refuses if fewer devices are
+active than the new k+m. It is safe to interrupt and rerun: a rerun
+re-encodes only what is left. Each re-encoded object gets a new version
+id, since to the store it is a new write of the same key.
+
 **Removing a device or a node.** Once a device is drained, take it out of
 the cluster; the command refuses while any object still has a shard on
 it:

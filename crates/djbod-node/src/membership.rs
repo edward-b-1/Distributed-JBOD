@@ -108,6 +108,15 @@ pub enum MembershipError {
     NodeIsAlive { node: NodeId, address: String },
     #[error("cannot remove the only node of the cluster")]
     LastNode,
+    #[error(
+        "the cluster has {active} active device(s) but scheme {k}+{m} needs {needed}; add devices first"
+    )]
+    TooFewActiveDevices {
+        active: usize,
+        needed: usize,
+        k: u8,
+        m: u8,
+    },
 }
 
 fn first_address(document: &ClusterDocument, node: NodeId) -> Result<SocketAddr, MembershipError> {
@@ -495,6 +504,53 @@ pub async fn set_device_state(
                 candidate.state = state;
             }
         }
+        match propose(&current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+/// Change the global scheme, and optionally the block size, in the
+/// document (18.9): from then on new writes use the new values. Existing
+/// versions keep their own (6.3) until re-encoded. Refused when fewer
+/// active devices exist than the new k+m, since every write would fail
+/// (7.3). Returns the document and whether anything changed.
+pub async fn set_scheme(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    k: u8,
+    m: u8,
+    block_size: Option<u64>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        let block_size = block_size.unwrap_or(current.block_size);
+        if current.k == k && current.m == m && current.block_size == block_size {
+            return Ok((current, false));
+        }
+        let active = current
+            .devices
+            .iter()
+            .filter(|d| d.state == DeviceState::Active)
+            .count();
+        let needed = k as usize + m as usize;
+        if active < needed {
+            return Err(MembershipError::TooFewActiveDevices {
+                active,
+                needed,
+                k,
+                m,
+            });
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        next.k = k;
+        next.m = m;
+        next.block_size = block_size;
         match propose(&current, &next).await {
             Ok(()) => return Ok((next, true)),
             Err(MembershipError::Superseded { .. })

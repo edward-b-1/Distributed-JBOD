@@ -305,3 +305,101 @@ async fn remove_device_from_the_command_line() {
     assert!(!ok);
     assert!(err.contains("only node"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_scheme_reencodes_every_object_and_is_safe_to_rerun() {
+    let test = start_node(6, 3, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let big = dir.path().join("big.bin");
+    let small = dir.path().join("small.bin");
+    let empty = dir.path().join("empty.bin");
+    std::fs::write(&big, xorshift64_bytes(2 * 3 * 64 * 1024 + 777, 11)).expect("write");
+    std::fs::write(&small, b"just a few bytes").expect("write");
+    std::fs::write(&empty, b"").expect("write");
+    for (key, path, extra) in [
+        (
+            "big",
+            &big,
+            &["--content-type", "application/octet-stream"][..],
+        ),
+        ("small", &small, &[][..]),
+        ("empty", &empty, &[][..]),
+    ] {
+        let (ok, _, err) = djbod(
+            &test,
+            &[&["put", key, path.to_str().unwrap()][..], extra].concat(),
+        );
+        assert!(ok, "{err}");
+    }
+
+    // Too few active devices for the new scheme: refused, nothing changes.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-scheme", "--k", "5", "--m", "2"]);
+    assert!(!ok);
+    assert!(
+        err.contains("6 active device(s) but scheme 5+2 needs 7"),
+        "{err}"
+    );
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-scheme", "--k", "4", "--m", "2"]);
+    assert!(ok, "{out}{err}");
+    assert!(out.contains("scheme is now 4+2"), "{out}");
+    assert_eq!(out.matches("re-encoded  ").count(), 3, "{out}");
+    assert!(out.contains("re-encoded  big  3+1 -> 4+2"), "{out}");
+    assert!(
+        err.contains("3 object(s) examined, 3 re-encoded, 0 failed"),
+        "{err}"
+    );
+
+    for (key, path) in [("big", &big), ("small", &small), ("empty", &empty)] {
+        let (ok, out, err) = djbod(&test, &["--json", "head", key]);
+        assert!(ok, "{err}");
+        let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+        assert_eq!(record["k"], 4, "{key}: {out}");
+        assert_eq!(record["m"], 2, "{key}: {out}");
+        assert_eq!(record["shards"].as_array().expect("shards").len(), 6);
+        if key == "big" {
+            assert_eq!(record["content_type"], "application/octet-stream");
+        }
+        let copy = dir.path().join(format!("{key}.copy"));
+        let (ok, _, err) = djbod(&test, &["get", key, copy.to_str().unwrap()]);
+        assert!(ok, "{err}");
+        assert_eq!(
+            std::fs::read(&copy).expect("read"),
+            std::fs::read(path).expect("read")
+        );
+    }
+    // Only the newest version's files remain on each device.
+    for device in test.node.devices() {
+        for key_dir in device.key_directories().expect("list") {
+            let names: Vec<String> = std::fs::read_dir(&key_dir)
+                .expect("read dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                names.iter().filter(|n| n.ends_with(".meta.json")).count(),
+                1,
+                "{names:?}"
+            );
+        }
+    }
+    let (ok, out, err) = djbod(&test, &["scrub"]);
+    assert!(ok, "{out}{err}");
+
+    // A rerun changes nothing and re-encodes nothing.
+    let (ok, out, err) = djbod(&test, &["cluster", "set-scheme", "--k", "4", "--m", "2"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("was already 4+2"), "{out}");
+    assert!(
+        err.contains("3 object(s) examined, 0 re-encoded, 0 failed"),
+        "{err}"
+    );
+
+    // New writes use the new scheme.
+    let (ok, _, err) = djbod(&test, &["put", "later", small.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, _) = djbod(&test, &["--json", "head", "later"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(record["k"], 4);
+    assert_eq!(record["m"], 2);
+}

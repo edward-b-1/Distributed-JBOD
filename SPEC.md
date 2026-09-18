@@ -1223,32 +1223,37 @@ shard can be moved off a failed *device* while its node answers, which is
 the case 18.3 needs; moving one off a node that is down waits for the
 node, or for the forced removal of 6.2.6.3.
 
-18.9 [P] **Re-encode (change `k` or `m`).** Built on 18.8.2: a version at
-the old scheme is read once, re-encoded stripe by stripe to the new
-scheme, written to k'+m' devices under a new record revision naming the
-new scheme, and the shards no longer needed are deleted. `djbod cluster
-set-scheme --k --m` proposes the document change and then runs the
-migration to completion, safe to interrupt and rerun. Original text
-follows. A drain needs a spare eligible
-device to receive each shard. A cluster with exactly k+m devices therefore
-cannot decommission one without either adding a device first or lowering
-`m`. Procedure for changing the global parameters:
+18.9 [D] **Re-encode (change `k`, `m`, or `B`).** `djbod cluster
+set-scheme --k --m [--block-size]` proposes the document change and then
+runs the migration to completion; it is safe to interrupt and rerun,
+because a rerun proposes nothing (the document already holds the values)
+and re-encodes only what is still at another scheme.
 
-1. The administrator applies a new cluster document with the new `k`, `m`,
-   or `B`. From that moment new writes use the new values.
-2. Existing objects, identifiable by the values recorded in their metadata
-   (6.3), continue to be readable with their own values.
-3. A background re-encode job visits every version whose recorded values
-   differ from the current ones and rewrites it. Reducing `m` with a
-   library satisfying 8.1.5 is deletion of the surplus parity shards and a
-   record update. Increasing `m` is computing the new parity shards from
-   k data shards and placing them. Changing `k` or `B` is a full read and
-   rewrite of the version as a new version, followed by deletion of the old.
+1. The proposal is refused if fewer devices are `active` than the new
+   k+m, since every write would then fail (7.3). From the moment it
+   applies, new writes use the new values.
+2. Existing versions, identifiable by the values recorded in their
+   metadata (6.3), remain readable with their own values.
+3. The migration lists every key, reads each version whose recorded `k`,
+   `m`, or `B` differs from the document's, and writes it back under the
+   same key as a new version, keeping its content type and user metadata.
+   The write is an ordinary PUT: it goes to k'+m' freshly chosen devices
+   under a new version id, and replaces the old version only once it is
+   complete (12), so an interruption leaves either the old version or the
+   new one, never a mixture. The administrator's client streams the body
+   from a GET into the PUT through an in-process pipe, verifying it on the
+   way out and in; no temporary file is used. Failures are reported per
+   key and the rest continue; the command exits non-zero if any remain.
 4. When no version with old values remains, the migration is complete.
 
-This is the same job as 18.8 with a different rule for which shards to
-produce. Its existence is the reason 6.3 records the parameters per
-version.
+A cluster with exactly k+m devices cannot drain one without either adding
+a device first or lowering `m` this way. The re-encoded version carries a
+new version id and creation time, since to the store it is a new write of
+the same key. The shortcuts the design allowed for a change of `m` alone,
+deleting surplus parity shards or computing only the new ones (8.1.5),
+are deferred (22): the shard file header records the scheme, so they
+would need a header rewrite on every shard, and the uniform path is
+simpler to make safe.
 
 ## 19. Protocols
 
@@ -1681,6 +1686,10 @@ layout in section 9 uses fixed-length names and stays well within both.
   unaltered.
 - Local reconstruction codes or other repair-efficient codes.
 - A sorted listing index.
+- **Re-encode shortcuts for a change of `m` alone** (18.9): deleting the
+  surplus parity shards when `m` shrinks, or computing only the new ones
+  when it grows, instead of the full rewrite that is built. Needs the
+  shard file header's scheme field to be rewritten or reinterpreted.
 
 ## 23. Decision log
 
@@ -1937,7 +1946,10 @@ the other shards otherwise. Step (b): `membership::set_device_state` and
 (18.3) and `--wipe-removed-device` on `join`, `add-device`, and
 `init-cluster`. Step (c): the `djbod-recover` crate (20.2.2), `list` and
 `extract`, tested against device directories written by `djbod-core`.
-Next: step (d), re-encode (18.9).
+Step (d): `membership::set_scheme` and `djbod cluster set-scheme`, with
+the migration of 18.9 run by the client as a streamed GET into a PUT per
+version. Next: step (e), the size limits into the cluster document
+(21.3).
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
