@@ -219,6 +219,22 @@ usable, and changes nothing.
 with `RecordsInconsistent`, because the record's own checksum no longer
 matches (SPEC.md 9.4.5).
 
+**Moving a shard.** Any shard can be moved to another device while the
+cluster is running, which is the building block of draining a disk:
+
+```sh
+target/release/djbod head photos/cat.jpg          # which device holds each shard
+target/release/djbod move-shard photos/cat.jpg 2  # move shard 2 to the emptiest other device
+target/release/djbod move-shard photos/cat.jpg 2 --to <device-uuid>
+```
+
+The shard is copied from its current device when that device is intact
+and rebuilt from the other shards when it is not. The record on every
+holder then gains a placement `revision` (SPEC.md 18.8.1), and the old
+copy is removed. If the old device was unreachable at the time, its copy
+stays behind; the next `scrub` reports it as a stale copy and `scrub
+--repair` removes it.
+
 **Replace.** `put` the same key twice and look at the device directory:
 only the newest version's files remain.
 

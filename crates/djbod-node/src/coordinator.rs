@@ -54,6 +54,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::DeleteObject { .. }
             | Request::ListKeys(_)
             | Request::RepairObject { .. }
+            | Request::MoveShard { .. }
             | Request::Scrub { .. }
     )
 }
@@ -73,6 +74,18 @@ pub async fn handle(
         Request::DeleteObject { key } => respond(writer, id, delete_object(node, &key).await).await,
         Request::ListKeys(query) => respond(writer, id, list_keys(node, query).await).await,
         Request::RepairObject { key } => respond(writer, id, repair_object(node, &key).await).await,
+        Request::MoveShard {
+            key,
+            shard_index,
+            target,
+        } => {
+            respond(
+                writer,
+                id,
+                move_shard(node, &key, shard_index, target).await,
+            )
+            .await
+        }
         Request::Scrub {
             max_bytes_per_second,
             repair,
@@ -246,9 +259,12 @@ async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord
     Ok(located)
 }
 
-/// Group record copies by version, newest first, checking each version's
-/// copies agree, are complete, come from their listed holders, and name
-/// the requested key (9.1.6, 9.4.4).
+/// Group record copies by version, newest first, applying the read rule
+/// of 9.4.4 as amended by 18.8.1: within a version, take the highest
+/// placement revision present, require k+m copies of it that all agree
+/// and each come from a device it lists, and ignore lower-revision copies,
+/// which are the leftovers of a re-placement. Every copy must name the
+/// requested key (9.1.6).
 fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRecord>, Failure> {
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {
@@ -259,32 +275,47 @@ fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRec
     }
     let mut versions = Vec::with_capacity(by_version.len());
     for (version, copies) in by_version.into_iter().rev() {
-        let first = &copies[0].record;
-        if first.key != key {
-            return Err(Failure::Error(ErrorDetail {
-                key: Some(key.to_string()),
-                version: Some(version),
-                ..ErrorDetail::new(
-                    ErrorCode::KeyMismatch,
-                    format!(
-                        "record under this key hash names key {:?}, not {key:?}: hash collision or corruption",
-                        first.key
-                    ),
-                )
-            }));
+        for copy in &copies {
+            if copy.record.key != key {
+                return Err(Failure::Error(ErrorDetail {
+                    key: Some(key.to_string()),
+                    version: Some(version),
+                    device: Some(copy.device),
+                    ..ErrorDetail::new(
+                        ErrorCode::KeyMismatch,
+                        format!(
+                            "record under this key hash names key {:?}, not {key:?}: hash collision or corruption",
+                            copy.record.key
+                        ),
+                    )
+                }));
+            }
         }
+        let current_revision = copies
+            .iter()
+            .map(|c| c.record.revision)
+            .max()
+            .expect("non-empty");
+        let current: Vec<&LocatedRecord> = copies
+            .iter()
+            .filter(|c| c.record.revision == current_revision)
+            .collect();
+        let first = &current[0].record;
         let expected = first.k as usize + first.m as usize;
-        if copies.len() != expected {
+        if current.len() != expected {
             return Err(Failure::Error(ErrorDetail {
                 key: Some(key.to_string()),
                 version: Some(version),
                 ..ErrorDetail::new(
                     ErrorCode::RecordsInconsistent,
-                    format!("{} record copies found, {expected} expected", copies.len()),
+                    format!(
+                        "{} record copies found, {expected} expected (revision {current_revision})",
+                        current.len()
+                    ),
                 )
             }));
         }
-        for copy in &copies {
+        for copy in &current {
             if copy.record != *first {
                 return Err(Failure::Error(ErrorDetail {
                     key: Some(key.to_string()),
@@ -292,7 +323,7 @@ fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRec
                     device: Some(copy.device),
                     ..ErrorDetail::new(
                         ErrorCode::RecordsInconsistent,
-                        "record copies disagree".to_string(),
+                        format!("record copies at revision {current_revision} disagree"),
                     )
                 }));
             }
@@ -311,6 +342,20 @@ fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRec
         versions.push(first.clone());
     }
     Ok(versions)
+}
+
+/// Copies of `version` at a lower revision than `current`, on devices the
+/// current record no longer lists: stale leftovers of a re-placement.
+fn stale_copies(current: &MetadataRecord, located: &[LocatedRecord]) -> Vec<(DeviceId, u64)> {
+    located
+        .iter()
+        .filter(|c| {
+            c.record.version == current.version
+                && c.record.revision < current.revision
+                && current.shard_on(c.device).is_none()
+        })
+        .map(|c| (c.device, c.record.revision))
+        .collect()
 }
 
 fn check_key(key: &str) -> Result<(), Failure> {
@@ -346,8 +391,24 @@ async fn newest_version(node: &Arc<Node>, key: &str) -> Result<MetadataRecord, F
 
 async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     let document = node.document();
+    let devices = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
+    Ok(Response::Status {
+        cluster_id: document.cluster_id,
+        document_version: document.version,
+        coordinator: node.id(),
+        devices,
+    })
+}
+
+/// Combine the `LocalStatus` answers of the nodes asked into one device
+/// list, refusing if any node holds a different document version.
+fn device_statuses(
+    node: &Node,
+    answers: Vec<(NodeId, Response)>,
+) -> Result<Vec<DeviceStatus>, Failure> {
+    let document = node.document();
     let mut devices: Vec<DeviceStatus> = Vec::new();
-    for (target, response) in broadcast(node, Request::LocalStatus).await? {
+    for (target, response) in answers {
         match response {
             Response::LocalStatus {
                 document_version,
@@ -379,12 +440,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     // Grouped by node; within a node, the order that node listed them,
     // which is its configuration order.
     devices.sort_by_key(|d| d.node);
-    Ok(Response::Status {
-        cluster_id: document.cluster_id,
-        document_version: document.version,
-        coordinator: node.id(),
-        devices,
-    })
+    Ok(devices)
 }
 
 async fn head_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
@@ -1041,6 +1097,7 @@ async fn prepare_put(
         shards,
         content_type: params.content_type.clone(),
         user_metadata: params.user_metadata.clone(),
+        revision: 0,
     };
     Ok((scheme, record, holders))
 }
@@ -1247,7 +1304,7 @@ struct RepairSource {
 async fn repairable_record(
     node: &Arc<Node>,
     key: &str,
-) -> Result<(MetadataRecord, Vec<DeviceId>), Failure> {
+) -> Result<(MetadataRecord, Vec<DeviceId>, Vec<(DeviceId, u64)>), Failure> {
     check_key(key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
@@ -1263,21 +1320,33 @@ async fn repairable_record(
             ..ErrorDetail::new(ErrorCode::NotFound, format!("no object under key {key:?}"))
         }));
     };
-    let first = copies[0].record.clone();
-    if first.key != key {
-        return Err(Failure::Error(ErrorDetail {
-            key: Some(key.to_string()),
-            version: Some(version),
-            ..ErrorDetail::new(
-                ErrorCode::KeyMismatch,
-                format!(
-                    "record under this key hash names key {:?}, not {key:?}",
-                    first.key
-                ),
-            )
-        }));
-    }
     for copy in &copies {
+        if copy.record.key != key {
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                version: Some(version),
+                ..ErrorDetail::new(
+                    ErrorCode::KeyMismatch,
+                    format!(
+                        "record under this key hash names key {:?}, not {key:?}",
+                        copy.record.key
+                    ),
+                )
+            }));
+        }
+    }
+    // The highest revision is the truth to complete towards (18.8.1).
+    let current_revision = copies
+        .iter()
+        .map(|c| c.record.revision)
+        .max()
+        .expect("non-empty");
+    let current: Vec<&LocatedRecord> = copies
+        .iter()
+        .filter(|c| c.record.revision == current_revision)
+        .collect();
+    let first = current[0].record.clone();
+    for copy in &current {
         if copy.record != first {
             return Err(Failure::Error(ErrorDetail {
                 key: Some(key.to_string()),
@@ -1285,7 +1354,7 @@ async fn repairable_record(
                 device: Some(copy.device),
                 ..ErrorDetail::new(
                     ErrorCode::RecordsInconsistent,
-                    "record copies disagree; repair cannot choose between them".to_string(),
+                    format!("record copies at revision {current_revision} disagree; repair cannot choose between them"),
                 )
             }));
         }
@@ -1301,15 +1370,39 @@ async fn repairable_record(
             }));
         }
     }
-    if copies.len() < first.k as usize {
+    // Lower-revision copies must describe the same body; otherwise
+    // something other than a re-placement produced them.
+    for copy in &copies {
+        if copy.record.revision < current_revision && !copy.record.same_body(&first) {
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                version: Some(version),
+                device: Some(copy.device),
+                ..ErrorDetail::new(
+                    ErrorCode::RecordsInconsistent,
+                    format!(
+                        "a revision {} copy describes a different body from revision {current_revision}",
+                        copy.record.revision
+                    ),
+                )
+            }));
+        }
+    }
+    // Trust needs at least k agreeing copies. During an interrupted
+    // re-placement the new revision may have only one; the older revision's
+    // copies describe the same body and vouch for it (18.8.1).
+    let vouching = copies
+        .iter()
+        .filter(|c| c.record.revision == current_revision || first.same_body(&c.record))
+        .count();
+    if vouching < first.k as usize {
         return Err(Failure::Error(ErrorDetail {
             key: Some(key.to_string()),
             version: Some(version),
             ..ErrorDetail::new(
                 ErrorCode::RecordsInconsistent,
                 format!(
-                    "only {} record copies remain of {}; fewer than k = {} cannot be trusted",
-                    copies.len(),
+                    "only {vouching} record copies remain of {}; fewer than k = {} cannot be trusted",
                     first.shards.len(),
                     first.k
                 ),
@@ -1320,9 +1413,10 @@ async fn repairable_record(
         .shards
         .iter()
         .map(|s| s.device)
-        .filter(|d| !copies.iter().any(|c| c.device == *d))
+        .filter(|d| !current.iter().any(|c| c.device == *d))
         .collect();
-    Ok((first, missing))
+    let stale = stale_copies(&first, &copies);
+    Ok((first, missing, stale))
 }
 
 /// Write the record to every device in `missing` (18.4.2).
@@ -1365,16 +1459,43 @@ async fn rewrite_record_copies(
     Ok(())
 }
 
+/// Remove stale lower-revision copies (record and shard) from devices
+/// the current record no longer lists (18.8.1).
+async fn remove_stale_copies(
+    node: &Arc<Node>,
+    record: &MetadataRecord,
+    stale: &[(DeviceId, u64)],
+) -> Result<Vec<DeviceId>, Failure> {
+    let document = node.document();
+    let mut removed = Vec::new();
+    for (device, _) in stale {
+        let Some(owner) = document.device(*device).map(|d| d.node) else {
+            continue; // device gone from the cluster; nothing to clean
+        };
+        let mut connection = connect_to(node, owner).await?;
+        connection
+            .request(Request::DeleteVersion {
+                device: *device,
+                key_hash: record.key_hash,
+                version: record.version,
+            })
+            .await
+            .map_err(|e| remote_failure(owner, e))?;
+        removed.push(*device);
+    }
+    Ok(removed)
+}
+
 async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
-    let (record, missing_record_copies) = repairable_record(node, key).await?;
+    let (record, missing_record_copies, stale) = repairable_record(node, key).await?;
     let scheme = record
         .scheme()
         .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
-    let document = node.document();
 
     let mut shards: Vec<ShardRepair> = Vec::with_capacity(scheme.total_shards());
     if record.size == 0 {
         rewrite_record_copies(node, &record, &missing_record_copies).await?;
+        let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
         for shard in &record.shards {
             shards.push(ShardRepair {
                 index: shard.index,
@@ -1388,6 +1509,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
             version: record.version,
             shards,
             record_copies_rewritten: missing_record_copies,
+            stale_copies_removed,
         }));
     }
     let geometry = shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
@@ -1397,65 +1519,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         )
     })?;
 
-    // Open a block stream from every holder. A holder that cannot open the
-    // file is a damaged shard, not a failure; an unreachable holder is a
-    // failure.
-    let mut sources: Vec<RepairSource> = Vec::with_capacity(scheme.total_shards());
-    for index in scheme.shard_indices() {
-        let device = record
-            .device_for(index)
-            .expect("validated record lists every index");
-        let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
-            Failure::Error(ErrorDetail {
-                device: Some(device),
-                key: Some(key.to_string()),
-                version: Some(record.version),
-                shard_index: Some(index.0),
-                ..ErrorDetail::new(
-                    ErrorCode::DeviceUnavailable,
-                    format!("{device} is not in the cluster document"),
-                )
-            })
-        })?;
-        let mut connection = connect_to(node, owner).await?;
-        let request_id = connection
-            .send_request(Request::GetShard {
-                device,
-                key_hash: record.key_hash,
-                version: record.version,
-                shard_index: index.0,
-                first_block: 0,
-                block_count: geometry.block_count,
-            })
-            .await
-            .map_err(|e| remote_failure(owner, e))?;
-        let (stream, condition) = match connection.read_response(request_id).await {
-            Ok(Response::GetShard { .. }) => {
-                (Some((connection, request_id)), ShardCondition::Intact)
-            }
-            Ok(other) => {
-                return Err(error(
-                    ErrorCode::ProtocolViolation,
-                    format!("{owner} answered GetShard with {other:?}"),
-                ))
-            }
-            // The holder answered, but could not serve the file: damaged.
-            Err(ClientError::Remote(detail)) => (
-                None,
-                ShardCondition::Unreadable {
-                    reason: detail.message,
-                },
-            ),
-            Err(e) => return Err(remote_failure(owner, e)),
-        };
-        sources.push(RepairSource {
-            index,
-            device,
-            owner,
-            stream,
-            condition,
-        });
-    }
+    let mut sources = open_repair_sources(node, key, &record, geometry.block_count).await?;
 
     // Pass 1: read every stripe from every readable shard, verify, decode,
     // and re-encode, streaming the rebuilt blocks of damaged shards to
@@ -1536,6 +1600,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         .collect();
     if damaged.is_empty() {
         rewrite_record_copies(node, &record, &missing_record_copies).await?;
+        let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
         return Ok(Response::RepairObject(RepairReport {
             key: key.to_string(),
             version: record.version,
@@ -1549,50 +1614,189 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                 })
                 .collect(),
             record_copies_rewritten: missing_record_copies,
+            stale_copies_removed,
         }));
     }
 
-    // Pass 2: stream the intact shards again, re-encode each stripe, and
-    // send the damaged shards' blocks to fresh files on their devices.
-    // The old files are replaced only when each PutShard finishes.
-    let mut writers: Vec<Holder> = Vec::with_capacity(damaged.len());
-    for &i in &damaged {
-        let source = &sources[i];
-        let mut connection = connect_to(node, source.owner).await?;
+    // Pass 2: rebuild every damaged shard onto its own device from the
+    // intact ones. The old files are replaced only when each PutShard
+    // finishes.
+    let targets: Vec<(ShardIndex, DeviceId)> = damaged
+        .iter()
+        .map(|&i| (sources[i].index, sources[i].device))
+        .collect();
+    rebuild_shards(node, key, &record, &sources, &targets).await?;
+
+    // Shards first, record copies second: a crash between the two leaves a
+    // shard without a record, which the scrub reports and a later repair
+    // completes.
+    rewrite_record_copies(node, &record, &missing_record_copies).await?;
+    let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
+
+    let rewritten: Vec<ShardIndex> = targets.iter().map(|(i, _)| *i).collect();
+    Ok(Response::RepairObject(RepairReport {
+        key: key.to_string(),
+        version: record.version,
+        shards: sources
+            .iter()
+            .map(|s| ShardRepair {
+                index: s.index.0,
+                device: s.device,
+                condition: s.condition.clone(),
+                rewritten: rewritten.contains(&s.index),
+            })
+            .collect(),
+        record_copies_rewritten: missing_record_copies,
+        stale_copies_removed,
+    }))
+}
+
+/// Open a block stream from every holder of `record`. A holder that
+/// cannot open the file is a damaged shard, not a failure; an unreachable
+/// holder is a failure.
+async fn open_repair_sources(
+    node: &Arc<Node>,
+    key: &str,
+    record: &MetadataRecord,
+    block_count: u64,
+) -> Result<Vec<RepairSource>, Failure> {
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let document = node.document();
+    let mut sources: Vec<RepairSource> = Vec::with_capacity(scheme.total_shards());
+    for index in scheme.shard_indices() {
+        let device = record
+            .device_for(index)
+            .expect("validated record lists every index");
+        let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
+            Failure::Error(ErrorDetail {
+                device: Some(device),
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                shard_index: Some(index.0),
+                ..ErrorDetail::new(
+                    ErrorCode::DeviceUnavailable,
+                    format!("{device} is not in the cluster document"),
+                )
+            })
+        })?;
+        let mut connection = connect_to(node, owner).await?;
         let request_id = connection
-            .send_request(Request::PutShard {
-                device: source.device,
+            .send_request(Request::GetShard {
+                device,
                 key_hash: record.key_hash,
                 version: record.version,
-                shard_index: source.index.0,
+                shard_index: index.0,
+                first_block: 0,
+                block_count,
+            })
+            .await
+            .map_err(|e| remote_failure(owner, e))?;
+        let (stream, condition) = match connection.read_response(request_id).await {
+            Ok(Response::GetShard { .. }) => {
+                (Some((connection, request_id)), ShardCondition::Intact)
+            }
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{owner} answered GetShard with {other:?}"),
+                ))
+            }
+            Err(ClientError::Remote(detail)) => (
+                None,
+                ShardCondition::Unreadable {
+                    reason: detail.message,
+                },
+            ),
+            Err(e) => return Err(remote_failure(owner, e)),
+        };
+        sources.push(RepairSource {
+            index,
+            device,
+            owner,
+            stream,
+            condition,
+        });
+    }
+    Ok(sources)
+}
+
+/// Write the shards named in `targets` (index, destination device) by
+/// streaming the intact sources again, decoding each stripe, and
+/// re-encoding. Used by repair (destination = the shard's own device) and
+/// by re-placement (destination = a new device). Every destination file is
+/// complete or absent.
+async fn rebuild_shards(
+    node: &Arc<Node>,
+    key: &str,
+    record: &MetadataRecord,
+    sources: &[RepairSource],
+    targets: &[(ShardIndex, DeviceId)],
+) -> Result<(), Failure> {
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let geometry = shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
+        error(
+            ErrorCode::RecordsInconsistent,
+            "record has an impossible size",
+        )
+    })?;
+    let document = node.document();
+    let code = ReedSolomonCode::new(scheme);
+    let all_indices = scheme.shard_indices();
+    let stripe_size = scheme.data_shards() as u64 * record.block_size;
+
+    let mut writers: Vec<Holder> = Vec::with_capacity(targets.len());
+    for (index, device) in targets {
+        let owner = document.device(*device).map(|d| d.node).ok_or_else(|| {
+            Failure::Error(ErrorDetail {
+                device: Some(*device),
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                shard_index: Some(index.0),
+                ..ErrorDetail::new(
+                    ErrorCode::DeviceUnavailable,
+                    format!("{device} is not in the cluster document"),
+                )
+            })
+        })?;
+        let mut connection = connect_to(node, owner).await?;
+        let request_id = connection
+            .send_request(Request::PutShard {
+                device: *device,
+                key_hash: record.key_hash,
+                version: record.version,
+                shard_index: index.0,
                 k: scheme.data_shards() as u8,
                 m: scheme.parity_shards() as u8,
                 block_length: record.block_size,
                 object_size: record.size,
             })
             .await
-            .map_err(|e| remote_failure(source.owner, e))?;
+            .map_err(|e| remote_failure(owner, e))?;
         match connection.read_response(request_id).await {
             Ok(Response::PutShardReady) => {}
             Ok(other) => {
                 return Err(error(
                     ErrorCode::ProtocolViolation,
-                    format!("{} answered PutShard with {other:?}", source.owner),
+                    format!("{owner} answered PutShard with {other:?}"),
                 ))
             }
-            Err(e) => return Err(remote_failure(source.owner, e)),
+            Err(e) => return Err(remote_failure(owner, e)),
         }
         writers.push(Holder {
-            index: source.index,
-            device: source.device,
-            owner: source.owner,
+            index: *index,
+            device: *device,
+            owner,
             connection,
             request_id,
         });
     }
-    let mut readers = reopen_intact_streams(node, &sources, &record, geometry.block_count).await?;
+    let mut readers = reopen_intact_streams(node, sources, record, geometry.block_count).await?;
     for stripe in 0..geometry.block_count {
-        let received = read_repair_stripe(&mut readers, stripe, key, &record).await?;
+        let received = read_repair_stripe(&mut readers, stripe, key, record).await?;
         let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
         let data = match decode_stripe(&code, &all_indices, &received, stripe_len)
             .map_err(|e| error(ErrorCode::Internal, e.to_string()))?
@@ -1623,7 +1827,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                 .map_err(|e| remote_failure(writer.owner, e))?;
         }
     }
-    finish_repair_streams(&mut readers, key, &record).await?;
+    finish_repair_streams(&mut readers, key, record).await?;
     for writer in writers.iter_mut() {
         writer
             .connection
@@ -1650,27 +1854,362 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
             Err(e) => return Err(remote_failure(writer.owner, e)),
         }
     }
+    Ok(())
+}
 
-    // Shards first, record copies second: a crash between the two leaves a
-    // shard without a record, which the scrub reports and a later repair
-    // completes.
-    rewrite_record_copies(node, &record, &missing_record_copies).await?;
+// ------------------------------------------------------------ MOVE SHARD
 
-    let rewritten: Vec<ShardIndex> = writers.iter().map(|w| w.index).collect();
-    Ok(Response::RepairObject(RepairReport {
-        key: key.to_string(),
-        version: record.version,
-        shards: sources
+/// The re-placement primitive (SPEC 18.8.2): move shard `index` of the
+/// newest version of `key` to `target`, or to a device chosen as a write
+/// would choose. Copies from the source when it is reachable and intact,
+/// otherwise rebuilds from the other shards; then writes the record at the
+/// next revision to the new holder and every other holder; then removes
+/// the source's copy if it can be reached.
+async fn move_shard(
+    node: &Arc<Node>,
+    key: &str,
+    shard_index: u8,
+    target: Option<DeviceId>,
+) -> Result<Response, Failure> {
+    let record = newest_version(node, key).await?;
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let index = ShardIndex(shard_index);
+    if !scheme.contains(index) {
+        return Err(error(
+            ErrorCode::ProtocolViolation,
+            format!("{index} is outside scheme {}+{}", record.k, record.m),
+        ));
+    }
+    let source = record
+        .device_for(index)
+        .expect("validated record lists every index");
+    let document = node.document();
+
+    // Choose or check the destination. An explicit target needs only its
+    // own node's view; an automatic choice needs the whole cluster's, so it
+    // fails if any node is unreachable (fail-stop, 16.1).
+    let shard_bytes = if record.size == 0 {
+        0
+    } else {
+        shard_file_length(scheme, record.block_size, record.size)
+            .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
+    };
+    let holders: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
+    let eligible = |d: &DeviceStatus| {
+        d.state == DeviceState::Active
+            && d.free_bytes >= shard_bytes
+            && !holders.contains(&d.device)
+    };
+    let destination = match target {
+        Some(device) => {
+            let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
+                Failure::Error(ErrorDetail {
+                    device: Some(device),
+                    ..ErrorDetail::new(
+                        ErrorCode::DeviceUnavailable,
+                        format!("{device} is not in the cluster document"),
+                    )
+                })
+            })?;
+            let mut connection = connect_to(node, owner).await?;
+            let answer = connection
+                .request(Request::LocalStatus)
+                .await
+                .map_err(|e| remote_failure(owner, e))?;
+            let statuses = device_statuses(node, vec![(owner, answer)])?;
+            match statuses.into_iter().find(|d| d.device == device) {
+                Some(status) if eligible(&status) => status,
+                _ => {
+                    return Err(Failure::Error(ErrorDetail {
+                        device: Some(device),
+                        key: Some(key.to_string()),
+                        version: Some(record.version),
+                        ..ErrorDetail::new(
+                            ErrorCode::InsufficientDevices,
+                            format!("{device} is not an eligible destination: it must be active, have {shard_bytes} bytes free, and not already hold a shard of this version"),
+                        )
+                    }))
+                }
+            }
+        }
+        None => {
+            let statuses = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
+            let mut ranked: Vec<DeviceStatus> = statuses.into_iter().filter(eligible).collect();
+            ranked.sort_by(|a, b| {
+                b.free_bytes
+                    .cmp(&a.free_bytes)
+                    .then(a.device.cmp(&b.device))
+            });
+            match ranked.into_iter().next() {
+                Some(status) => status,
+                None => {
+                    return Err(Failure::Error(ErrorDetail {
+                        key: Some(key.to_string()),
+                        version: Some(record.version),
+                        ..ErrorDetail::new(
+                            ErrorCode::InsufficientDevices,
+                            format!("no active device with {shard_bytes} bytes free that does not already hold a shard of this version"),
+                        )
+                    }))
+                }
+            }
+        }
+    };
+
+    // Step 1: produce the shard on the destination.
+    let mut rebuilt = false;
+    if record.size > 0 {
+        let copied = copy_shard(node, key, &record, index, source, &destination).await;
+        match copied {
+            Ok(()) => {}
+            Err(Failure::Error(detail)) => {
+                tracing::info!(key, shard = shard_index, reason = %detail.message, "copy from source failed; rebuilding from the other shards");
+                let geometry =
+                    shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
+                        error(
+                            ErrorCode::RecordsInconsistent,
+                            "record has an impossible size",
+                        )
+                    })?;
+                let sources = open_repair_sources(node, key, &record, geometry.block_count).await?;
+                rebuild_shards(node, key, &record, &sources, &[(index, destination.device)])
+                    .await?;
+                rebuilt = true;
+            }
+            Err(other) => return Err(other),
+        }
+    }
+
+    // Steps 2 and 3: the record at the next revision, destination first.
+    let mut next = record.clone();
+    next.revision += 1;
+    for shard in next.shards.iter_mut() {
+        if shard.index == shard_index {
+            shard.device = destination.device;
+        }
+    }
+    let mut order: Vec<DeviceId> = vec![destination.device];
+    order.extend(
+        next.shards
             .iter()
-            .map(|s| ShardRepair {
-                index: s.index.0,
-                device: s.device,
-                condition: s.condition.clone(),
-                rewritten: rewritten.contains(&s.index),
-            })
-            .collect(),
-        record_copies_rewritten: missing_record_copies,
-    }))
+            .map(|s| s.device)
+            .filter(|d| *d != destination.device),
+    );
+    rewrite_record_copies(node, &next, &order).await?;
+
+    // Step 4: the source's copy, if it can be reached.
+    let source_cleaned = match document.device(source).map(|d| d.node) {
+        Some(owner) => match connect_to(node, owner).await {
+            Ok(mut connection) => connection
+                .request(Request::DeleteVersion {
+                    device: source,
+                    key_hash: record.key_hash,
+                    version: record.version,
+                })
+                .await
+                .is_ok(),
+            Err(_) => false,
+        },
+        None => false,
+    };
+    Ok(Response::MoveShard {
+        record: next,
+        source,
+        source_cleaned,
+        rebuilt,
+    })
+}
+
+/// Stream shard `index` from `source` to `destination`, verifying every
+/// block in transit. Any failure leaves nothing on the destination.
+async fn copy_shard(
+    node: &Arc<Node>,
+    key: &str,
+    record: &MetadataRecord,
+    index: ShardIndex,
+    source: DeviceId,
+    destination: &DeviceStatus,
+) -> Result<(), Failure> {
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let geometry = shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
+        error(
+            ErrorCode::RecordsInconsistent,
+            "record has an impossible size",
+        )
+    })?;
+    let document = node.document();
+    let source_owner = document.device(source).map(|d| d.node).ok_or_else(|| {
+        error(
+            ErrorCode::DeviceUnavailable,
+            format!("{source} is not in the cluster document"),
+        )
+    })?;
+    let mut from = connect_to(node, source_owner).await?;
+    let read_id = from
+        .send_request(Request::GetShard {
+            device: source,
+            key_hash: record.key_hash,
+            version: record.version,
+            shard_index: index.0,
+            first_block: 0,
+            block_count: geometry.block_count,
+        })
+        .await
+        .map_err(|e| remote_failure(source_owner, e))?;
+    match from.read_response(read_id).await {
+        Ok(Response::GetShard { .. }) => {}
+        Ok(other) => {
+            return Err(error(
+                ErrorCode::ProtocolViolation,
+                format!("{source_owner} answered GetShard with {other:?}"),
+            ))
+        }
+        Err(e) => return Err(remote_failure(source_owner, e)),
+    }
+    let mut to = connect_to(node, destination.node).await?;
+    let write_id = to
+        .send_request(Request::PutShard {
+            device: destination.device,
+            key_hash: record.key_hash,
+            version: record.version,
+            shard_index: index.0,
+            k: scheme.data_shards() as u8,
+            m: scheme.parity_shards() as u8,
+            block_length: record.block_size,
+            object_size: record.size,
+        })
+        .await
+        .map_err(|e| remote_failure(destination.node, e))?;
+    match to.read_response(write_id).await {
+        Ok(Response::PutShardReady) => {}
+        Ok(other) => {
+            return Err(error(
+                ErrorCode::ProtocolViolation,
+                format!("{} answered PutShard with {other:?}", destination.node),
+            ))
+        }
+        Err(e) => return Err(remote_failure(destination.node, e)),
+    }
+    let relayed = relay_shard_blocks(
+        &mut from,
+        read_id,
+        &mut to,
+        write_id,
+        key,
+        record,
+        index,
+        source,
+        source_owner,
+        destination.node,
+        geometry.block_count,
+    )
+    .await;
+    if let Err(failure) = relayed {
+        // Tell the destination to drop its temporary and wait for it to
+        // say so, so that a rebuild can begin writing the same shard.
+        let detail = match &failure {
+            Failure::Error(detail) => detail.clone(),
+            _ => ErrorDetail::new(ErrorCode::Internal, "copy abandoned".to_string()),
+        };
+        let _ = to
+            .send_end(
+                write_id,
+                StreamEnd {
+                    error: Some(detail),
+                    object_size: None,
+                    object_checksum: None,
+                },
+            )
+            .await;
+        let _ = to.read_response(write_id).await;
+        return Err(failure);
+    }
+    match to.read_response(write_id).await {
+        Ok(Response::PutShardDone) => Ok(()),
+        Ok(other) => Err(error(
+            ErrorCode::ProtocolViolation,
+            format!("{} ended PutShard with {other:?}", destination.node),
+        )),
+        Err(e) => Err(remote_failure(destination.node, e)),
+    }
+}
+
+/// Forward every block of the source stream to the destination stream,
+/// checking each block's checksum on the way, then end the destination
+/// stream. Returns without reading the destination's final answer.
+#[allow(clippy::too_many_arguments)]
+async fn relay_shard_blocks(
+    from: &mut Connection,
+    read_id: u32,
+    to: &mut Connection,
+    write_id: u32,
+    key: &str,
+    record: &MetadataRecord,
+    index: ShardIndex,
+    source: DeviceId,
+    source_owner: NodeId,
+    destination_node: NodeId,
+    block_count: u64,
+) -> Result<(), Failure> {
+    for stripe in 0..block_count {
+        let block = match from.read_stream_item(read_id).await {
+            Ok(StreamItem::Data(data)) if data.sequence == stripe => data,
+            Ok(other) => {
+                return Err(Failure::Error(ErrorDetail {
+                    device: Some(source),
+                    key: Some(key.to_string()),
+                    version: Some(record.version),
+                    shard_index: Some(index.0),
+                    stripe: Some(stripe),
+                    ..ErrorDetail::new(
+                        ErrorCode::BlockChecksumMismatch,
+                        format!("source stream ended or misordered at stripe {stripe}: {other:?}"),
+                    )
+                }))
+            }
+            Err(e) => return Err(remote_failure(source_owner, e)),
+        };
+        if checksum_block(&block.bytes) != block.checksum {
+            return Err(Failure::Error(ErrorDetail {
+                device: Some(source),
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                shard_index: Some(index.0),
+                stripe: Some(stripe),
+                ..ErrorDetail::new(
+                    ErrorCode::BlockChecksumMismatch,
+                    format!("source block {stripe} fails its checksum"),
+                )
+            }));
+        }
+        to.send_data(write_id, block)
+            .await
+            .map_err(|e| remote_failure(destination_node, e))?;
+    }
+    match from.read_stream_item(read_id).await {
+        Ok(StreamItem::End(end)) if end.error.is_none() => {}
+        other => {
+            return Err(error(
+                ErrorCode::ProtocolViolation,
+                format!("source did not end its stream cleanly: {other:?}"),
+            ))
+        }
+    }
+    to.send_end(
+        write_id,
+        StreamEnd {
+            error: None,
+            object_size: Some(record.size),
+            object_checksum: Some(record.object_checksum),
+        },
+    )
+    .await
+    .map_err(|e| remote_failure(destination_node, e))?;
+    Ok(())
 }
 
 /// Read stripe `stripe` from every source that has a stream. Blocks are
@@ -2058,7 +2597,7 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
         }
         Err(_) => return findings,
     };
-    let versions = match versions_of(key, located) {
+    let versions = match versions_of(key, located.clone()) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {
@@ -2071,6 +2610,17 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
         Err(_) => return findings,
     };
     let document = node.document();
+    for record in &versions {
+        for (device, revision) in stale_copies(record, &located) {
+            findings.push(ClusterFinding::StaleCopy {
+                key: key.to_string(),
+                version: record.version,
+                device,
+                revision,
+                current_revision: record.revision,
+            });
+        }
+    }
     for record in versions {
         if record.size == 0 {
             continue;

@@ -736,3 +736,169 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
         Response::PutShardReady
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub() {
+    use djbod_proto::message::{ClusterFinding, ScrubEvent};
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(1, &a).await;
+    let c = joined_node(1, &b).await;
+    let mut d = joined_node(1, &c).await;
+    let mut client = a.client().await;
+    let body = xorshift64_bytes(2 * 2 * BLOCK as usize + 100, 77);
+    client
+        .put_object("k", &body, 100_000, None)
+        .await
+        .expect("put");
+    let before = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record } => record,
+        other => panic!("{other:?}"),
+    };
+    let nodes = [&a, &b, &c, &d];
+    let owner_of = |device: DeviceId| {
+        nodes
+            .iter()
+            .position(|n| n.node.device(device).is_some())
+            .expect("some node holds the device")
+    };
+    let spare = nodes
+        .iter()
+        .map(|n| n.node.devices()[0].id())
+        .find(|dev| before.shard_on(*dev).is_none())
+        .expect("one device holds nothing");
+
+    // Move shard 0 from its holder to the spare device on another node.
+    let source = before.shards[0].device;
+    let after = match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 0,
+            target: Some(spare),
+        })
+        .await
+        .expect("move")
+    {
+        Response::MoveShard {
+            record,
+            source_cleaned,
+            rebuilt,
+            ..
+        } => {
+            assert!(source_cleaned);
+            assert!(!rebuilt);
+            record
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(after.revision, 1);
+    assert_eq!(
+        after.device_for(djbod_core::erasure::ShardIndex(0)),
+        Some(spare)
+    );
+    assert_ne!(owner_of(source), owner_of(spare));
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+
+    // While a holder's node is down, the lookup itself is fail-stop (16.1).
+    let victim = after
+        .shards
+        .iter()
+        .find(|s| owner_of(s.device) == 3)
+        .cloned();
+    let victim_device_dir = d.node.devices()[0].object_directory(&after.key_hash);
+    d.stop();
+    match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: 1,
+            target: Some(source),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
+        other => panic!("expected NodeUnreachable, got {other:?}"),
+    }
+    let listener = TcpListener::bind(d.addr).await.expect("rebind");
+    let node = Arc::new(Node::open(d.config.clone()).expect("reopen"));
+    d.server = Some(tokio::spawn(server::serve(node.clone(), listener)));
+    let mut client = a.client().await;
+
+    // If node d holds a shard, delete its file and move that shard onto
+    // the freed source device: the copy fails, the move rebuilds from the
+    // other two shards, and the record reaches revision 2. Then restore
+    // the old files by hand to make a stale copy for the scrub to find.
+    let Some(victim) = victim else {
+        return;
+    };
+    let victim_index = djbod_core::erasure::ShardIndex(victim.index);
+    let victim_shard = victim_device_dir.join(djbod_core::layout::shard_file_name(
+        &after.version,
+        victim_index,
+    ));
+    let victim_record =
+        victim_device_dir.join(djbod_core::layout::record_file_name(&after.version));
+    let saved_shard = std::fs::read(&victim_shard).expect("read");
+    let saved_record = std::fs::read(&victim_record).expect("read");
+    std::fs::remove_file(&victim_shard).expect("remove");
+    let moved = match client
+        .request(Request::MoveShard {
+            key: "k".to_string(),
+            shard_index: victim.index,
+            target: Some(source),
+        })
+        .await
+        .expect("move")
+    {
+        Response::MoveShard {
+            record,
+            source: reported,
+            source_cleaned,
+            rebuilt,
+        } => {
+            assert_eq!(reported, victim.device);
+            assert!(rebuilt);
+            assert!(source_cleaned);
+            record
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(moved.revision, 2);
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+
+    // The clean-up removed the emptied key directory along with the files.
+    std::fs::create_dir_all(&victim_device_dir).expect("mkdir");
+    std::fs::write(&victim_shard, &saved_shard).expect("write");
+    std::fs::write(&victim_record, &saved_record).expect("write");
+    let (events, end) = run_scrub(&mut client, false).await;
+    assert!(end.error.is_none(), "{end:?}");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::ClusterFinding(ClusterFinding::StaleCopy {
+                device,
+                revision: 1,
+                current_revision: 2,
+                ..
+            }) if *device == victim.device
+        )),
+        "{events:?}"
+    );
+    let (events, end) = run_scrub(&mut client, true).await;
+    assert!(end.error.is_none(), "{end:?}");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::Repaired { report, .. } if report.stale_copies_removed == vec![victim.device]
+        )),
+        "{events:?}"
+    );
+    assert!(!victim_shard.exists());
+    assert!(!victim_record.exists());
+}

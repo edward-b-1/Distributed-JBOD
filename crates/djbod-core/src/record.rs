@@ -74,6 +74,13 @@ pub struct MetadataRecord {
     /// Exactly k + m entries, one per shard index, each on a distinct
     /// device (7.2).
     pub shards: Vec<ShardLocation>,
+    /// Placement revision (SPEC 18.8.1): 0 when the version is first
+    /// written, incremented by every re-placement of a shard. The version
+    /// id identifies the body; the revision identifies where it lives.
+    /// Omitted from the JSON when 0, so records written before the field
+    /// existed still verify.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     /// Opaque to the native layer; reserved for clients and the future
@@ -151,7 +158,25 @@ fn write_canonical(value: &serde_json::Value, out: &mut String) {
     }
 }
 
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 impl MetadataRecord {
+    /// True if `other` describes the same body as this record: same
+    /// version, key, size, checksum, and scheme. Two records that agree on
+    /// this may differ only in placement (`shards`) and `revision`.
+    pub fn same_body(&self, other: &MetadataRecord) -> bool {
+        self.version == other.version
+            && self.key == other.key
+            && self.key_hash == other.key_hash
+            && self.size == other.size
+            && self.object_checksum == other.object_checksum
+            && self.k == other.k
+            && self.m == other.m
+            && self.block_size == other.block_size
+    }
+
     /// The canonical form the record checksum covers (9.4.5).
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let value = serde_json::to_value(self).expect("a metadata record always serializes");

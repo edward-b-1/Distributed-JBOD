@@ -85,7 +85,7 @@ pub enum DeviceError {
     ShardFile(#[from] ShardFileError),
     #[error("record error at {path}: {source}")]
     Record { path: PathBuf, source: RecordError },
-    #[error("record {version} for key hash {key_hash:?} already exists on this device")]
+    #[error("record {version} for key hash {key_hash:?} already exists on this device and the new one is not a higher placement revision of the same body")]
     RecordExists {
         key_hash: KeyHash,
         version: VersionId,
@@ -363,8 +363,10 @@ impl Device {
         })
     }
 
-    /// Store a record for a version on this device (9.4.3). Refuses to
-    /// overwrite an existing record for the same version.
+    /// Store a record for a version on this device (9.4.3). An existing
+    /// record for the same version is replaced only by one describing the
+    /// same body at a higher placement revision (SPEC 18.8.2); anything
+    /// else is refused.
     pub fn write_record(&self, record: &MetadataRecord) -> Result<(), DeviceError> {
         let dir = self.object_directory(&record.key_hash);
         record.validate().map_err(|source| DeviceError::Record {
@@ -374,10 +376,16 @@ impl Device {
         fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
         let path = dir.join(record_file_name(&record.version));
         if path.exists() {
-            return Err(DeviceError::RecordExists {
-                key_hash: record.key_hash,
-                version: record.version,
-            });
+            let existing = self.read_record(&record.key_hash, &record.version)?;
+            if existing == *record {
+                return Ok(()); // idempotent
+            }
+            if !(existing.same_body(record) && record.revision > existing.revision) {
+                return Err(DeviceError::RecordExists {
+                    key_hash: record.key_hash,
+                    version: record.version,
+                });
+            }
         }
         write_file_atomically(&path, record.to_json().as_bytes())
     }

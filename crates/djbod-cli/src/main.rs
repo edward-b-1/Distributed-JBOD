@@ -86,6 +86,14 @@ enum Command {
     },
     /// Rebuild damaged or missing shards of an object from the intact ones.
     Repair { key: String },
+    /// Move one shard of an object to another device.
+    MoveShard {
+        key: String,
+        shard_index: u8,
+        /// Destination device id; chosen like a write if omitted.
+        #[arg(long)]
+        to: Option<Uuid>,
+    },
     /// Scrub the whole cluster: every node checks its own disks, then the
     /// cross-node checks run; with --repair, damaged objects are rebuilt.
     Scrub {
@@ -446,6 +454,54 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             if findings > 0 && !*repair {
                 std::process::exit(2);
+            }
+        }
+        Command::MoveShard {
+            key,
+            shard_index,
+            to,
+        } => {
+            let mut conn = connect(&cli).await?;
+            match conn
+                .request(Request::MoveShard {
+                    key: key.clone(),
+                    shard_index: *shard_index,
+                    target: to.map(djbod_core::record::DeviceId),
+                })
+                .await
+                .map_err(remote)?
+            {
+                Response::MoveShard {
+                    record,
+                    source,
+                    source_cleaned,
+                    rebuilt,
+                } => {
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "record": record,
+                                "source": source,
+                                "source_cleaned": source_cleaned,
+                                "rebuilt": rebuilt,
+                            }))?
+                        );
+                    } else {
+                        let destination = record
+                            .device_for(djbod_core::erasure::ShardIndex(*shard_index))
+                            .map(|d| d.0.to_string())
+                            .unwrap_or_default();
+                        println!(
+                            "moved shard {shard_index} of {key} from {} to {destination} ({}); record now revision {}{}",
+                            source.0,
+                            if rebuilt { "rebuilt from the other shards" } else { "copied" },
+                            record.revision,
+                            if source_cleaned { "" } else { "; source copy not removed, scrub will report it as stale" }
+                        );
+                    }
+                }
+                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Repair { key } => {

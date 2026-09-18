@@ -101,6 +101,7 @@ fn store_object(
         shards,
         content_type: None,
         user_metadata: BTreeMap::new(),
+        revision: 0,
     };
     for device in devices {
         device
@@ -400,7 +401,7 @@ fn finishing_with_the_wrong_geometry_removes_the_temporary_file() {
 }
 
 #[test]
-fn records_are_validated_and_never_overwritten() {
+fn records_are_validated_and_replaced_only_by_a_higher_revision_of_the_same_body() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let device = new_device(dir.path());
     let key = "a";
@@ -424,14 +425,41 @@ fn records_are_validated_and_never_overwritten() {
         }],
         content_type: None,
         user_metadata: BTreeMap::new(),
+        revision: 0,
     };
     device
         .write_record(&record)
         .expect("failed to write record");
+    // The same record again is idempotent.
+    device
+        .write_record(&record)
+        .expect("rewrite of an equal record");
+    // A different body under the same version is refused.
+    let mut other_body = record.clone();
+    other_body.size = 2;
+    assert!(matches!(
+        device.write_record(&other_body),
+        Err(DeviceError::RecordExists { .. })
+    ));
+    // A higher placement revision of the same body replaces the copy
+    // (18.8.2); the lower one is then refused.
+    let mut moved = record.clone();
+    moved.revision = 1;
+    device
+        .write_record(&moved)
+        .expect("higher revision replaces");
+    assert_eq!(
+        device
+            .read_record(&record.key_hash, &version)
+            .expect("read record")
+            .revision,
+        1
+    );
     assert!(matches!(
         device.write_record(&record),
         Err(DeviceError::RecordExists { .. })
     ));
+    record = moved;
 
     record.version = VersionId([4u8; 16]);
     record.key_hash = KeyHash([0u8; 32]);
