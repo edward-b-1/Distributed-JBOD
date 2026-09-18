@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/djbod-core", "crates/djbod-proto"]
+members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-node"]
 
 [workspace.package]
 version = "0.1.0"
@@ -19,6 +19,13 @@ time = { version = "0.3", features = ["serde-well-known", "formatting", "parsing
 rustix = { version = "1", features = ["fs"] }
 ciborium = "0.2"
 djbod-core = { path = "crates/djbod-core" }
+djbod-proto = { path = "crates/djbod-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+toml = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
 tempfile = "3"
 
 # Project style: an explicit index loop is preferred over an iterator chain

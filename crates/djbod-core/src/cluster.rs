@@ -18,6 +18,12 @@ pub const MAX_BLOCK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 #[serde(transparent)]
 pub struct NodeId(pub Uuid);
 
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "node {}", self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeEntry {
     pub id: NodeId,

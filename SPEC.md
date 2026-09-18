@@ -204,7 +204,10 @@ directory belongs to something else.
 5.3 [D] At startup the node checks the filesystem id (`st_dev`) of every
 configured path. If two paths resolve to the same filesystem, the node
 refuses to start. This catches the misconfiguration where two "devices" are
-one disk.
+one disk. A configuration flag, `allow_shared_filesystem`, turns the
+refusal into a logged warning; it exists for tests and for trying the
+software with several directories on one disk, and it defeats the
+redundancy guarantee wherever it is set.
 
 5.4 [P] At startup the node also refuses to start if a device identity file
 has a `system` field other than `distributed-jbod`, names a different

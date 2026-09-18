@@ -134,6 +134,12 @@ fn temporary_path(final_path: &Path) -> PathBuf {
     final_path.with_file_name(name)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceReport {
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
 /// An initialised device: a directory with an identity file.
 #[derive(Debug)]
 pub struct Device {
@@ -270,12 +276,36 @@ impl Device {
     /// flight are already excluded, because `fallocate` takes them from
     /// the filesystem's free count.
     pub fn free_space(&self, headroom: f64) -> Result<u64, DeviceError> {
+        Ok(self.space(headroom)?.free_bytes)
+    }
+
+    /// Total size of the filesystem and the bytes this system may still
+    /// use on it (5.5).
+    pub fn space(&self, headroom: f64) -> Result<SpaceReport, DeviceError> {
         let stat = rustix::fs::statvfs(&self.root)
             .map_err(|errno| io_error(&self.root, io::Error::from(errno)))?;
         let available = stat.f_bavail * stat.f_frsize;
         let total = stat.f_blocks * stat.f_frsize;
         let reserved = (total as f64 * headroom) as u64;
-        Ok(available.saturating_sub(reserved))
+        Ok(SpaceReport {
+            total_bytes: total,
+            free_bytes: available.saturating_sub(reserved),
+        })
+    }
+
+    /// Remove the temporary file of a shard write that did not finish,
+    /// if one exists. Used by `AbortShard` (19.1.3) when the coordinator
+    /// that started the write is cleaning up after a failure.
+    pub fn remove_temporary_shard(
+        &self,
+        key_hash: &KeyHash,
+        version: &VersionId,
+        index: crate::erasure::ShardIndex,
+    ) -> Result<(), DeviceError> {
+        let final_path = self
+            .object_directory(key_hash)
+            .join(shard_file_name(version, index));
+        remove_if_present(&temporary_path(&final_path))
     }
 
     pub fn object_directory(&self, key_hash: &KeyHash) -> PathBuf {
