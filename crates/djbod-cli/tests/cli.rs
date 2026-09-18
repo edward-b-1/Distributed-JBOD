@@ -258,3 +258,50 @@ async fn set_state_and_drain_from_the_command_line() {
     assert!(ok);
     assert!(out.contains("is now active"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_device_from_the_command_line() {
+    let test = start_node(5, 3, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(200_000, 6)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, _) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let device = record["shards"][1]["device"]
+        .as_str()
+        .expect("device")
+        .to_string();
+
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &device]);
+    assert!(!ok);
+    assert!(
+        err.contains("still named by the current record of 1 version(s)"),
+        "{err}"
+    );
+    assert!(err.contains("\"k\""), "{err}");
+
+    let (ok, _, err) = djbod(&test, &["cluster", "set-state", &device, "draining"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "drain", &device]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["cluster", "remove-device", &device]);
+    assert!(ok, "{err}");
+    assert!(out.contains("removed (document version 3)"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("removed"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "remove-device", &device]);
+    assert!(ok);
+    assert!(out.contains("already removed"), "{out}");
+
+    // The only node cannot be removed.
+    let (ok, _, err) = djbod(
+        &test,
+        &["cluster", "remove-node", &test.node.id().0.to_string()],
+    );
+    assert!(!ok);
+    assert!(err.contains("only node"), "{err}");
+}

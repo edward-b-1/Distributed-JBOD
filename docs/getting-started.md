@@ -253,6 +253,45 @@ room, or fewer than k+m devices remain active, the drain refuses to start
 unless you pass `--partial`. `set-state <device-uuid> active` puts a
 device back into service; shards already moved stay where they went.
 
+**Removing a device or a node.** Once a device is drained, take it out of
+the cluster; the command refuses while any object still has a shard on
+it:
+
+```sh
+target/release/djbod cluster remove-device <device-uuid>
+```
+
+The device stays listed as `removed` so the cluster recognises the disk
+if it ever comes back; remove the path from that node's configuration and
+restart the node. A whole node goes the same way: drain each of its
+devices, then
+
+```sh
+target/release/djbod cluster remove-node <node-uuid>
+```
+
+drops the node and its devices from the document. The node acknowledges
+the change like every other, then stops accepting connections and its
+process exits. Its disks refuse to join a cluster again as they are; to
+reuse them, `djbod-node join --wipe-removed-device` erases them first,
+and says so.
+
+**A node that will never come back.** A dead node cannot acknowledge
+anything, so no document change can complete while it is listed, and it
+cannot be drained. For that case only:
+
+```sh
+target/release/djbod cluster remove-node <node-uuid> --force
+```
+
+It refuses if the node answers. Otherwise it counts, from the other
+nodes' records, how many objects have shards on the dead node and which
+of them have more than m there and are lost for good, prints both, and
+asks you to type the node id back (`--yes` skips the prompt). Then it
+removes the node without its acknowledgement and rebuilds every affected
+object's lost shard onto another device, one repair per object, so the
+cluster is not left degraded quietly.
+
 **Replace.** `put` the same key twice and look at the device directory:
 only the newest version's files remain.
 

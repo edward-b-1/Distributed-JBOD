@@ -49,6 +49,10 @@ enum Command {
         /// Fraction of each device kept free.
         #[arg(long, default_value_t = 0.05)]
         headroom: f64,
+        /// Erase devices that belonged to a cluster before. Destroys their
+        /// data.
+        #[arg(long)]
+        wipe_removed_device: bool,
     },
     /// Join an existing cluster: fetch its document from a peer,
     /// initialise this node's devices, and add this node to the document.
@@ -61,6 +65,10 @@ enum Command {
         /// The cluster id, as printed by init-cluster.
         #[arg(long)]
         cluster: uuid::Uuid,
+        /// Erase devices that were removed from the cluster before and
+        /// add them as new. Destroys their data.
+        #[arg(long)]
+        wipe_removed_device: bool,
     },
     /// Initialise a device path listed in the configuration but not yet
     /// in the cluster document, and add it. Restart the node afterwards.
@@ -73,6 +81,10 @@ enum Command {
         /// Address of any running node; defaults to this node's own.
         #[arg(long)]
         peer: Option<std::net::SocketAddr>,
+        /// Erase a device that was removed from the cluster before and
+        /// add it as new. Destroys its data.
+        #[arg(long)]
+        wipe_removed_device: bool,
     },
     /// Run the node.
     Run {
@@ -149,8 +161,21 @@ async fn main() -> anyhow::Result<()> {
             m,
             block_size,
             headroom,
+            wipe_removed_device,
         } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
+            if wipe_removed_device {
+                for path in &config.devices {
+                    if djbod_core::device::Device::open(path, None).is_ok() {
+                        djbod_core::device::Device::erase(path)
+                            .with_context(|| format!("wiping {}", path.display()))?;
+                        eprintln!(
+                            "wiped {}: every shard and record it held is gone",
+                            path.display()
+                        );
+                    }
+                }
+            }
             let node = Node::init_cluster(
                 config,
                 ClusterParameters {
@@ -172,11 +197,13 @@ async fn main() -> anyhow::Result<()> {
             config,
             peer,
             cluster,
+            wipe_removed_device,
         } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
-            let document = djbod_node::membership::join(&config, peer, cluster)
-                .await
-                .context("joining cluster")?;
+            let document =
+                djbod_node::membership::join(&config, peer, cluster, wipe_removed_device)
+                    .await
+                    .context("joining cluster")?;
             println!(
                 "joined cluster {} as node {}",
                 document.cluster_id, config.node_id
@@ -192,7 +219,12 @@ async fn main() -> anyhow::Result<()> {
             println!("start the node with: djbod-node run --config <the same file>");
             Ok(())
         }
-        Command::AddDevice { config, path, peer } => {
+        Command::AddDevice {
+            config,
+            path,
+            peer,
+            wipe_removed_device,
+        } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
             for p in &path {
                 if !config.devices.contains(p) {
@@ -206,10 +238,15 @@ async fn main() -> anyhow::Result<()> {
                 .context("reading saved cluster document")?
                 .context("no cluster document; this node has not joined a cluster")?;
             let peer = peer.unwrap_or_else(|| config.advertised_address());
-            let document =
-                djbod_node::membership::add_devices(&config, &path, peer, document.cluster_id)
-                    .await
-                    .context("adding devices")?;
+            let document = djbod_node::membership::add_devices(
+                &config,
+                &path,
+                peer,
+                document.cluster_id,
+                wipe_removed_device,
+            )
+            .await
+            .context("adding devices")?;
             println!("document version {}", document.version);
             println!("restart the node to serve the new device(s)");
             Ok(())
@@ -238,7 +275,16 @@ async fn main() -> anyhow::Result<()> {
                 devices = node.devices().len(),
                 "node running"
             );
-            server::serve(node, listener).await;
+            server::serve(node.clone(), listener).await;
+            if node.is_removed() {
+                // Let the acknowledgement of the document that removed us
+                // reach the proposer before the process ends.
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                eprintln!(
+                    "this node was removed from the cluster at document version {}; stopping. Its devices can be reused with `djbod-node join --wipe-removed-device`, which erases them.",
+                    node.document_version()
+                );
+            }
             Ok(())
         }
     }

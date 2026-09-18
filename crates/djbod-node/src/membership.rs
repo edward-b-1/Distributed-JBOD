@@ -7,14 +7,18 @@
 //! that is not yet a member, or from a node before it has opened.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use uuid::Uuid;
 
+use std::collections::BTreeMap;
+use std::time::Duration;
+
 use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::device::{Device, DeviceError};
-use djbod_core::record::DeviceId;
+use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::version::VersionId;
 use djbod_proto::message::{ErrorCode, ErrorDetail, Request, Response};
 
 use crate::client::{ClientError, Connection};
@@ -86,6 +90,24 @@ pub enum MembershipError {
     AlreadyMember { path: PathBuf },
     #[error("{0} is not in the cluster document")]
     UnknownDevice(DeviceId),
+    #[error("{0} is not in the cluster document")]
+    UnknownNode(NodeId),
+    #[error(
+        "device {path} was initialised for this cluster but is not in its document: it was removed; pass --wipe-removed-device to erase it and add it as a new device"
+    )]
+    RemovedDevice { path: PathBuf, device: DeviceId },
+    #[error(
+        "{what} is still named by the current record of {versions} version(s), for example {examples:?}; drain it first (`djbod cluster set-state`, `djbod cluster drain`)"
+    )]
+    StillReferenced {
+        what: String,
+        versions: usize,
+        examples: Vec<String>,
+    },
+    #[error("{node} at {address} answered; a live node is removed with set-state, drain, and remove-node, not --force")]
+    NodeIsAlive { node: NodeId, address: String },
+    #[error("cannot remove the only node of the cluster")]
+    LastNode,
 }
 
 fn first_address(document: &ClusterDocument, node: NodeId) -> Result<SocketAddr, MembershipError> {
@@ -143,8 +165,12 @@ pub async fn fetch_document(
 /// Ask every node listed in `document` for its own copy (6.2.6 step 1;
 /// also `djbod cluster show`).
 pub async fn fetch_all(document: &ClusterDocument) -> Vec<NodeDocument> {
+    fetch_all_except(document, None).await
+}
+
+async fn fetch_all_except(document: &ClusterDocument, skip: Option<NodeId>) -> Vec<NodeDocument> {
     let mut reports = Vec::with_capacity(document.nodes.len());
-    for entry in &document.nodes {
+    for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
         let address_text = entry.addresses.first().cloned().unwrap_or_default();
         let result = match first_address(document, entry.id) {
             Ok(address) => fetch_document(address, document.cluster_id)
@@ -168,11 +194,21 @@ pub async fn propose(
     current: &ClusterDocument,
     next: &ClusterDocument,
 ) -> Result<(), MembershipError> {
+    propose_skipping(current, next, None).await
+}
+
+/// `propose`, treating `skip` as having acknowledged (6.2.6.3 step 2):
+/// it is neither asked for its version nor sent the new document.
+async fn propose_skipping(
+    current: &ClusterDocument,
+    next: &ClusterDocument,
+    skip: Option<NodeId>,
+) -> Result<(), MembershipError> {
     next.validate().map_err(NodeError::from)?;
     // Step 1: check.
     let mut versions = Vec::new();
     let mut documents: Vec<(NodeId, ClusterDocument)> = Vec::new();
-    for report in fetch_all(current).await {
+    for report in fetch_all_except(current, skip).await {
         match report.result {
             Ok(document) => {
                 versions.push((report.node, document.version));
@@ -202,7 +238,12 @@ pub async fn propose(
     check_same_content(&documents)?;
     // Step 2: apply in document order.
     let mut applied = Vec::new();
-    for (position, entry) in current.nodes.iter().enumerate() {
+    for (position, entry) in current
+        .nodes
+        .iter()
+        .filter(|n| Some(n.id) != skip)
+        .enumerate()
+    {
         let address = first_address(current, entry.id)?;
         let outcome = apply_to(address, current.cluster_id, next).await;
         match outcome {
@@ -328,19 +369,48 @@ pub async fn join(
     config: &NodeConfig,
     peer: SocketAddr,
     cluster_id: Uuid,
+    wipe_removed_devices: bool,
 ) -> Result<ClusterDocument, MembershipError> {
     let mut current = fetch_document(peer, cluster_id).await?;
     Node::save_document_for(config, &current)?;
     let mut device_ids = Vec::with_capacity(config.devices.len());
     for path in &config.devices {
-        let device = match Device::open(path, Some(cluster_id)) {
-            Ok(existing) => existing, // a retry after a partial failure
-            Err(DeviceError::NotInitialised { .. }) => Device::initialise(path, cluster_id)?,
-            Err(e) => return Err(e.into()),
-        };
+        let device = open_or_initialise(path, &current, wipe_removed_devices)?;
         device_ids.push(device.id());
     }
     propose_with_retry(config, &mut current, &device_ids, peer, cluster_id).await
+}
+
+/// A device path for `join` or `add-device`: initialise it if it is
+/// empty; reuse it if it is already in the document (a retry after a
+/// partial failure); and if it was initialised for this cluster but is no
+/// longer listed, it was removed (18.2.1, 6.2.6.3): refuse, or erase it
+/// and initialise it afresh when asked to (SPEC 6.2.6.3).
+fn open_or_initialise(
+    path: &Path,
+    document: &ClusterDocument,
+    wipe_removed: bool,
+) -> Result<Device, MembershipError> {
+    match Device::open(path, Some(document.cluster_id)) {
+        Ok(existing) if document.device(existing.id()).is_some() => Ok(existing),
+        Ok(existing) if wipe_removed => {
+            tracing::warn!(
+                path = %path.display(),
+                device = %existing.id(),
+                "erasing a removed device; every shard and record it held is gone"
+            );
+            drop(existing);
+            Ok(Device::wipe_and_initialise(path, document.cluster_id)?)
+        }
+        Ok(existing) => Err(MembershipError::RemovedDevice {
+            path: path.to_path_buf(),
+            device: existing.id(),
+        }),
+        Err(DeviceError::NotInitialised { .. }) => {
+            Ok(Device::initialise(path, document.cluster_id)?)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Initialise `paths` (which must be listed in the configuration) and
@@ -351,20 +421,17 @@ pub async fn add_devices(
     paths: &[PathBuf],
     peer: SocketAddr,
     cluster_id: Uuid,
+    wipe_removed_devices: bool,
 ) -> Result<ClusterDocument, MembershipError> {
     let mut current = fetch_document(peer, cluster_id).await?;
     let mut device_ids: Vec<DeviceId> = Vec::new();
     for path in paths {
-        let device = match Device::open(path, Some(cluster_id)) {
-            Ok(existing) => {
-                if current.device(existing.id()).is_some() {
-                    return Err(MembershipError::AlreadyMember { path: path.clone() });
-                }
-                existing
+        if let Ok(existing) = Device::open(path, Some(cluster_id)) {
+            if current.device(existing.id()).is_some() {
+                return Err(MembershipError::AlreadyMember { path: path.clone() });
             }
-            Err(DeviceError::NotInitialised { .. }) => Device::initialise(path, cluster_id)?,
-            Err(e) => return Err(e.into()),
-        };
+        }
+        let device = open_or_initialise(path, &current, wipe_removed_devices)?;
         device_ids.push(device.id());
     }
     propose_with_retry(config, &mut current, &device_ids, peer, cluster_id).await
@@ -436,6 +503,264 @@ pub async fn set_device_state(
         }
     }
     Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+// ------------------------------------------------------------- REMOVAL
+
+/// A version whose current record places shards on the devices being
+/// looked for (18.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionReference {
+    pub key: String,
+    pub version: VersionId,
+    /// How many of the version's shards are on those devices.
+    pub shards: usize,
+    /// The version's parity count: more than `m` shards there cannot be
+    /// rebuilt.
+    pub m: u8,
+}
+
+impl VersionReference {
+    pub fn recoverable(&self) -> bool {
+        self.shards <= self.m as usize
+    }
+}
+
+/// Find every version whose current record names any of `devices`
+/// (18.5): ask each node except `skip` for the records on each of its
+/// devices, keep the highest revision per version, and count. Runs from
+/// the client, connecting to every node.
+pub async fn scan_references(
+    document: &ClusterDocument,
+    devices: &[DeviceId],
+    skip: Option<NodeId>,
+) -> Result<Vec<VersionReference>, MembershipError> {
+    let mut current: BTreeMap<(String, VersionId), MetadataRecord> = BTreeMap::new();
+    for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
+        let address = first_address(document, entry.id)?;
+        let unreachable = |reason: String| MembershipError::Unreachable {
+            node: entry.id,
+            address: address.to_string(),
+            reason,
+        };
+        let mut connection =
+            Connection::connect(address, Connection::client_hello(document.cluster_id))
+                .await
+                .map_err(|e| unreachable(e.to_string()))?;
+        for device in document
+            .devices
+            .iter()
+            .filter(|d| d.node == entry.id && d.state != DeviceState::Removed)
+        {
+            let records = match connection
+                .request(Request::LocalRecords { device: device.id })
+                .await
+            {
+                Ok(Response::LocalRecords { records }) => records,
+                Ok(other) => return Err(unreachable(format!("unexpected response {other:?}"))),
+                Err(e) => return Err(unreachable(e.to_string())),
+            };
+            for record in records {
+                let slot = current.entry((record.key.clone(), record.version));
+                match slot {
+                    std::collections::btree_map::Entry::Vacant(v) => {
+                        v.insert(record);
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut o) => {
+                        if record.revision > o.get().revision {
+                            o.insert(record);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut references = Vec::new();
+    for ((key, version), record) in current {
+        let shards = record
+            .shards
+            .iter()
+            .filter(|s| devices.contains(&s.device))
+            .count();
+        if shards > 0 {
+            references.push(VersionReference {
+                key,
+                version,
+                shards,
+                m: record.m,
+            });
+        }
+    }
+    Ok(references)
+}
+
+fn still_referenced(what: String, references: &[VersionReference]) -> MembershipError {
+    MembershipError::StillReferenced {
+        what,
+        versions: references.len(),
+        examples: references.iter().take(5).map(|r| r.key.clone()).collect(),
+    }
+}
+
+/// Mark a device `removed` (18.2.1) once no current record names it.
+/// Returns the document and whether anything changed.
+pub async fn remove_device(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    device: DeviceId,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        let Some(entry) = current.device(device) else {
+            return Err(MembershipError::UnknownDevice(device));
+        };
+        if entry.state == DeviceState::Removed {
+            return Ok((current, false));
+        }
+        let references = scan_references(&current, &[device], None).await?;
+        if !references.is_empty() {
+            return Err(still_referenced(format!("{device}"), &references));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        for candidate in next.devices.iter_mut() {
+            if candidate.id == device {
+                candidate.state = DeviceState::Removed;
+            }
+        }
+        match propose(&current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+/// Drop a live node and its devices from the document (18.2.1) once no
+/// current record names any of its devices. The node acknowledges the
+/// document like every other and then stops serving.
+pub async fn remove_node(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    node: NodeId,
+) -> Result<ClusterDocument, MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        if current.node(node).is_none() {
+            return Err(MembershipError::UnknownNode(node));
+        }
+        if current.nodes.len() == 1 {
+            return Err(MembershipError::LastNode);
+        }
+        let devices: Vec<DeviceId> = current
+            .devices
+            .iter()
+            .filter(|d| d.node == node)
+            .map(|d| d.id)
+            .collect();
+        let references = scan_references(&current, &devices, None).await?;
+        if !references.is_empty() {
+            return Err(still_referenced(format!("{node}"), &references));
+        }
+        let next = document_without_node(&current, node);
+        match propose(&current, &next).await {
+            Ok(()) => return Ok(next),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+fn document_without_node(current: &ClusterDocument, node: NodeId) -> ClusterDocument {
+    let mut next = current.clone();
+    next.version += 1;
+    next.nodes.retain(|n| n.id != node);
+    next.devices.retain(|d| d.node != node);
+    next
+}
+
+/// What forcing the removal of a dead node will cost (6.2.6.3 step 1),
+/// to be shown and confirmed before `execute_forced_removal`.
+#[derive(Debug, Clone)]
+pub struct ForcedRemovalPlan {
+    pub current: ClusterDocument,
+    pub node: NodeId,
+    pub address: String,
+    /// Why the node counted as dead.
+    pub unreachable_because: String,
+    pub devices: Vec<DeviceId>,
+    /// Every version with a shard on the node's devices.
+    pub affected: Vec<VersionReference>,
+}
+
+impl ForcedRemovalPlan {
+    /// Versions with more than m shards on the dead node: lost for good.
+    pub fn unrecoverable(&self) -> Vec<&VersionReference> {
+        self.affected.iter().filter(|r| !r.recoverable()).collect()
+    }
+}
+
+/// How long the forced path waits for the supposedly dead node to answer
+/// before believing it is dead.
+pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Step 1 of 6.2.6.3: refuse if the node answers; otherwise count what
+/// its loss costs, using the other nodes' records.
+pub async fn plan_forced_removal(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    node: NodeId,
+) -> Result<ForcedRemovalPlan, MembershipError> {
+    let current = fetch_document(peer, cluster_id).await?;
+    if current.node(node).is_none() {
+        return Err(MembershipError::UnknownNode(node));
+    }
+    if current.nodes.len() == 1 {
+        return Err(MembershipError::LastNode);
+    }
+    let address = first_address(&current, node)?;
+    let unreachable_because =
+        match tokio::time::timeout(LIVENESS_TIMEOUT, fetch_document(address, cluster_id)).await {
+            Ok(Ok(_)) => {
+                return Err(MembershipError::NodeIsAlive {
+                    node,
+                    address: address.to_string(),
+                })
+            }
+            Ok(Err(e)) => e.to_string(),
+            Err(_) => format!("no answer within {} seconds", LIVENESS_TIMEOUT.as_secs()),
+        };
+    let devices: Vec<DeviceId> = current
+        .devices
+        .iter()
+        .filter(|d| d.node == node)
+        .map(|d| d.id)
+        .collect();
+    let affected = scan_references(&current, &devices, Some(node)).await?;
+    Ok(ForcedRemovalPlan {
+        current,
+        node,
+        address: address.to_string(),
+        unreachable_because,
+        devices,
+        affected,
+    })
+}
+
+/// Step 2 of 6.2.6.3: propose the document without the dead node,
+/// treating it as having acknowledged. Step 3, the rebuild, is one
+/// `RepairObject` per affected key, run by the caller through any live
+/// node.
+pub async fn execute_forced_removal(
+    plan: &ForcedRemovalPlan,
+) -> Result<ClusterDocument, MembershipError> {
+    let next = document_without_node(&plan.current, plan.node);
+    propose_skipping(&plan.current, &next, Some(plan.node)).await?;
+    Ok(next)
 }
 
 /// Startup adoption (18.1.2): compare the saved document with each

@@ -38,9 +38,18 @@ pub type Reader = BufReader<OwnedReadHalf>;
 pub type Writer = OwnedWriteHalf;
 
 /// Accept connections forever, one task each.
+/// Accept connections until the node is removed from the cluster
+/// (18.2.1, 6.2.6.3), then return.
 pub async fn serve(node: Arc<Node>, listener: TcpListener) {
     loop {
-        match listener.accept().await {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            _ = node.removed() => {
+                tracing::warn!("removed from the cluster; no longer accepting connections");
+                return;
+            }
+        };
+        match accepted {
             Ok((stream, peer)) => {
                 let node = node.clone();
                 // The connection span (SPEC 20.4.2): every event on this

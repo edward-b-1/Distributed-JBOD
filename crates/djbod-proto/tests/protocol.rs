@@ -458,6 +458,7 @@ fn every_response_round_trips() {
                     device: device(1),
                     condition: ShardCondition::Intact,
                     rewritten: false,
+                    relocated_to: None,
                 },
                 ShardRepair {
                     index: 1,
@@ -466,6 +467,7 @@ fn every_response_round_trips() {
                         stripes: vec![2, 5],
                     },
                     rewritten: true,
+                    relocated_to: None,
                 },
                 ShardRepair {
                     index: 2,
@@ -474,6 +476,14 @@ fn every_response_round_trips() {
                         reason: "no such file".to_string(),
                     },
                     rewritten: true,
+                    relocated_to: None,
+                },
+                ShardRepair {
+                    index: 3,
+                    device: device(4),
+                    condition: ShardCondition::Lost,
+                    rewritten: true,
+                    relocated_to: Some(device(9)),
                 },
             ],
             record_copies_rewritten: vec![device(3)],

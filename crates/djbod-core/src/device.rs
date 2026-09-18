@@ -206,6 +206,30 @@ impl Device {
         })
     }
 
+    /// Erase an initialised device and initialise it afresh with a new
+    /// UUID (SPEC 6.2.6.3, `--wipe-removed-device`): the one operation
+    /// that destroys data. The directory must already carry an identity
+    /// file, so a directory that was never a device is refused rather than
+    /// emptied.
+    pub fn wipe_and_initialise(root: &Path, cluster_id: Uuid) -> Result<Device, DeviceError> {
+        Device::erase(root)?;
+        Device::initialise(root, cluster_id)
+    }
+
+    /// Remove everything an initialised device holds, leaving an empty
+    /// directory that `initialise` accepts. Refuses a directory that
+    /// carries no identity file.
+    pub fn erase(root: &Path) -> Result<(), DeviceError> {
+        Device::open(root, None)?;
+        let objects = root.join(OBJECTS_DIR);
+        if objects.is_dir() {
+            fs::remove_dir_all(&objects).map_err(|e| io_error(&objects, e))?;
+        }
+        let identity_path = root.join(DEVICE_IDENTITY_FILE);
+        fs::remove_file(&identity_path).map_err(|e| io_error(&identity_path, e))?;
+        fsync_directory(root)
+    }
+
     /// Open an initialised device. If `expected_cluster` is given, the
     /// identity file must name it (5.4).
     pub fn open(root: &Path, expected_cluster: Option<Uuid>) -> Result<Device, DeviceError> {

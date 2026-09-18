@@ -329,7 +329,7 @@ rule doing its job. `djbod cluster sync` fetches every node's document
 and pushes the highest version to every node behind it, one version at a
 time. Because of 6.2.6.1 this is always safe and always converges.
 
-6.2.6.3 [P] **A node that is permanently gone** cannot acknowledge, so no
+6.2.6.3 [D] **A node that is permanently gone** cannot acknowledge, so no
 document change can complete while it is listed, and it cannot be drained
 because its shards cannot be read. `djbod cluster remove-node <id>
 --force` is for that case only. It first tries to reach the node and
@@ -359,8 +359,18 @@ A partitioned node that was not actually dead cannot have accepted writes
 meanwhile (fail-stop), so no divergent data exists. When it reconnects it
 adopts the higher document, finds itself `removed`, and refuses to serve;
 `djbod-node run` says so and stops. Its devices refuse to be reinitialised
-unless `init-cluster` or `join` is given `--wipe-removed-device`, which is
-the one step that destroys data and says so.
+unless `init-cluster`, `join`, or `add-device` is given
+`--wipe-removed-device`, which is the one step that destroys data and says
+so.
+
+As built: the node counts as dead when it does not answer a document
+fetch within five seconds; `membership::plan_forced_removal` computes the
+cost from the other nodes' records (18.5) and `execute_forced_removal`
+proposes with the dead node skipped; the rebuild is one `RepairObject`
+per affected key, which relocates shards whose device has left the
+document (18.3). The node and its devices are dropped from the document
+together, so a device of a removed node is recognised at `join` by being
+initialised for the cluster yet unlisted.
 
 6.2.7 [D] All nodes must hold the same document version to serve requests.
 A node that finds itself holding a different version from a peer during a
@@ -1032,7 +1042,7 @@ places that shard on another eligible device, and updates the metadata
 record on all holders. When no record references the device, it is set to
 `removed` and may be detached. Draining a node is draining all its devices.
 
-18.2.1 [P] **Three commands, one job each.** State, movement, and
+18.2.1 [D] **Three commands, one job each.** State, movement, and
 membership are separate, so each command is small and each can be
 inspected before the next is run:
 
@@ -1060,8 +1070,15 @@ inspected before the next is run:
   every version it has a shard of, so the scan is local to one node; a
   copy on the device that the version's current record does not agree
   with is a stale leftover (18.8.1), reported and left for `scrub
-  --repair`. `set-state` and `drain` are built; `remove-device` and
-  `remove-node` follow.
+  --repair`.
+- As built, `remove-device` leaves the device in the document in state
+  `removed`, so that a later attempt to add the same disk is recognised
+  (6.2.6.3), and the administrator takes it out of the node's
+  configuration at the next restart; `remove-node` drops the node and its
+  devices, and the node, having acknowledged a document that no longer
+  lists it, stops accepting connections and its process exits. Both scans
+  are `membership::scan_references` (18.5). Removing the last node is
+  refused.
 - **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
   change membership only. They scan every record in the cluster (18.5)
   and refuse if any still lists the device, or any of the node's devices;
@@ -1089,7 +1106,14 @@ legal target. Either shortfall is reported and the drain refuses to start
 unless `--partial` is given.
 
 18.3 [D] **Repair after loss.** Identical to drain except that the shard is
-reconstructed from k surviving shards rather than copied.
+reconstructed from k surviving shards rather than copied. `RepairObject`
+does this on its own for a shard whose device is no longer in the cluster
+document (condition `Lost`): it chooses a new device as a write would
+(10.4, 10.5), rebuilds the shard there, and writes the record at the next
+revision to the new holder first, then the others, exactly as a
+re-placement does (18.8.2). A shard on a device that is still listed but
+unreachable is a fail-stop error, as before: the administrator decides
+between waiting and the forced removal of 6.2.6.3.
 
 18.4 [D] **Repair after corruption.** The corrupt shard block is identified
 by the checksum. The shard file is reconstructed from k valid shards and
@@ -1109,7 +1133,8 @@ old file atomically when the new one is complete and verified. The
 response reports every shard's condition and whether it was rewritten,
 which record copies were rewritten (18.4.2), and which stale copies were
 removed (18.8.1). Rewriting to a different device is `MoveShard`
-(18.8.2).
+(18.8.2), except for a device that has left the document, which repair
+handles itself (18.3).
 
 18.4.2 [D] **Missing record copies.** Reads require all k+m record copies
 to be present and to agree (9.4.4). Repair is the one operation allowed
@@ -1121,8 +1146,14 @@ disagreeing copies, or fewer than k, are refused. Shards are rewritten
 before record copies, so a crash between the two leaves a shard without a
 record, which the scrub reports and a later repair completes.
 
-18.5 [P] Finding the versions that reference a device is a scan of all
-metadata records on all devices, run as a background job.
+18.5 [D] Finding the versions that reference a device is a scan of all
+metadata records on all devices. As built it is `membership::
+scan_references`: the client asks every node (except a node being force-
+removed) for the records on each of its devices through `LocalRecords`,
+keeps the highest revision per version, and counts the shards each
+current record places on the devices in question. `remove-device`,
+`remove-node`, and `remove-node --force` run it inline before proposing;
+it is not a background job.
 
 18.6 [D] Every metadata record has k+m copies, so a single device loss
 never loses a record. With `m = 1` this leaves k copies after a loss and
@@ -1287,8 +1318,10 @@ coordinator, and those nodes send to each other. Every response is either
 
 `RepairObject`
 : Request: key. Response: a report listing every shard of the newest
-  version with its condition (intact, unreadable, or corrupt blocks by
-  stripe) and whether it was rewritten. Section 18.4.1.
+  version with its condition (intact, unreadable, corrupt blocks by
+  stripe, or lost with its device), whether it was rewritten, and for a
+  lost shard the device it was rebuilt onto; plus the record copies
+  rewritten and the stale copies removed. Sections 18.3, 18.4.1.
 
 `MoveShard`
 : Request: key, shard index, optional destination device UUID. Performs
@@ -1886,11 +1919,15 @@ an interrupted re-placement forwards, and removes stale copies; the
 cluster scrub reports `StaleCopy`; `MoveShard` (18.8.2) is
 `coordinator::move_shard` and `djbod move-shard <key> <index> [--to
 <device>]`, copying from the source when it is intact and rebuilding from
-the other shards otherwise. Step (b), first half: `membership::
-set_device_state` and `djbod cluster set-state` change a device's state
-and nothing else; `coordinator::drain` and `djbod cluster drain` make the
-single pass of 18.2.1 with the estimate of 18.2.2. Next: `remove-device`,
-`remove-node`, and `remove-node --force` (6.2.6.3).
+the other shards otherwise. Step (b): `membership::set_device_state` and
+`djbod cluster set-state` change a device's state and nothing else;
+`coordinator::drain` and `djbod cluster drain` make the single pass of
+18.2.1 with the estimate of 18.2.2; `membership::remove_device`,
+`remove_node`, `plan_forced_removal` and `execute_forced_removal` with
+`djbod cluster remove-device` and `remove-node [--force]` implement
+18.2.1, 18.5, and 6.2.6.3, with `RepairObject` relocating lost shards
+(18.3) and `--wipe-removed-device` on `join`, `add-device`, and
+`init-cluster`. Next: step (c), `djbod-recover` (20.2.2).
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
