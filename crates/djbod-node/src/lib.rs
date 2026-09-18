@@ -16,6 +16,9 @@
 //!   fanning out node-to-node operations to every node in the cluster
 //!   document, including this one (4.1).
 //! - [`ulid`]: version identifier generation (9.2.3).
+//! - [`membership`]: changing the cluster document without a master,
+//!   joining a node, syncing stragglers, and startup adoption (6.2.6,
+//!   18.1).
 //!
 //! Disk work runs on tokio's blocking pool via `spawn_blocking`;
 //! `djbod-core` stays synchronous (4.4).
@@ -24,6 +27,7 @@ pub mod client;
 pub mod config;
 pub mod coordinator;
 pub mod local_ops;
+pub mod membership;
 pub mod node;
 pub mod server;
 pub mod ulid;

@@ -319,13 +319,22 @@ impl Connection {
                 .await?;
                 break;
             }
-            self.send_data(id, body_frame(sequence, buffer[..read].to_vec()))
-                .await?;
+            // The coordinator may refuse before the body is consumed and
+            // close the connection while we are still writing. Then the
+            // write fails, but its reason is already waiting to be read.
+            if let Err(e) = self
+                .send_data(id, body_frame(sequence, buffer[..read].to_vec()))
+                .await
+            {
+                return Err(self.refusal_behind_write_error(e).await);
+            }
             sequence += 1;
             remaining -= read as u64;
         }
         if remaining == 0 {
-            self.send_end(id, StreamEnd::ok()).await?;
+            if let Err(e) = self.send_end(id, StreamEnd::ok()).await {
+                return Err(self.refusal_behind_write_error(e).await);
+            }
         }
         // Success is a Response. A refusal after the body started flowing
         // arrives as an EndOfStream carrying the error, after which the
@@ -414,6 +423,29 @@ impl Connection {
                     return Ok(record);
                 }
             }
+        }
+    }
+}
+
+impl Connection {
+    /// After a write failed mid-upload, read what the coordinator sent
+    /// before closing, if anything, so the caller sees the refusal rather
+    /// than a broken pipe.
+    async fn refusal_behind_write_error(&mut self, write_error: ClientError) -> ClientError {
+        match read_message(&mut self.reader).await {
+            Ok(Message::EndOfStream { end, .. }) => {
+                ClientError::StreamFailed(end.error.unwrap_or_else(|| {
+                    ErrorDetail::new(
+                        djbod_proto::message::ErrorCode::ProtocolViolation,
+                        "upload ended without a version",
+                    )
+                }))
+            }
+            Ok(Message::Response {
+                response: Response::Error(detail),
+                ..
+            }) => ClientError::Remote(detail),
+            _ => write_error,
         }
     }
 }

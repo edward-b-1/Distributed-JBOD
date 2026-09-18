@@ -147,14 +147,21 @@ async fn connect_to(node: &Node, target: NodeId) -> Result<Connection, Failure> 
     let address = node_address(node, target)?;
     Connection::connect(address, our_hello(node))
         .await
-        .map_err(|e| {
-            Failure::Error(ErrorDetail {
+        .map_err(|e| match e {
+            // The peer answered and refused our Hello: it holds a different
+            // document version (6.2.7) or is otherwise not our peer. Keep
+            // its own account of why.
+            ClientError::Remote(detail) => Failure::Error(ErrorDetail {
+                node: Some(target),
+                ..detail
+            }),
+            other => Failure::Error(ErrorDetail {
                 node: Some(target),
                 ..ErrorDetail::new(
                     ErrorCode::NodeUnreachable,
-                    format!("cannot reach {target} at {address}: {e}"),
+                    format!("cannot reach {target} at {address}: {other}"),
                 )
-            })
+            }),
         })
 }
 

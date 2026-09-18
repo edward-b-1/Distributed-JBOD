@@ -205,6 +205,52 @@ only the newest version's files remain.
 devices and `put` fails with `InsufficientDevices` before writing
 anything.
 
+## A second node
+
+Nodes normally run on different machines, one per machine. To try it on
+one machine, give the second node its own port, state directory, and
+devices, and point it at the first as a bootstrap peer:
+
+```toml
+# /tmp/djbod2/node.toml
+node_id = "<another UUID>"
+listen = "127.0.0.1:5264"
+state_dir = "/tmp/djbod2/state"
+devices = ["/tmp/djbod2/d0", "/tmp/djbod2/d1"]
+bootstrap_peers = ["127.0.0.1:5263"]
+allow_shared_filesystem = true
+```
+
+With the first node running, join and start the second:
+
+```sh
+target/release/djbod-node join --config /tmp/djbod2/node.toml     --peer 127.0.0.1:5263 --cluster $DJBOD_CLUSTER
+target/release/djbod-node run --config /tmp/djbod2/node.toml
+```
+
+`join` fetches the cluster document from the peer, initialises the new
+devices, and proposes a new document version listing the node and its
+devices; every existing node must accept it. Then:
+
+```sh
+target/release/djbod cluster show          # every node and the document version it holds
+target/release/djbod put big/file some.bin  # shards now land on both nodes
+target/release/djbod --node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
+```
+
+Stop one node and any request needing it fails naming the node, then
+works again when it is back. If a document change ever reaches some nodes
+and not others, `djbod cluster show` shows the versions disagreeing and
+`djbod cluster sync` brings every reachable node up to the highest.
+
+To give an existing node another device, list the new path in its
+configuration, run `djbod-node add-device --config <file> --path <the
+path>`, and restart the node.
+
+On real machines, `listen` is that machine's own address, or `0.0.0.0`
+with `advertise` set to the address the others should use, and
+`allow_shared_filesystem` is omitted.
+
 ## Starting over
 
 Stop the node and remove `/tmp/djbod`. `init-cluster` refuses a

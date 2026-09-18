@@ -79,8 +79,21 @@ enum Command {
     },
     /// Print the cluster document.
     ClusterConfig,
+    /// Cluster membership commands.
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
     /// Rebuild damaged or missing shards of an object from the intact ones.
     Repair { key: String },
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Ask every node for its document and show who holds which version.
+    Show,
+    /// Bring every node up to the highest document version any holds.
+    Sync,
 }
 
 #[tokio::main]
@@ -386,6 +399,78 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 other => bail!("unexpected response {other:?}"),
+            }
+        }
+        Command::Cluster { command } => {
+            let node = cli
+                .node
+                .context("no node address: pass --node or set DJBOD_NODE")?;
+            let cluster = cli
+                .cluster
+                .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+            match command {
+                ClusterCommand::Show => {
+                    let document = djbod_node::membership::fetch_document(node, cluster)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let reports = djbod_node::membership::fetch_all(&document).await;
+                    if cli.json {
+                        let rows: Vec<serde_json::Value> = reports
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!({
+                                    "node": r.node,
+                                    "address": r.address,
+                                    "version": r.result.as_ref().ok().map(|d| d.version),
+                                    "error": r.result.as_ref().err(),
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&rows)?);
+                    } else {
+                        println!("cluster   {}", document.cluster_id);
+                        println!("document  version {} as held by {node}", document.version);
+                        println!();
+                        println!("{:<36}  {:<21}  VERSION", "NODE", "ADDRESS");
+                        for r in &reports {
+                            let version = match &r.result {
+                                Ok(d) => d.version.to_string(),
+                                Err(e) => format!("unreachable: {e}"),
+                            };
+                            println!("{:<36}  {:<21}  {version}", r.node.0, r.address);
+                        }
+                    }
+                }
+                ClusterCommand::Sync => {
+                    let report = djbod_node::membership::sync(node, cluster)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "highest_version": report.highest_version,
+                                "updated": report.updated,
+                                "already_current": report.already_current,
+                                "unreachable": report.unreachable,
+                            }))?
+                        );
+                    } else {
+                        println!("highest version  {}", report.highest_version);
+                        for n in &report.updated {
+                            println!("updated          {}", n.0);
+                        }
+                        for n in &report.already_current {
+                            println!("already current  {}", n.0);
+                        }
+                        for (n, reason) in &report.unreachable {
+                            println!("unreachable      {}  {reason}", n.0);
+                        }
+                        if !report.unreachable.is_empty() {
+                            std::process::exit(2);
+                        }
+                    }
+                }
             }
         }
         Command::ClusterConfig => {

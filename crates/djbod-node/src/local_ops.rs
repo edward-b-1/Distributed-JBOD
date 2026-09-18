@@ -188,7 +188,7 @@ impl From<DeviceError> for Failure {
 impl From<NodeError> for Failure {
     fn from(e: NodeError) -> Failure {
         let code = match e {
-            NodeError::NotNextVersion { .. } | NodeError::WrongCluster { .. } => {
+            NodeError::NotNewer { .. } | NodeError::WrongCluster { .. } => {
                 ErrorCode::DocumentVersionMismatch
             }
             NodeError::InvalidDocument(_) => ErrorCode::ProtocolViolation,

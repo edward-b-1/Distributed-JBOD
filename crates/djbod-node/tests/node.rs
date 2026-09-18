@@ -701,7 +701,7 @@ fn walk_for_suffix(dir: &std::path::Path, suffix: &str) -> Option<PathBuf> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn apply_cluster_config_requires_the_next_version_and_persists() {
+async fn apply_cluster_config_requires_a_higher_version_and_persists() {
     let test = start_node(1, 1, 0).await;
     let mut conn = test.connect_as_node().await;
     let current: ClusterDocument = match conn.request(Request::GetClusterConfig).await.expect("get")
@@ -711,10 +711,12 @@ async fn apply_cluster_config_requires_the_next_version_and_persists() {
     };
     assert_eq!(current.version, 1);
 
-    let mut skip = current.clone();
-    skip.version = 3;
+    // The same or a lower version is refused: nodes only move forward
+    // (SPEC 6.2.6.1). A higher version is accepted even if it skips
+    // numbers, which is how stragglers catch up.
+    let same = current.clone();
     match conn
-        .request(Request::ApplyClusterConfig { document: skip })
+        .request(Request::ApplyClusterConfig { document: same })
         .await
     {
         Err(ClientError::Remote(detail)) => {
