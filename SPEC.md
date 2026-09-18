@@ -790,6 +790,20 @@ exists on k+m devices), sorts, and returns.
 
 15.2 [D] This is a full scan of every device and is accepted as slow.
 
+15.2.1 [O] **Listing at scale.** As written, the coordinator collects
+every node's full result, deduplicates, sorts, and then answers, so its
+memory grows with the number of keys in the cluster and nothing reaches
+the client until the slowest node has finished. To revisit at
+implementation time. Options noted so far: each node returns its entries
+already sorted and the coordinator performs a streaming k-way merge,
+dropping duplicates as adjacent equal keys and emitting as it goes;
+pagination through `start_after` and `limit` so no single response is
+unbounded; and avoiding duplicates at the source by having only the device
+holding shard index 0 of a version report it, which makes deduplication
+free but makes a listing depend on every shard-0 holder being reachable,
+which under fail-stop (16.1) it already does. For a first version a
+simple collect, deduplicate, and sort is acceptable.
+
 15.3 [X] A sorted index to make listing fast is deferred.
 
 ## 16. Failure semantics
@@ -1144,8 +1158,9 @@ layout in section 9 uses fixed-length names and stays well within both.
 |---|----------|-------|----------------|
 | 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
 | 21.2 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.3 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.4 | Control payload encoding. | 19.1.2 | CBOR. |
+| 21.3 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
+| 21.4 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.5 | Control payload encoding. | 19.1.2 | CBOR. |
 
 ## 22. Deferred items
 
