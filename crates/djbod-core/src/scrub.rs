@@ -1,8 +1,8 @@
-//! The scrubber (SPEC 20.1): read everything on one device and check it
-//! against the checksums stored beside it, with no network and no
-//! coordination. It reports; it does not repair. Repair is the
-//! coordinator's `RepairObject`, which the `scrub --repair` command drives
-//! from the findings.
+//! The local scrub engine (SPEC 20.1): read everything on one device and
+//! check it against the checksums stored beside it, with no network and
+//! no coordination. It reports; it does not repair. It is the piece that
+//! runs where the disks are; the cluster-wide scrub of 20.1.2 drives it on
+//! every node and repairs from the merged findings.
 //!
 //! The scrubber reads the on-disk format directly and can run while the
 //! node is running: shard files and records are immutable once renamed

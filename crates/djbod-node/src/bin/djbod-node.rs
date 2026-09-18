@@ -79,10 +79,11 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
-    /// Verify every record and shard block on this node's devices against
-    /// their checksums and report what is wrong. Reads the disks directly;
-    /// the node may be running or not. With --repair, also asks the
-    /// running node to rebuild each damaged object.
+    /// Offline check of this machine's devices: verify every record and
+    /// shard block against its checksum and report what is wrong. Reads
+    /// the disks directly and needs no running node. The cluster-wide
+    /// scrub, which sweeps every node and can repair, is the client's
+    /// `djbod scrub` (milestone 3).
     Scrub {
         #[arg(long)]
         config: PathBuf,
@@ -95,9 +96,6 @@ enum Command {
         /// One JSON object per finding on standard output.
         #[arg(long)]
         json: bool,
-        /// Repair each damaged object through the running node.
-        #[arg(long)]
-        repair: bool,
     },
 }
 
@@ -221,8 +219,7 @@ async fn main() -> anyhow::Result<()> {
             device,
             rate_mib,
             json,
-            repair,
-        } => scrub(&config, &device, rate_mib, json, repair).await,
+        } => scrub(&config, &device, rate_mib, json).await,
         Command::Run { config } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
             let listen = config.listen;
@@ -247,18 +244,16 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// The `scrub` subcommand.
+/// The `scrub` subcommand: the local scrub engine run offline over this
+/// machine's devices.
 async fn scrub(
     config_path: &std::path::Path,
     only: &[PathBuf],
     rate_mib: Option<u64>,
     json: bool,
-    repair: bool,
 ) -> anyhow::Result<()> {
     use djbod_core::device::Device;
     use djbod_core::scrub::{scrub_device, Finding, ScrubOptions};
-    use djbod_node::client::Connection;
-    use djbod_proto::message::{Request, Response};
 
     let config = NodeConfig::load(config_path).context("loading node configuration")?;
     let document_path = config
@@ -326,43 +321,6 @@ async fn scrub(
             human_bytes(totals.3),
             all_findings.len()
         );
-    }
-
-    if repair {
-        let mut keys: Vec<&str> = all_findings.iter().filter_map(|f| f.repair_key()).collect();
-        keys.sort_unstable();
-        keys.dedup();
-        if !keys.is_empty() {
-            let address = config.advertised_address();
-            let mut connection =
-                Connection::connect(address, Connection::client_hello(document.cluster_id))
-                    .await
-                    .with_context(|| {
-                        format!("connecting to the node at {address} for repair; is it running?")
-                    })?;
-            for key in keys {
-                match connection
-                    .request(Request::RepairObject {
-                        key: key.to_string(),
-                    })
-                    .await
-                {
-                    Ok(Response::RepairObject(report)) => {
-                        let rewritten = report.shards.iter().filter(|s| s.rewritten).count();
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string(&report).expect("report serializes")
-                            );
-                        } else {
-                            eprintln!("repaired {key}: {rewritten} shard(s) rewritten");
-                        }
-                    }
-                    Ok(other) => eprintln!("repair of {key}: unexpected response {other:?}"),
-                    Err(e) => eprintln!("repair of {key} failed: {e}"),
-                }
-            }
-        }
     }
 
     if all_findings.is_empty() {

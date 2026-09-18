@@ -1275,28 +1275,48 @@ native bucket exists it serves a single S3 bucket mapped to `default`.
 
 20.1.1 [D] Because every shard block and every record carries a checksum
 stored beside it, a device can be scrubbed locally at disk speed with no
-network traffic and no coordination. Implemented as `djbod-node scrub`.
+network traffic and no coordination. That locality is the reason
+checksums were chosen over parity-based detection (8.3), and the
+scrubber's design follows from it: **the checking runs where the disks
+are; the control runs from wherever the administrator is.**
 
-20.1.2 [D] **Design: a separate process reading the on-disk format
-directly.** `djbod-node scrub --config node.toml` opens each configured
-device (or those named with `--device`) and, for every key directory,
-parses and verifies every record (checksum, validation, key hash against
-the directory), opens every shard file (header, footer, trailer, geometry,
-and header against the file's name, its directory, and its record), and
-reads every block against its checksum. It also reports a record whose
-shard is not on the device, a shard with no record, a record that does
-not list the device, and temporaries older than the configured age.
-Findings print as text or, with `--json`, one object per line, each naming
-the path and, where a record was readable, the key; the exit code is 2 if
-anything was found. `--rate-mib` caps the read rate so a scrub does not
-starve clients. Because files are immutable once renamed and temporaries
-carry a suffix, the scrub is safe while the node runs, and a file that
-vanishes mid-scrub is a concurrent delete, not damage. With `--repair` it
-connects to the running node and issues `RepairObject` for every key it
-found damaged. The alternative, asking the node over a socket, was
-rejected: it would tie the scrub to the node's health and run every byte
-through a second process for no gain. Scheduling is left to cron or a
-systemd timer for now; a built-in schedule is a later addition.
+20.1.2 [D] **Two layers.**
+
+*The local scrub engine*, `djbod_core::scrub`, built. Given one device it
+walks every key directory and, for every record, parses it, verifies its
+checksum, validates it, and checks its key hashes to the directory; for
+every shard file, opens it (header, footer, trailer, geometry), checks the
+header against the file name, the directory, and the record, and reads
+every block against its checksum. It also reports a record whose shard is
+not on the device, a shard with no record, a record that does not list
+the device, and temporaries older than the configured age. Every finding
+names the path and, where a record was readable, the key. A rate limit
+caps bytes read per second. It never contacts another node. Because files
+are immutable once renamed and temporaries carry a suffix it is safe
+while the node runs, and a file that vanishes mid-scrub is a concurrent
+delete, not damage. `djbod-node scrub --config node.toml` runs it offline
+over one machine's devices, for a node that is down or a disk under
+examination; it does not repair.
+
+*The cluster-wide scrub*, to be built with milestone 3's fan-out. The
+client command `djbod scrub`, pointed at any node, has the coordinator
+send one `LocalScrub` request to every node in the cluster document; each
+node runs the engine over its own devices at the requested rate and
+streams its findings back as they arise, ending with a summary. The
+coordinator merges the streams into one report. It then performs the
+checks no single node can: for every key, that k+m record copies exist
+and agree and that every listed holder has its shard file (the scan of
+18.5, which catches a device that lost both record and shard for a
+version). With `--repair` it runs `RepairObject` once for each damaged
+key from the merged set, so repairs are never issued concurrently for one
+object. Detection therefore moves no data over the network; only repair
+does, and only for damaged objects. Scheduling is left to cron or a
+systemd timer; a built-in schedule is a later addition.
+
+20.1.2.1 [P] Before repairs can be issued from more than one place, a
+holder must refuse a second `PutShard` for a version and shard index
+already being written on that device, and temporary file names must carry
+a unique suffix, so two writers can never share one temporary file.
 
 20.1.3 [D] Since reads report rather than heal, scrubbing is the mechanism
 by which corruption is found before a client encounters it.

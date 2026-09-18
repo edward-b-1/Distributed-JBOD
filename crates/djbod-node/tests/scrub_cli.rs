@@ -1,5 +1,5 @@
-//! `djbod-node scrub` run as a process against a node's devices, with and
-//! without `--repair`, while the node runs in-process.
+//! `djbod-node scrub` run as a process against a node's devices while the
+//! node runs in-process.
 
 use std::net::SocketAddr;
 use std::process::Command;
@@ -89,7 +89,7 @@ fn scrub(test: &TestNode, extra: &[&str]) -> (i32, String, String) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn scrub_finds_damage_exits_nonzero_and_repairs_on_request() {
+async fn scrub_finds_damage_and_exits_nonzero() {
     let test = start_node(4, 3, 1).await;
     let mut client =
         Connection::connect(test.addr, Connection::client_hello(test.node.cluster_id()))
@@ -158,10 +158,19 @@ async fn scrub_finds_damage_exits_nonzero_and_repairs_on_request() {
     assert_eq!(code, 2);
     assert!(out.contains("shard blocks corrupt"), "{out}");
 
-    // With --repair the node rewrites it; a second scrub is clean.
-    let (code, _, err) = scrub(&test, &["--repair"]);
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("repaired k: 1 shard(s) rewritten"), "{err}");
+    // Repair through the node, then a second scrub is clean.
+    match client
+        .request(Request::RepairObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("repair")
+    {
+        Response::RepairObject(report) => {
+            assert_eq!(report.shards.iter().filter(|s| s.rewritten).count(), 1)
+        }
+        other => panic!("{other:?}"),
+    }
     let (code, out, _) = scrub(&test, &[]);
     assert_eq!(code, 0, "{out}");
     let (_, got) = client.get_object("k").await.expect("get");
