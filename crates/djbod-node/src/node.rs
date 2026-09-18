@@ -209,6 +209,24 @@ impl Node {
         if document.node(node_id).is_none() {
             return Err(NodeError::NotAMember { node: node_id });
         }
+        // A cluster may legitimately have fewer active devices than the
+        // scheme needs, for example before other nodes join (7.3), but
+        // every write will fail until it does not, so say so loudly.
+        let active = document
+            .devices
+            .iter()
+            .filter(|d| d.state == DeviceState::Active)
+            .count();
+        let needed = document.k as usize + document.m as usize;
+        if active < needed {
+            tracing::warn!(
+                active_devices = active,
+                needed,
+                k = document.k,
+                m = document.m,
+                "the cluster has fewer active devices than k + m; every write will fail with InsufficientDevices until devices are added"
+            );
+        }
         let mut by_id = HashMap::with_capacity(devices.len());
         for device in devices {
             if document.device(device.id()).is_none() {

@@ -75,6 +75,14 @@ device  2bb98674-...  /tmp/djbod/d0
 ...
 ```
 
+`k + m` may be less than the number of devices; that is the normal case.
+Each object is placed on the `k + m` devices with the most free space at
+the time it is written, so a larger pool is used evenly and different
+objects land on different subsets. `k + m` may also be more than the
+number of devices, and `init-cluster` allows it because a cluster can
+grow, but it warns, and every `put` fails with `InsufficientDevices`
+until enough devices exist.
+
 You need the **cluster id** for the client. If you lose it, it is in
 `/tmp/djbod/state/cluster.json`.
 
