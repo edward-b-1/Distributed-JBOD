@@ -61,8 +61,10 @@ pub enum NodeError {
     NotAMember { node: NodeId },
     #[error("device {device} at {path} is not in the cluster document")]
     UnknownDevice { device: DeviceId, path: PathBuf },
-    #[error("cluster document version {proposed} is not the current version {current} plus one")]
-    NotNextVersion { current: u64, proposed: u64 },
+    #[error(
+        "cluster document version {proposed} is not higher than the current version {current}"
+    )]
+    NotNewer { current: u64, proposed: u64 },
     #[error("cluster document names cluster {proposed}, this node belongs to {ours}")]
     WrongCluster { ours: Uuid, proposed: Uuid },
 }
@@ -252,8 +254,10 @@ impl Node {
     }
 
     /// Adopt a new cluster document (SPEC 6.2.6, `ApplyClusterConfig`):
-    /// it must name this cluster and be exactly the current version plus
-    /// one. Saved durably before it takes effect.
+    /// it must name this cluster and carry a higher version than the one
+    /// held. Versions are produced serially through the first-listed node
+    /// (6.2.6), so any higher version is the unique successor and safe to
+    /// adopt (6.2.6.1). Saved durably before it takes effect.
     pub fn apply_document(&self, proposed: ClusterDocument) -> Result<(), NodeError> {
         proposed.validate()?;
         let mut current = self.document.write().expect("document lock");
@@ -263,15 +267,78 @@ impl Node {
                 proposed: proposed.cluster_id,
             });
         }
-        if proposed.version != current.version + 1 {
-            return Err(NodeError::NotNextVersion {
+        if proposed.version <= current.version {
+            return Err(NodeError::NotNewer {
                 current: current.version,
                 proposed: proposed.version,
             });
         }
         save_document(&Self::document_path(&self.config), &proposed)?;
+        tracing::info!(
+            from = current.version,
+            to = proposed.version,
+            nodes = proposed.nodes.len(),
+            devices = proposed.devices.len(),
+            "cluster document changed"
+        );
         *current = proposed;
         Ok(())
+    }
+
+    /// The path of this configuration's saved cluster document.
+    pub fn document_path_for(config: &NodeConfig) -> PathBuf {
+        Self::document_path(config)
+    }
+
+    /// Save a document into a configuration's state directory without
+    /// opening the node: used by `join` before the node exists and by
+    /// startup adoption before the node opens (18.1.1, 18.1.2).
+    pub fn save_document_for(
+        config: &NodeConfig,
+        document: &ClusterDocument,
+    ) -> Result<(), NodeError> {
+        fs::create_dir_all(&config.state_dir).map_err(|source| NodeError::Io {
+            path: config.state_dir.clone(),
+            source,
+        })?;
+        save_document(&Self::document_path(config), document)
+    }
+
+    /// Load the saved document, if any.
+    pub fn load_document_for(config: &NodeConfig) -> Result<Option<ClusterDocument>, NodeError> {
+        let path = Self::document_path(config);
+        if !path.exists() {
+            return Ok(None);
+        }
+        load_document(&path).map(Some)
+    }
+
+    /// The document that would add this node and its (already initialised)
+    /// devices to `current` (18.1.1).
+    pub fn document_with_this_node(
+        config: &NodeConfig,
+        current: &ClusterDocument,
+        devices: &[DeviceId],
+    ) -> ClusterDocument {
+        let node_id = NodeId(config.node_id);
+        let mut next = current.clone();
+        next.version += 1;
+        if next.node(node_id).is_none() {
+            next.nodes.push(NodeEntry {
+                id: node_id,
+                addresses: vec![config.advertised_address().to_string()],
+            });
+        }
+        for device in devices {
+            if next.device(*device).is_none() {
+                next.devices.push(DeviceEntry {
+                    id: *device,
+                    node: node_id,
+                    state: DeviceState::Active,
+                });
+            }
+        }
+        next
     }
 }
 

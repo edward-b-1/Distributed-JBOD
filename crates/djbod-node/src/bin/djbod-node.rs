@@ -50,6 +50,30 @@ enum Command {
         #[arg(long, default_value_t = 0.05)]
         headroom: f64,
     },
+    /// Join an existing cluster: fetch its document from a peer,
+    /// initialise this node's devices, and add this node to the document.
+    Join {
+        #[arg(long)]
+        config: PathBuf,
+        /// Address of any node already in the cluster.
+        #[arg(long)]
+        peer: std::net::SocketAddr,
+        /// The cluster id, as printed by init-cluster.
+        #[arg(long)]
+        cluster: uuid::Uuid,
+    },
+    /// Initialise a device path listed in the configuration but not yet
+    /// in the cluster document, and add it. Restart the node afterwards.
+    AddDevice {
+        #[arg(long)]
+        config: PathBuf,
+        /// The device path(s) to add; must appear in the configuration.
+        #[arg(long, required = true)]
+        path: Vec<PathBuf>,
+        /// Address of any running node; defaults to this node's own.
+        #[arg(long)]
+        peer: Option<std::net::SocketAddr>,
+    },
     /// Run the node.
     Run {
         #[arg(long)]
@@ -126,9 +150,58 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Join {
+            config,
+            peer,
+            cluster,
+        } => {
+            let config = NodeConfig::load(&config).context("loading node configuration")?;
+            let document = djbod_node::membership::join(&config, peer, cluster)
+                .await
+                .context("joining cluster")?;
+            println!(
+                "joined cluster {} as node {}",
+                document.cluster_id, config.node_id
+            );
+            println!("document version {}", document.version);
+            for entry in document
+                .devices
+                .iter()
+                .filter(|d| d.node.0 == config.node_id)
+            {
+                println!("device  {}", entry.id.0);
+            }
+            println!("start the node with: djbod-node run --config <the same file>");
+            Ok(())
+        }
+        Command::AddDevice { config, path, peer } => {
+            let config = NodeConfig::load(&config).context("loading node configuration")?;
+            for p in &path {
+                if !config.devices.contains(p) {
+                    anyhow::bail!(
+                        "{} is not listed under devices in the configuration",
+                        p.display()
+                    );
+                }
+            }
+            let document = Node::load_document_for(&config)
+                .context("reading saved cluster document")?
+                .context("no cluster document; this node has not joined a cluster")?;
+            let peer = peer.unwrap_or_else(|| config.advertised_address());
+            let document =
+                djbod_node::membership::add_devices(&config, &path, peer, document.cluster_id)
+                    .await
+                    .context("adding devices")?;
+            println!("document version {}", document.version);
+            println!("restart the node to serve the new device(s)");
+            Ok(())
+        }
         Command::Run { config } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
             let listen = config.listen;
+            djbod_node::membership::adopt_from_peers(&config)
+                .await
+                .context("checking bootstrap peers")?;
             let node = Arc::new(Node::open(config).context("opening node")?);
             let listener = TcpListener::bind(listen)
                 .await
