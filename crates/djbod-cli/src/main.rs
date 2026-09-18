@@ -22,12 +22,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
+use djbod_core::cluster::DeviceState;
+use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, DEFAULT_BODY_CHUNK};
-use djbod_proto::message::{ErrorDetail, ListQuery, Request, Response};
+use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
 
 #[derive(Parser)]
 #[command(name = "djbod", about = "Distributed-JBOD client", version)]
@@ -111,6 +113,27 @@ enum ClusterCommand {
     Show,
     /// Bring every node up to the highest document version any holds.
     Sync,
+    /// Mark a device draining (it receives no new shards) or active again.
+    /// Moves no data.
+    SetState { device: Uuid, state: StateArg },
+    /// Move every shard off a draining device in one pass.
+    Drain {
+        /// The draining device to empty.
+        #[arg(required_unless_present = "node_id", conflicts_with = "node_id")]
+        device: Option<Uuid>,
+        /// Drain every draining device of this node in turn.
+        #[arg(long = "node-id", value_name = "NODE")]
+        node_id: Option<Uuid>,
+        /// Start even if the estimate says not everything will fit.
+        #[arg(long)]
+        partial: bool,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum StateArg {
+    Draining,
+    Active,
 }
 
 #[tokio::main]
@@ -588,6 +611,73 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
+                ClusterCommand::SetState { device, state } => {
+                    let state = match state {
+                        StateArg::Draining => DeviceState::Draining,
+                        StateArg::Active => DeviceState::Active,
+                    };
+                    let (document, changed) = djbod_node::membership::set_device_state(
+                        node,
+                        cluster,
+                        DeviceId(*device),
+                        state,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let state_name = format!("{state:?}").to_lowercase();
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "device": device,
+                                "state": state_name,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if changed {
+                        println!(
+                            "device {device} is now {state_name} (document version {})",
+                            document.version
+                        );
+                    } else {
+                        println!("device {device} was already {state_name}; nothing changed");
+                    }
+                }
+                ClusterCommand::Drain {
+                    device,
+                    node_id,
+                    partial,
+                } => {
+                    let devices: Vec<Uuid> = match (device, node_id) {
+                        (Some(device), _) => vec![*device],
+                        (None, Some(node_id)) => {
+                            let document = djbod_node::membership::fetch_document(node, cluster)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let found: Vec<Uuid> = document
+                                .devices
+                                .iter()
+                                .filter(|d| {
+                                    d.node.0 == *node_id && d.state == DeviceState::Draining
+                                })
+                                .map(|d| d.id.0)
+                                .collect();
+                            if found.is_empty() {
+                                println!("node {node_id} has no draining devices");
+                            }
+                            found
+                        }
+                        (None, None) => unreachable!("clap requires one of the two"),
+                    };
+                    let mut all_moved = true;
+                    for device in devices {
+                        all_moved &= drain_device(&cli, DeviceId(device), *partial).await?;
+                    }
+                    if !all_moved {
+                        std::process::exit(2);
+                    }
+                }
                 ClusterCommand::Sync => {
                     let report = djbod_node::membership::sync(node, cluster)
                         .await
@@ -635,6 +725,78 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Run one drain and print its progress. Returns whether every version
+/// was moved.
+async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
+    let mut conn = connect(cli).await?;
+    let id = conn.start_drain(device, partial).await.map_err(remote)?;
+    let mut moved = 0usize;
+    let mut skipped: Vec<(String, String)> = Vec::new();
+    let end = loop {
+        match conn.next_drain_event(id).await.map_err(remote)? {
+            Ok(event) => {
+                if cli.json {
+                    println!("{}", serde_json::to_string(&event)?);
+                    if let DrainEvent::Skipped { key, detail, .. } = &event {
+                        skipped.push((key.clone(), detail.message.clone()));
+                    }
+                    continue;
+                }
+                match event {
+                    DrainEvent::Estimate {
+                        device,
+                        node,
+                        versions,
+                        shard_bytes,
+                        target_free_bytes,
+                        active_devices,
+                        required_devices,
+                    } => {
+                        println!(
+                            "draining {} on node {}: {versions} version(s), {} to move; {} free on {active_devices} active device(s), {required_devices} needed per version",
+                            device.0,
+                            short(&node.0),
+                            human_bytes(shard_bytes),
+                            human_bytes(target_free_bytes)
+                        );
+                    }
+                    DrainEvent::Moved {
+                        key,
+                        shard_index,
+                        destination,
+                        rebuilt,
+                        ..
+                    } => {
+                        moved += 1;
+                        println!(
+                            "moved    {key}  shard {shard_index} -> {}{}",
+                            destination.0,
+                            if rebuilt { " (rebuilt)" } else { "" }
+                        );
+                    }
+                    DrainEvent::Skipped { key, detail, .. } => {
+                        println!("skipped  {key}  {}", describe_detail(&detail));
+                        skipped.push((key, detail.message));
+                    }
+                }
+            }
+            Err(end) => break end,
+        }
+    };
+    if !cli.json {
+        eprintln!("{moved} moved, {} skipped", skipped.len());
+    }
+    if let Some(error) = &end.error {
+        eprintln!(
+            "drain of {} incomplete: {}",
+            device.0,
+            describe_detail(error)
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 fn short(id: &Uuid) -> String {

@@ -168,6 +168,15 @@ pub enum Request {
         max_bytes_per_second: Option<u64>,
         repair: bool,
     },
+    /// Move every shard off a `draining` device (SPEC 18.2.1, 18.2.2) in
+    /// one pass. Answered with `DrainStarted`, then a stream of CBOR
+    /// `DrainEvent` data frames, then end-of-stream, which carries an
+    /// error if any version could not be moved. Administrative.
+    Drain {
+        device: DeviceId,
+        /// Start even if the estimate says not everything will fit.
+        partial: bool,
+    },
 
     // ---- node to node
     LocalStatus,
@@ -175,6 +184,10 @@ pub enum Request {
         key_hash: KeyHash,
     },
     LocalList(ListQuery),
+    /// Every record on one local device, for the drain (18.2.1).
+    LocalRecords {
+        device: DeviceId,
+    },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
     /// the holder answers `PutShardDone`.
     PutShard {
@@ -333,6 +346,8 @@ pub enum Response {
     },
     /// Followed by a stream of `ScrubEvent` frames.
     ScrubStarted,
+    /// Followed by a stream of `DrainEvent` frames.
+    DrainStarted,
 
     // ---- node to node
     LocalStatus {
@@ -345,6 +360,9 @@ pub enum Response {
     },
     LocalList {
         entries: Vec<KeyEntry>,
+    },
+    LocalRecords {
+        records: Vec<MetadataRecord>,
     },
     /// The holder has created and reserved the file; send blocks.
     PutShardReady,
@@ -453,6 +471,42 @@ pub enum ScrubEvent {
     },
     RepairFailed {
         key: String,
+        detail: ErrorDetail,
+    },
+}
+
+/// One event of a drain (SPEC 18.2.1, 18.2.2): the estimate, then one
+/// `Moved` or `Skipped` per version on the device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum DrainEvent {
+    /// What the pass will attempt, measured before anything moves.
+    Estimate {
+        device: DeviceId,
+        node: NodeId,
+        /// Versions with a shard on the device.
+        versions: u64,
+        /// Bytes of shard files to move.
+        shard_bytes: u64,
+        /// Free bytes, within headroom, on `active` devices.
+        target_free_bytes: u64,
+        /// `active` devices in the cluster, and the k+m any version needs.
+        active_devices: u64,
+        required_devices: u64,
+    },
+    Moved {
+        key: String,
+        version: VersionId,
+        shard_index: u8,
+        destination: DeviceId,
+        /// Rebuilt from the other shards rather than copied from the
+        /// draining device.
+        rebuilt: bool,
+    },
+    /// The version stays where it is; the detail says why.
+    Skipped {
+        key: String,
+        version: VersionId,
         detail: ErrorDetail,
     },
 }

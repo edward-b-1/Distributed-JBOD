@@ -27,9 +27,9 @@ use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    ClusterFinding, DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    LocatedRecord, Message, RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition,
-    ShardRepair, StreamEnd,
+    ClusterFinding, DataFrame, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry,
+    ListQuery, LocatedRecord, Message, RepairReport, Request, Response, ScrubEvent, ScrubItem,
+    ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::client::{ClientError, Connection, StreamItem};
@@ -56,6 +56,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::RepairObject { .. }
             | Request::MoveShard { .. }
             | Request::Scrub { .. }
+            | Request::Drain { .. }
     )
 }
 
@@ -90,6 +91,7 @@ pub async fn handle(
             max_bytes_per_second,
             repair,
         } => scrub(node, id, writer, max_bytes_per_second, repair).await,
+        Request::Drain { device, partial } => drain(node, id, writer, device, partial).await,
         Request::GetObject { key } => get_object(node, id, writer, &key).await,
         Request::PutObject {
             key,
@@ -1882,6 +1884,37 @@ async fn move_shard(
             format!("{index} is outside scheme {}+{}", record.k, record.m),
         ));
     }
+    let moved = move_shard_of_record(node, &record, index, target).await?;
+    Ok(Response::MoveShard {
+        record: moved.record,
+        source: moved.source,
+        source_cleaned: moved.source_cleaned,
+        rebuilt: moved.rebuilt,
+    })
+}
+
+/// What a re-placement did.
+struct MovedShard {
+    /// The record at its new revision.
+    record: MetadataRecord,
+    source: DeviceId,
+    source_cleaned: bool,
+    rebuilt: bool,
+}
+
+/// Re-place shard `index` of `record`, which must be the current record
+/// of its version, onto `target` or a device chosen as a write would.
+async fn move_shard_of_record(
+    node: &Arc<Node>,
+    record: &MetadataRecord,
+    index: ShardIndex,
+    target: Option<DeviceId>,
+) -> Result<MovedShard, Failure> {
+    let key = record.key.as_str();
+    let shard_index = index.0;
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
     let source = record
         .device_for(index)
         .expect("validated record lists every index");
@@ -1961,7 +1994,7 @@ async fn move_shard(
     // Step 1: produce the shard on the destination.
     let mut rebuilt = false;
     if record.size > 0 {
-        let copied = copy_shard(node, key, &record, index, source, &destination).await;
+        let copied = copy_shard(node, key, record, index, source, &destination).await;
         match copied {
             Ok(()) => {}
             Err(Failure::Error(detail)) => {
@@ -1973,9 +2006,8 @@ async fn move_shard(
                             "record has an impossible size",
                         )
                     })?;
-                let sources = open_repair_sources(node, key, &record, geometry.block_count).await?;
-                rebuild_shards(node, key, &record, &sources, &[(index, destination.device)])
-                    .await?;
+                let sources = open_repair_sources(node, key, record, geometry.block_count).await?;
+                rebuild_shards(node, key, record, &sources, &[(index, destination.device)]).await?;
                 rebuilt = true;
             }
             Err(other) => return Err(other),
@@ -2014,11 +2046,233 @@ async fn move_shard(
         },
         None => false,
     };
-    Ok(Response::MoveShard {
+    Ok(MovedShard {
         record: next,
         source,
         source_cleaned,
         rebuilt,
+    })
+}
+
+// ----------------------------------------------------------------- DRAIN
+
+/// One pass over a `draining` device (SPEC 18.2.1, 18.2.2): list the
+/// versions on it once, estimate, then re-place each shard exactly once,
+/// reporting every outcome. Finishes when the list is exhausted whatever
+/// happened to individual versions, so it cannot loop.
+async fn drain(
+    node: &Arc<Node>,
+    id: u32,
+    writer: &mut Writer,
+    device: DeviceId,
+    partial: bool,
+) -> Result<(), Failure> {
+    let document = node.document();
+    let Some(entry) = document.device(device) else {
+        let detail = ErrorDetail {
+            device: Some(device),
+            ..ErrorDetail::new(
+                ErrorCode::DeviceUnavailable,
+                format!("{device} is not in the cluster document"),
+            )
+        };
+        return respond(writer, id, Err(Failure::Error(detail))).await;
+    };
+    if entry.state != DeviceState::Draining {
+        let detail = ErrorDetail {
+            device: Some(device),
+            ..ErrorDetail::new(
+                ErrorCode::ProtocolViolation,
+                format!(
+                    "{device} is {}, not draining; `djbod cluster set-state {} draining` first",
+                    format!("{:?}", entry.state).to_lowercase(),
+                    device.0
+                ),
+            )
+        };
+        return respond(writer, id, Err(Failure::Error(detail))).await;
+    }
+    let owner = entry.node;
+    let records = match fetch_device_records(node, owner, device).await {
+        Ok(records) => records,
+        Err(f) => return respond(writer, id, Err(f)).await,
+    };
+    let statuses = match broadcast(node, Request::LocalStatus).await {
+        Ok(answers) => match device_statuses(node, answers) {
+            Ok(statuses) => statuses,
+            Err(f) => return respond(writer, id, Err(f)).await,
+        },
+        Err(f) => return respond(writer, id, Err(f)).await,
+    };
+    respond(writer, id, Ok(Response::DrainStarted)).await?;
+    let mut sequence: u64 = 0;
+
+    // The estimate (18.2.2).
+    let required_devices = document.k as u64 + document.m as u64;
+    let active: Vec<&DeviceStatus> = statuses
+        .iter()
+        .filter(|d| d.state == DeviceState::Active)
+        .collect();
+    let target_free_bytes: u64 = active.iter().map(|d| d.free_bytes).sum();
+    let mut shard_bytes: u64 = 0;
+    for record in &records {
+        if let Ok(scheme) = record.scheme() {
+            shard_bytes += shard_file_length(scheme, record.block_size, record.size).unwrap_or(0);
+        }
+    }
+    send_event(
+        writer,
+        id,
+        &mut sequence,
+        &DrainEvent::Estimate {
+            device,
+            node: owner,
+            versions: records.len() as u64,
+            shard_bytes,
+            target_free_bytes,
+            active_devices: active.len() as u64,
+            required_devices,
+        },
+    )
+    .await?;
+    let shortfall = if (active.len() as u64) < required_devices {
+        Some(format!(
+            "{} active device(s), but every version needs {required_devices}; no version has a legal target",
+            active.len()
+        ))
+    } else if target_free_bytes < shard_bytes {
+        Some(format!(
+            "{shard_bytes} bytes to move but active devices have {target_free_bytes} bytes free within headroom"
+        ))
+    } else {
+        None
+    };
+    if let Some(reason) = shortfall {
+        if !partial {
+            let end = StreamEnd::failed(ErrorDetail {
+                device: Some(device),
+                ..ErrorDetail::new(
+                    ErrorCode::InsufficientDevices,
+                    format!("{reason}; add capacity, or pass --partial to move what fits"),
+                )
+            });
+            write_message(writer, &Message::EndOfStream { id, end }).await?;
+            return Ok(());
+        }
+    }
+
+    // The pass.
+    let total = records.len();
+    let mut skipped = 0usize;
+    for record in &records {
+        let event = match drain_one(node, device, record).await {
+            Ok(moved) => DrainEvent::Moved {
+                key: record.key.clone(),
+                version: record.version,
+                shard_index: moved.shard_index,
+                destination: moved.destination,
+                rebuilt: moved.rebuilt,
+            },
+            Err(Failure::Error(detail)) => {
+                skipped += 1;
+                DrainEvent::Skipped {
+                    key: record.key.clone(),
+                    version: record.version,
+                    detail,
+                }
+            }
+            Err(other) => return Err(other),
+        };
+        match &event {
+            DrainEvent::Moved {
+                key, destination, ..
+            } => tracing::info!(key, %device, %destination, "drain: shard moved"),
+            DrainEvent::Skipped { key, detail, .. } => {
+                tracing::warn!(key, %device, reason = %detail.message, "drain: version skipped")
+            }
+            DrainEvent::Estimate { .. } => {}
+        }
+        send_event(writer, id, &mut sequence, &event).await?;
+    }
+    let end = if skipped > 0 {
+        StreamEnd::failed(ErrorDetail {
+            device: Some(device),
+            ..ErrorDetail::new(
+                ErrorCode::WriteFailed,
+                format!(
+                    "{skipped} of {total} version(s) could not be moved; the device stays draining and serves what it holds"
+                ),
+            )
+        })
+    } else {
+        StreamEnd::ok()
+    };
+    write_message(writer, &Message::EndOfStream { id, end }).await?;
+    Ok(())
+}
+
+/// Every record on `device`, asked of its owning node.
+async fn fetch_device_records(
+    node: &Arc<Node>,
+    owner: NodeId,
+    device: DeviceId,
+) -> Result<Vec<MetadataRecord>, Failure> {
+    let mut connection = connect_to(node, owner).await?;
+    match connection
+        .request(Request::LocalRecords { device })
+        .await
+        .map_err(|e| remote_failure(owner, e))?
+    {
+        Response::LocalRecords { records } => Ok(records),
+        other => Err(error(
+            ErrorCode::ProtocolViolation,
+            format!("{owner} answered LocalRecords with {other:?}"),
+        )),
+    }
+}
+
+struct DrainedShard {
+    shard_index: u8,
+    destination: DeviceId,
+    rebuilt: bool,
+}
+
+/// Re-place the shard that `copy`, a record found on `device`, says the
+/// device holds. The version's current record decides: a copy the
+/// current record does not agree with is a stale leftover, reported and
+/// left for `scrub --repair`.
+async fn drain_one(
+    node: &Arc<Node>,
+    device: DeviceId,
+    copy: &MetadataRecord,
+) -> Result<DrainedShard, Failure> {
+    let located = lookup(node, copy.key_hash).await?;
+    let versions = versions_of(&copy.key, located)?;
+    let stale = || {
+        Failure::Error(ErrorDetail {
+            device: Some(device),
+            key: Some(copy.key.clone()),
+            version: Some(copy.version),
+            ..ErrorDetail::new(
+                ErrorCode::RecordsInconsistent,
+                "stale copy: the current record of this version does not place a shard here; `djbod scrub --repair` removes it",
+            )
+        })
+    };
+    let Some(current) = versions.iter().find(|v| v.version == copy.version) else {
+        return Err(stale());
+    };
+    let Some(index) = current.shard_on(device) else {
+        return Err(stale());
+    };
+    let moved = move_shard_of_record(node, current, index, None).await?;
+    Ok(DrainedShard {
+        shard_index: index.0,
+        destination: moved
+            .record
+            .device_for(index)
+            .expect("the new record lists every index"),
+        rebuilt: moved.rebuilt,
     })
 }
 
@@ -2344,12 +2598,12 @@ async fn reopen_intact_streams(
 
 // ---------------------------------------------------------------- SCRUB
 
-/// Write one scrub event to the client as a CBOR data frame.
-async fn send_event(
+/// Write one scrub or drain event to the client as a CBOR data frame.
+async fn send_event<E: serde::Serialize>(
     writer: &mut Writer,
     id: u32,
     sequence: &mut u64,
-    event: &ScrubEvent,
+    event: &E,
 ) -> Result<(), Failure> {
     let bytes = djbod_proto::codec::encode_cbor(event)
         .map_err(|e| error(ErrorCode::Internal, e.to_string()))?;

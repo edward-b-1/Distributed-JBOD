@@ -13,7 +13,7 @@ use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{ErrorCode, Request, Response};
+use djbod_proto::message::{DrainEvent, ErrorCode, Request, Response};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -901,4 +901,93 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
     );
     assert!(!victim_shard.exists());
     assert!(!victim_record.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(2, &a).await;
+    let c = joined_node(1, &b).await;
+    let nodes = [&a, &b, &c];
+    let mut client = a.client().await;
+    let mut records = Vec::new();
+    for i in 0..3u64 {
+        let body = xorshift64_bytes(2 * 2 * BLOCK as usize + i as usize, 90 + i);
+        let key = format!("obj-{i}");
+        client
+            .put_object(&key, &body, 100_000, None)
+            .await
+            .expect("put");
+        match client
+            .request(Request::HeadObject { key })
+            .await
+            .expect("head")
+        {
+            Response::HeadObject { record } => records.push(record),
+            other => panic!("{other:?}"),
+        }
+    }
+    // Drain one of b's devices, proposed through c and run through a.
+    let device = b.node.devices()[0].id();
+    let versions_on_device = records
+        .iter()
+        .filter(|r| r.shard_on(device).is_some())
+        .count();
+    let (document, changed) =
+        membership::set_device_state(c.addr, c.node.cluster_id(), device, DeviceState::Draining)
+            .await
+            .expect("set state");
+    assert!(changed);
+    for n in nodes {
+        assert_eq!(n.node.document().version, document.version);
+        assert_eq!(
+            n.node.document().device(device).expect("device").state,
+            DeviceState::Draining
+        );
+    }
+
+    let id = client
+        .start_drain(device, false)
+        .await
+        .expect("start drain");
+    let mut moved = 0usize;
+    let end = loop {
+        match client.next_drain_event(id).await.expect("event") {
+            Ok(DrainEvent::Moved { destination, .. }) => {
+                moved += 1;
+                assert_ne!(destination, device);
+            }
+            Ok(DrainEvent::Skipped { key, detail, .. }) => panic!("{key} skipped: {detail:?}"),
+            Ok(DrainEvent::Estimate { .. }) => {}
+            Err(end) => break end,
+        }
+    };
+    assert!(end.error.is_none(), "{end:?}");
+    assert_eq!(moved, versions_on_device);
+    for i in 0..3 {
+        let key = format!("obj-{i}");
+        match client
+            .request(Request::HeadObject { key: key.clone() })
+            .await
+            .expect("head")
+        {
+            Response::HeadObject { record } => assert!(record.shard_on(device).is_none()),
+            other => panic!("{other:?}"),
+        }
+        let mut c_client = c.client().await;
+        c_client
+            .get_object(&key)
+            .await
+            .expect("reads from any node");
+    }
+    let (events, end) = run_scrub(&mut client, false).await;
+    assert!(end.error.is_none(), "{end:?}");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            djbod_proto::message::ScrubEvent::NodeFinding { .. }
+                | djbod_proto::message::ScrubEvent::ClusterFinding(_)
+        )),
+        "{events:?}"
+    );
 }

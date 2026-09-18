@@ -1054,7 +1054,14 @@ inspected before the next is run:
   It prints progress per version and is safe to interrupt and rerun; a
   rerun is the administrator's decision, not the tool's. `--node <id>` drains every `draining` device of a node in turn.
   A version the cluster cannot rebuild (more than m damaged shards) is
-  reported and left.
+  reported and left. The operation is `Drain` (19.1.3), served by any
+  node like the other administrative operations: the list of versions
+  comes from the draining device itself, which holds a record copy for
+  every version it has a shard of, so the scan is local to one node; a
+  copy on the device that the version's current record does not agree
+  with is a stale leftover (18.8.1), reported and left for `scrub
+  --repair`. `set-state` and `drain` are built; `remove-device` and
+  `remove-node` follow.
 - **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
   change membership only. They scan every record in the cluster (18.5)
   and refuse if any still lists the device, or any of the node's devices;
@@ -1065,7 +1072,7 @@ inspected before the next is run:
   `scrub` in between. A dead node is the one case that skips the scan:
   6.2.6.3.
 
-18.2.2 [P] **Running out of room.** Re-placement chooses a target exactly
+18.2.2 [D] **Running out of room.** Re-placement chooses a target exactly
 as a write does (10.4, 10.5): an `active` device with room for the shard
 file within its headroom, not already holding a shard of that version.
 So a drain cannot fill a device past its headroom or breach device-level
@@ -1160,7 +1167,7 @@ differ in revision during a re-placement, and the rules become:
 device `d'`.** The operation is `MoveShard` (19.1.3), served by any node.
 The administrator names `d'`, or leaves the choice to the coordinator,
 which picks the active device with the most free room that holds no
-shard of `v`, as a write would (11.1); an automatic choice needs every
+shard of `v`, as a write would (10.4, 10.5); an automatic choice needs every
 node's free-space report and so fails while any node is unreachable,
 while an explicit `d'` needs only its own node. Every step is idempotent
 so the whole is safe to rerun:
@@ -1289,6 +1296,14 @@ coordinator, and those nodes send to each other. Every response is either
   source device, whether the source's copy was removed, and whether the
   shard was rebuilt from the other shards rather than copied.
 
+`Drain`
+: Request: device UUID, whether to proceed despite a shortfall in the
+  estimate. Refused unless the device is `draining`. Response:
+  `DrainStarted`, then a stream of CBOR `DrainEvent` data frames: the
+  estimate of 18.2.2, then one `Moved` or `Skipped` per version on the
+  device; the end-of-stream carries an error if the estimate stopped the
+  pass or any version was skipped. Section 18.2.1.
+
 `Scrub`
 : Request: rate limit, whether to repair. Response: `ScrubStarted`, then a
   stream of CBOR `ScrubEvent` data frames: each node's findings and
@@ -1331,6 +1346,10 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: optional prefix, optional start-after, optional limit.
   Response: for each matching record on any local device, the key, size,
   and version id. Duplicates across devices are the coordinator's problem.
+
+`LocalRecords`
+: Request: device UUID. Response: every readable record on that device,
+  sorted by key then version; the drain's list of versions (18.2.1).
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of
@@ -1867,8 +1886,11 @@ an interrupted re-placement forwards, and removes stale copies; the
 cluster scrub reports `StaleCopy`; `MoveShard` (18.8.2) is
 `coordinator::move_shard` and `djbod move-shard <key> <index> [--to
 <device>]`, copying from the source when it is intact and rebuilding from
-the other shards otherwise. Next: step (b), `set-state`, `drain`,
-`remove-device`, `remove-node`.
+the other shards otherwise. Step (b), first half: `membership::
+set_device_state` and `djbod cluster set-state` change a device's state
+and nothing else; `coordinator::drain` and `djbod cluster drain` make the
+single pass of 18.2.1 with the estimate of 18.2.2. Next: `remove-device`,
+`remove-node`, and `remove-node --force` (6.2.6.3).
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure

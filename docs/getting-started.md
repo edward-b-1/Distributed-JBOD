@@ -235,6 +235,24 @@ copy is removed. If the old device was unreachable at the time, its copy
 stays behind; the next `scrub` reports it as a stale copy and `scrub
 --repair` removes it.
 
+**Draining a device.** To empty a disk before pulling it, first stop new
+data arriving on it, then move what it holds; the two are separate
+commands so each can be checked before the next:
+
+```sh
+target/release/djbod cluster set-state <device-uuid> draining   # no data moves
+target/release/djbod status                                     # shows the state
+target/release/djbod cluster drain <device-uuid>                # one pass over its versions
+```
+
+A draining device receives no new shards but keeps serving reads. The
+drain prints an estimate first, then one line per version moved or
+skipped, and exits 2 if anything was skipped, listing why; rerun it after
+fixing the cause. If the estimate says the rest of the cluster lacks the
+room, or fewer than k+m devices remain active, the drain refuses to start
+unless you pass `--partial`. `set-state <device-uuid> active` puts a
+device back into service; shards already moved stay where they went.
+
 **Replace.** `put` the same key twice and look at the device directory:
 only the newest version's files remain.
 

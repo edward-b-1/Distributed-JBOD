@@ -339,8 +339,13 @@ fn every_request_round_trips() {
             shard_index: 2,
             target: Some(device(9)),
         },
+        Request::Drain {
+            device: device(4),
+            partial: true,
+        },
         Request::LocalStatus,
         Request::LocalLookup { key_hash },
+        Request::LocalRecords { device: device(4) },
         Request::LocalList(ListQuery {
             prefix: None,
             start_after: Some("a".to_string()),
@@ -480,10 +485,14 @@ fn every_response_round_trips() {
             source_cleaned: true,
             rebuilt: false,
         },
+        Response::DrainStarted,
         Response::LocalStatus {
             node: node(1),
             document_version: 7,
             devices: vec![status],
+        },
+        Response::LocalRecords {
+            records: vec![sample_record()],
         },
         Response::LocalLookup {
             records: vec![LocatedRecord {

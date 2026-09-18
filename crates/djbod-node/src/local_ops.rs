@@ -39,6 +39,9 @@ pub async fn handle(
             respond(writer, id, local_lookup(node, key_hash).await).await
         }
         Request::LocalList(query) => respond(writer, id, local_list(node, query).await).await,
+        Request::LocalRecords { device } => {
+            respond(writer, id, local_records(node, device).await).await
+        }
         Request::LocalScrub {
             max_bytes_per_second,
         } => local_scrub(node, id, writer, max_bytes_per_second).await,
@@ -323,6 +326,39 @@ async fn local_lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Response, F
         }
     }
     Ok(Response::LocalLookup { records })
+}
+
+/// Every readable record on one device, sorted by key then version, for
+/// the drain (18.2.1). An unreadable record is logged and skipped; the
+/// scrub is the tool that reports it.
+async fn local_records(node: &Arc<Node>, device: DeviceId) -> Result<Response, Failure> {
+    let Some(device) = node.device(device) else {
+        return Err(Failure::Error(ErrorDetail {
+            device: Some(device),
+            ..ErrorDetail::new(
+                ErrorCode::DeviceUnavailable,
+                format!("{device} is not a device of this node"),
+            )
+        }));
+    };
+    let id = device.id();
+    let mut records = blocking(move || {
+        let mut out: Vec<MetadataRecord> = Vec::new();
+        device.walk_records(
+            |record| out.push(record.clone()),
+            |path, error| {
+                tracing::warn!(path = %path.display(), %error, "unreadable record skipped");
+            },
+        )?;
+        Ok(out)
+    })
+    .await
+    .map_err(|f| match f {
+        Failure::Error(d) => Failure::Error(with_device(d, id)),
+        other => other,
+    })?;
+    records.sort_by(|a, b| a.key.cmp(&b.key).then(a.version.cmp(&b.version)));
+    Ok(Response::LocalRecords { records })
 }
 
 async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {

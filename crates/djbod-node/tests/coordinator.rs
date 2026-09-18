@@ -14,9 +14,12 @@ use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
+use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_proto::message::{ClusterFinding, ErrorCode, ListQuery, Request, Response, ScrubEvent};
+use djbod_proto::message::{
+    ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent,
+};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -1026,4 +1029,287 @@ async fn move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged() 
     assert_eq!(got, body);
     let events = run_scrub(&mut client, false).await;
     assert!(no_findings(&events), "{events:?}");
+}
+
+async fn set_state(test: &TestNode, device: DeviceId, state: DeviceState) -> bool {
+    let (_, changed) =
+        membership::set_device_state(test.addr, test.node.cluster_id(), device, state)
+            .await
+            .expect("set state");
+    changed
+}
+
+async fn run_drain(
+    client: &mut Connection,
+    device: DeviceId,
+    partial: bool,
+) -> (Vec<DrainEvent>, djbod_proto::message::StreamEnd) {
+    let id = client
+        .start_drain(device, partial)
+        .await
+        .expect("start drain");
+    let mut events = Vec::new();
+    loop {
+        match client.next_drain_event(id).await.expect("drain event") {
+            Ok(event) => events.push(event),
+            Err(end) => return (events, end),
+        }
+    }
+}
+
+fn device_state(statuses: &[djbod_proto::message::DeviceStatus], device: DeviceId) -> DeviceState {
+    statuses
+        .iter()
+        .find(|d| d.device == device)
+        .expect("device listed")
+        .state
+}
+
+async fn status_devices(client: &mut Connection) -> Vec<djbod_proto::message::DeviceStatus> {
+    match client.request(Request::Status).await.expect("status") {
+        Response::Status { devices, .. } => devices,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_state_changes_placement_and_nothing_else() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(3 * BLOCK as usize, 51);
+    client
+        .put_object("a", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let a = head(&mut client, "a").await.expect("head");
+    let device = a.shards[0].device;
+
+    assert!(set_state(&test, device, DeviceState::Draining).await);
+    assert_eq!(
+        device_state(&status_devices(&mut client).await, device),
+        DeviceState::Draining
+    );
+    // Its shard is untouched and still serves reads.
+    assert!(test.shard_path(device, "a", &a).exists());
+    let (_, got) = client.get_object("a").await.expect("get");
+    assert_eq!(got, body);
+    // New placements avoid it: the other four devices are the only choice.
+    client
+        .put_object("b", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let b = head(&mut client, "b").await.expect("head");
+    assert!(b.shard_on(device).is_none(), "{b:?}");
+    // So does re-placement.
+    match client
+        .request(Request::MoveShard {
+            key: "b".to_string(),
+            shard_index: 0,
+            target: Some(device),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::InsufficientDevices)
+        }
+        other => panic!("expected InsufficientDevices, got {other:?}"),
+    }
+    // Draining is not required for a drain-less life: set it back.
+    assert!(set_state(&test, device, DeviceState::Active).await);
+    assert!(!set_state(&test, device, DeviceState::Active).await);
+    assert_eq!(
+        device_state(&status_devices(&mut client).await, device),
+        DeviceState::Active
+    );
+    match membership::set_device_state(
+        test.addr,
+        test.node.cluster_id(),
+        DeviceId(Uuid::new_v4()),
+        DeviceState::Draining,
+    )
+    .await
+    {
+        Err(membership::MembershipError::UnknownDevice(_)) => {}
+        other => panic!("expected UnknownDevice, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_moves_every_version_off_the_device_and_reports_stale_copies() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let mut bodies = Vec::new();
+    for i in 0..3u64 {
+        let body = xorshift64_bytes(2 * 3 * BLOCK as usize + i as usize * 1000, 60 + i);
+        client
+            .put_object(&format!("obj-{i}"), &body, CHUNK, None)
+            .await
+            .expect("put");
+        bodies.push(body);
+    }
+    // Every device holds at least one shard: three 3+1 writes over five
+    // devices, most-free-first, cannot leave one out. Pick obj-0's first.
+    let obj0 = head(&mut client, "obj-0").await.expect("head");
+    let device = obj0.shards[0].device;
+    let on_device = |records: &[MetadataRecord]| {
+        records
+            .iter()
+            .filter(|r| r.shard_on(device).is_some())
+            .count()
+    };
+    let mut records = Vec::new();
+    for i in 0..3 {
+        records.push(head(&mut client, &format!("obj-{i}")).await.expect("head"));
+    }
+    let expected_versions = on_device(&records);
+    let old_shard = std::fs::read(test.shard_path(device, "obj-0", &obj0)).expect("read");
+    let old_record =
+        std::fs::read(record_path(&test, device, "obj-0", &obj0.version)).expect("read");
+
+    // An active device cannot be drained: the state change is a separate,
+    // explicit step.
+    match client.start_drain(device, false).await {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation);
+            assert!(detail.message.contains("set-state"), "{}", detail.message);
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    set_state(&test, device, DeviceState::Draining).await;
+
+    let (events, end) = run_drain(&mut client, device, false).await;
+    assert!(end.error.is_none(), "{end:?}");
+    match &events[0] {
+        DrainEvent::Estimate {
+            versions,
+            active_devices,
+            required_devices,
+            shard_bytes,
+            ..
+        } => {
+            assert_eq!(*versions as usize, expected_versions);
+            assert_eq!(*active_devices, 4);
+            assert_eq!(*required_devices, 4);
+            assert!(*shard_bytes > 0);
+        }
+        other => panic!("expected Estimate first, got {other:?}"),
+    }
+    let moved: Vec<&DrainEvent> = events
+        .iter()
+        .filter(|e| matches!(e, DrainEvent::Moved { .. }))
+        .collect();
+    assert_eq!(moved.len(), expected_versions);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, DrainEvent::Skipped { .. })));
+    for event in &moved {
+        if let DrainEvent::Moved {
+            destination,
+            rebuilt,
+            ..
+        } = event
+        {
+            assert_ne!(*destination, device);
+            assert!(!rebuilt);
+        }
+    }
+    // The device is empty, every object reads, the records moved on by one
+    // revision, and the scrub is clean.
+    let key_dir = test.shard_path(device, "obj-0", &obj0);
+    assert!(!key_dir.parent().expect("key dir").exists());
+    for (i, body) in bodies.iter().enumerate() {
+        let key = format!("obj-{i}");
+        let (_, got) = client.get_object(&key).await.expect("get");
+        assert_eq!(&got, body);
+        let record = head(&mut client, &key).await.expect("head");
+        assert!(record.shard_on(device).is_none());
+        assert_eq!(
+            record.revision,
+            u64::from(records[i].shard_on(device).is_some())
+        );
+    }
+    let events = run_scrub(&mut client, false).await;
+    assert!(no_findings(&events), "{events:?}");
+    // A second pass finds nothing to do.
+    let (events, end) = run_drain(&mut client, device, false).await;
+    assert!(end.error.is_none(), "{end:?}");
+    assert_eq!(events.len(), 1, "{events:?}");
+
+    // A stale copy left on the device is reported, not moved, and the
+    // drain ends with an error naming it.
+    std::fs::create_dir_all(key_dir.parent().expect("key dir")).expect("mkdir");
+    std::fs::write(&key_dir, &old_shard).expect("write");
+    std::fs::write(
+        record_path(&test, device, "obj-0", &obj0.version),
+        &old_record,
+    )
+    .expect("write");
+    let (events, end) = run_drain(&mut client, device, false).await;
+    assert_eq!(
+        end.error.as_ref().map(|e| e.code),
+        Some(ErrorCode::WriteFailed),
+        "{end:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            DrainEvent::Skipped { key, detail, .. }
+                if key == "obj-0" && detail.message.contains("stale copy")
+        )),
+        "{events:?}"
+    );
+    assert!(key_dir.exists());
+    let (_, got) = client.get_object("obj-0").await.expect("get");
+    assert_eq!(got, bodies[0]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_refuses_without_room_unless_partial_and_then_skips_what_cannot_move() {
+    let test = start_node(4, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(3 * BLOCK as usize, 70);
+    client
+        .put_object("a", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let a = head(&mut client, "a").await.expect("head");
+    let device = a.shards[3].device;
+    set_state(&test, device, DeviceState::Draining).await;
+
+    // Three active devices cannot hold a 3+1 version: refused after the
+    // estimate, nothing moved.
+    let (events, end) = run_drain(&mut client, device, false).await;
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert!(matches!(
+        &events[0],
+        DrainEvent::Estimate {
+            versions: 1,
+            active_devices: 3,
+            required_devices: 4,
+            ..
+        }
+    ));
+    let error = end.error.expect("refused");
+    assert_eq!(error.code, ErrorCode::InsufficientDevices);
+    assert!(error.message.contains("--partial"), "{}", error.message);
+    assert_eq!(head(&mut client, "a").await.expect("head"), a);
+
+    // With --partial the pass runs and every version is skipped for want
+    // of a target; the device keeps serving.
+    let (events, end) = run_drain(&mut client, device, true).await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            DrainEvent::Skipped { key, detail, .. }
+                if key == "a" && detail.code == ErrorCode::InsufficientDevices
+        )),
+        "{events:?}"
+    );
+    assert_eq!(
+        end.error.as_ref().map(|e| e.code),
+        Some(ErrorCode::WriteFailed)
+    );
+    assert_eq!(head(&mut client, "a").await.expect("head"), a);
+    let (_, got) = client.get_object("a").await.expect("get");
+    assert_eq!(got, body);
 }
