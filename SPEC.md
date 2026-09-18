@@ -1541,21 +1541,29 @@ by which corruption is found before a client encounters it.
 
 ### 20.2 Recovery tool
 
-20.2.1 [P] A single static binary that, given one or more device paths and
+20.2.1 [D] A single static binary that, given one or more device paths and
 no running cluster, lists the versions present and reassembles any version
 for which k shards can be found among the given paths. Requires only the
 metadata records and shard files. This is the answer to the loss of
 human-readable on-disk layout, and the reason 6.3 records encoding
 parameters per version.
 
-20.2.2 [P] **`djbod-recover`**, built on `djbod-core` alone: `list
+20.2.2 [D] **`djbod-recover`**, built on `djbod-core` alone: `list
 <device-path>...` walks the given paths and prints every key and version
 found with how many of its shards are present; `extract <key> [--version
 <id>] --out <file> <device-path>...` finds the shards, verifies every
 block, decodes with any k of them, checks the whole-object checksum, and
 writes the file, refusing if fewer than k intact shards exist. Records
 with the highest revision win; damaged records and shards are reported
-and skipped. It never writes to a device.
+and skipped. It never writes to a device. As built, it reads the objects
+tree of 9.3 directly and needs no device identity file, so a disk that
+lost `DISTRIBUTED-JBOD-DEVICE.json` is as usable as any other; `list`
+counts structurally sound shard files, exits 2 when any version lacks k
+of them or any file was damaged, and prints shards whose record is gone
+under their key hash; `extract` chooses the newest version unless told
+otherwise, refuses to overwrite its output, writes to a `.partial` file
+that is renamed only after the whole-object checksum matches, and reports
+each stripe it had to reconstruct.
 
 ### 20.3 Administration
 
@@ -1927,7 +1935,9 @@ the other shards otherwise. Step (b): `membership::set_device_state` and
 `djbod cluster remove-device` and `remove-node [--force]` implement
 18.2.1, 18.5, and 6.2.6.3, with `RepairObject` relocating lost shards
 (18.3) and `--wipe-removed-device` on `join`, `add-device`, and
-`init-cluster`. Next: step (c), `djbod-recover` (20.2.2).
+`init-cluster`. Step (c): the `djbod-recover` crate (20.2.2), `list` and
+`extract`, tested against device directories written by `djbod-core`.
+Next: step (d), re-encode (18.9).
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure

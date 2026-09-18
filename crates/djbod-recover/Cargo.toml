@@ -1,0 +1,24 @@
+[package]
+name = "djbod-recover"
+description = "Offline recovery tool for Distributed-JBOD: reassemble objects from device directories alone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "djbod-recover"
+path = "src/main.rs"
+
+[dependencies]
+djbod-core = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+xxhash-rust = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+time = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

@@ -25,10 +25,12 @@ cd Distributed-JBOD
 cargo build --release
 ```
 
-This produces two binaries:
+This produces three binaries:
 
 - `target/release/djbod-node`: the node process.
 - `target/release/djbod`: the client.
+- `target/release/djbod-recover`: the offline recovery tool, which reads
+  device directories with no node running.
 
 Running `cargo test --workspace` first is a good check of the machine; it
 starts nodes on localhost ports and takes a few seconds.
@@ -292,8 +294,21 @@ removes the node without its acknowledgement and rebuilds every affected
 object's lost shard onto another device, one repair per object, so the
 cluster is not left degraded quietly.
 
-**Replace.** `put` the same key twice and look at the device directory:
-only the newest version's files remain.
+**When there is no cluster left.** The on-disk format needs no running
+node to read. `djbod-recover` takes device directories, or copies of
+them, and nothing else:
+
+```sh
+target/release/djbod-recover list /tmp/djbod/d1 /tmp/djbod/d2 /tmp/djbod/d3 /tmp/djbod/d4
+target/release/djbod-recover extract photos/cat.jpg --out cat.jpg /tmp/djbod/d1 /tmp/djbod/d2 /tmp/djbod/d3
+```
+
+`list` prints every key and version found with how many of its shards
+are present, and `extract` reassembles an object from any k intact
+shards, verifying every block and the whole-object checksum, and refuses
+if fewer than k remain. Neither writes to a device. Delete a device
+directory's identity file, or a whole directory, and try again: three of
+the four still suffice for a 3+1 object.
 
 **Not enough devices.** Create a cluster with `--k 3 --m 1` on three
 devices and `put` fails with `InsufficientDevices` before writing
