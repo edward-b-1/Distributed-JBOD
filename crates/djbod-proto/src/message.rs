@@ -273,14 +273,23 @@ pub enum ShardCondition {
     Unreadable { reason: String },
     /// The file opened but some blocks failed their checksums. Rewritten.
     CorruptBlocks { stripes: Vec<u64> },
+    /// The device the record names is no longer in the cluster document
+    /// (a forced removal, 6.2.6.3). Rebuilt onto another device and the
+    /// record moved on by one revision (18.3).
+    Lost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardRepair {
     pub index: u8,
+    /// The device the record named before the repair.
     pub device: DeviceId,
     pub condition: ShardCondition,
     pub rewritten: bool,
+    /// The device the shard was rebuilt onto when `device` is no longer
+    /// in the cluster document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relocated_to: Option<DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

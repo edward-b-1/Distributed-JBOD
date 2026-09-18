@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use djbod_core::cluster::DeviceState;
+use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, DEFAULT_BODY_CHUNK};
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
@@ -127,6 +127,23 @@ enum ClusterCommand {
         /// Start even if the estimate says not everything will fit.
         #[arg(long)]
         partial: bool,
+    },
+    /// Mark a device removed. Refused while any object still has a shard
+    /// on it: drain it first.
+    RemoveDevice { device: Uuid },
+    /// Drop a node and its devices from the cluster. Refused while any
+    /// object still has a shard on them: drain them first. The node stops
+    /// serving once it has acknowledged.
+    RemoveNode {
+        node_id: Uuid,
+        /// The node is permanently gone and cannot acknowledge: remove it
+        /// without its agreement and rebuild its shards from parity.
+        /// Shows the cost and asks for confirmation first.
+        #[arg(long)]
+        force: bool,
+        /// Skip the confirmation prompt of --force.
+        #[arg(long, requires = "force")]
+        yes: bool,
     },
 }
 
@@ -551,17 +568,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 djbod_proto::message::ShardCondition::CorruptBlocks { stripes } => {
                                     format!("corrupt blocks in stripes {stripes:?}")
                                 }
+                                djbod_proto::message::ShardCondition::Lost => {
+                                    "device no longer in the cluster".to_string()
+                                }
+                            };
+                            let outcome = match (&shard.relocated_to, shard.rewritten) {
+                                (Some(device), _) => format!("  -> rebuilt on {}", device.0),
+                                (None, true) => "  -> rewritten".to_string(),
+                                (None, false) => String::new(),
                             };
                             println!(
-                                "shard {:<3}  device {}  {}{}",
-                                shard.index,
-                                shard.device.0,
-                                condition,
-                                if shard.rewritten {
-                                    "  -> rewritten"
-                                } else {
-                                    ""
-                                }
+                                "shard {:<3}  device {}  {condition}{outcome}",
+                                shard.index, shard.device.0
                             );
                         }
                         let count = report.shards.iter().filter(|s| s.rewritten).count();
@@ -678,6 +696,58 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
+                ClusterCommand::RemoveDevice { device } => {
+                    let (document, changed) =
+                        djbod_node::membership::remove_device(node, cluster, DeviceId(*device))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "device": device,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if changed {
+                        println!(
+                            "device {device} removed (document version {}); take it out of its node's configuration and restart that node",
+                            document.version
+                        );
+                    } else {
+                        println!("device {device} was already removed; nothing changed");
+                    }
+                }
+                ClusterCommand::RemoveNode {
+                    node_id,
+                    force: false,
+                    ..
+                } => {
+                    let document =
+                        djbod_node::membership::remove_node(node, cluster, NodeId(*node_id))
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "node": node_id,
+                                "document_version": document.version,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "node {node_id} removed (document version {}); its process stops on its own, and its devices can be reused with `djbod-node join --wipe-removed-device`",
+                            document.version
+                        );
+                    }
+                }
+                ClusterCommand::RemoveNode {
+                    node_id,
+                    force: true,
+                    yes,
+                } => force_remove_node(&cli, node, cluster, NodeId(*node_id), *yes).await?,
                 ClusterCommand::Sync => {
                     let report = djbod_node::membership::sync(node, cluster)
                         .await
@@ -723,6 +793,115 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 other => bail!("unexpected response {other:?}"),
             }
         }
+    }
+    Ok(())
+}
+
+/// `cluster remove-node --force` (SPEC 6.2.6.3): show the cost, confirm,
+/// propose without the dead node, then rebuild what it held.
+async fn force_remove_node(
+    cli: &Cli,
+    peer: SocketAddr,
+    cluster: Uuid,
+    node_id: NodeId,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use djbod_node::membership;
+    let plan = membership::plan_forced_removal(peer, cluster, node_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let unrecoverable = plan.unrecoverable();
+    let m = plan.current.m;
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "node": node_id,
+                "address": plan.address,
+                "unreachable_because": plan.unreachable_because,
+                "devices": plan.devices,
+                "affected_versions": plan.affected.len(),
+                "unrecoverable_keys": unrecoverable.iter().map(|r| &r.key).collect::<Vec<_>>(),
+            }))?
+        );
+    } else {
+        println!(
+            "node {} at {} does not answer: {}",
+            node_id.0, plan.address, plan.unreachable_because
+        );
+        println!(
+            "it holds {} device(s); {} version(s) have shards there",
+            plan.devices.len(),
+            plan.affected.len()
+        );
+        if unrecoverable.is_empty() {
+            println!("every one of them can be rebuilt from the other shards (at most m = {m} on the dead node)");
+        } else {
+            println!(
+                "{} of them have more than m = {m} shards there and CANNOT be rebuilt; they will be lost:",
+                unrecoverable.len()
+            );
+            for r in &unrecoverable {
+                println!("  {}  ({} shards on the dead node)", r.key, r.shards);
+            }
+        }
+    }
+    if !yes {
+        eprint!("type the node id to remove it without its acknowledgement: ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != node_id.0.to_string() {
+            bail!("confirmation did not match; nothing changed");
+        }
+    }
+    let document = membership::execute_forced_removal(&plan)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !cli.json {
+        println!(
+            "node {} removed (document version {}); rebuilding {} version(s)",
+            node_id.0,
+            document.version,
+            plan.affected.len()
+        );
+    }
+    // Step 3: rebuild, one repair per affected key, through a live node.
+    let mut conn = connect(cli).await?;
+    let mut failed = 0usize;
+    for reference in &plan.affected {
+        match conn
+            .request(Request::RepairObject {
+                key: reference.key.clone(),
+            })
+            .await
+        {
+            Ok(Response::RepairObject(report)) => {
+                if cli.json {
+                    println!("{}", serde_json::to_string(&report)?);
+                } else {
+                    let relocated = report
+                        .shards
+                        .iter()
+                        .filter(|s| s.relocated_to.is_some())
+                        .count();
+                    println!(
+                        "rebuilt  {}  {relocated} shard(s) placed on other devices",
+                        reference.key
+                    );
+                }
+            }
+            Ok(other) => bail!("unexpected response {other:?}"),
+            Err(e) => {
+                failed += 1;
+                println!("LOST     {}  {}", reference.key, describe_error(&e));
+            }
+        }
+    }
+    if !cli.json {
+        eprintln!("{} rebuilt, {failed} lost", plan.affected.len() - failed);
+    }
+    if failed > 0 {
+        std::process::exit(2);
     }
     Ok(())
 }

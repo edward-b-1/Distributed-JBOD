@@ -59,7 +59,7 @@ pub enum NodeError {
     BadDocument { path: PathBuf, reason: String },
     #[error(transparent)]
     InvalidDocument(#[from] ClusterDocumentError),
-    #[error("this node {node} is not in the cluster document")]
+    #[error("this node {node} is not in the cluster document: it was removed (SPEC 18.2.1, 6.2.6.3); to reuse its devices, join again with --wipe-removed-device")]
     NotAMember { node: NodeId },
     #[error("device {device} at {path} is not in the cluster document")]
     UnknownDevice { device: DeviceId, path: PathBuf },
@@ -84,6 +84,9 @@ pub struct Node {
     /// the same shard is refused rather than racing the first
     /// (SPEC 20.1.2.1).
     writes_in_flight: Mutex<HashSet<ShardWriteKey>>,
+    /// Becomes true when an adopted document no longer lists this node
+    /// (18.2.1, 6.2.6.3); the server stops accepting connections.
+    removed: tokio::sync::watch::Sender<bool>,
 }
 
 /// Identifies one shard file being written.
@@ -295,7 +298,23 @@ impl Node {
             devices_by_id: by_id,
             versions: VersionGenerator::new(),
             writes_in_flight: Mutex::new(HashSet::new()),
+            removed: tokio::sync::watch::Sender::new(false),
         })
+    }
+
+    /// Whether an adopted document has dropped this node.
+    pub fn is_removed(&self) -> bool {
+        *self.removed.borrow()
+    }
+
+    /// Resolves once this node has been removed from the cluster.
+    pub async fn removed(&self) {
+        let mut receiver = self.removed.subscribe();
+        while !*receiver.borrow_and_update() {
+            if receiver.changed().await.is_err() {
+                return;
+            }
+        }
     }
 
     /// Adopt a new cluster document (SPEC 6.2.6, `ApplyClusterConfig`):
@@ -326,7 +345,13 @@ impl Node {
             devices = proposed.devices.len(),
             "cluster document changed"
         );
+        let still_listed = proposed.node(self.id()).is_some();
         *current = proposed;
+        drop(current);
+        if !still_listed {
+            tracing::warn!("this node is not in the new cluster document: it has been removed and will stop serving");
+            self.removed.send_replace(true);
+        }
         Ok(())
     }
 

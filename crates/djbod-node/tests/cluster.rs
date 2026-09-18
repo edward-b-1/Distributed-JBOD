@@ -13,7 +13,7 @@ use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{DrainEvent, ErrorCode, Request, Response};
+use djbod_proto::message::{DrainEvent, ErrorCode, Request, Response, ShardCondition};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -101,7 +101,7 @@ async fn first_node(device_count: usize, k: u8, m: u8) -> TestNode {
 async fn joined_node(device_count: usize, peer: &TestNode) -> TestNode {
     let (listener, addr) = reserve_port().await;
     let (config, dirs, state) = make_config(device_count, addr, vec![peer.addr.to_string()]);
-    membership::join(&config, peer.addr, peer.node.cluster_id())
+    membership::join(&config, peer.addr, peer.node.cluster_id(), false)
         .await
         .expect("join");
     let node = Arc::new(Node::open(config.clone()).expect("open joined node"));
@@ -375,7 +375,7 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
     let a = first_node(1, 1, 0).await;
     let (_listener, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(1, addr, vec![]);
-    match membership::join(&config, a.addr, Uuid::new_v4()).await {
+    match membership::join(&config, a.addr, Uuid::new_v4(), false).await {
         Err(membership::MembershipError::PeerUnreachable { .. })
         | Err(membership::MembershipError::WrongCluster { .. }) => {}
         other => panic!("expected refusal, got {other:?}"),
@@ -394,6 +394,7 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
         &[extra.path().to_path_buf()],
         a.addr,
         a.node.cluster_id(),
+        false,
     )
     .await
     .expect("add device");
@@ -406,7 +407,8 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
             &config,
             &[extra.path().to_path_buf()],
             a.addr,
-            a.node.cluster_id()
+            a.node.cluster_id(),
+            false
         )
         .await,
         Err(membership::MembershipError::AlreadyMember { .. })
@@ -453,12 +455,12 @@ async fn a_join_retried_after_a_partial_apply_completes_without_a_new_version() 
     let a = first_node(1, 1, 1).await;
     let (_listener, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(1, addr, vec![]);
-    let first = membership::join(&config, a.addr, a.node.cluster_id())
+    let first = membership::join(&config, a.addr, a.node.cluster_id(), false)
         .await
         .expect("join");
     assert_eq!(first.version, 2);
     // Joining again with the same configuration proposes nothing.
-    let again = membership::join(&config, a.addr, a.node.cluster_id())
+    let again = membership::join(&config, a.addr, a.node.cluster_id(), false)
         .await
         .expect("join again");
     assert_eq!(again.version, 2);
@@ -595,8 +597,11 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
             && matches!(f, Finding::RecordWithoutShard { shard_index: 2, .. })),
         "{local:?}"
     );
-    // Device 3 has nothing left for obj-2, so no local finding there.
-    assert!(!local.iter().any(|(_, d, _)| **d == device3));
+    // Device 3 has nothing left for obj-2, so no local finding about obj-2
+    // there (it may hold damaged shards of the other objects).
+    assert!(!local
+        .iter()
+        .any(|(_, d, f)| **d == device3 && f.repair_key() == Some("obj-2")));
     let cluster: Vec<&ClusterFinding> = events
         .iter()
         .filter_map(|e| match e {
@@ -979,6 +984,286 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
             .get_object(&key)
             .await
             .expect("reads from any node");
+    }
+    let (events, end) = run_scrub(&mut client, false).await;
+    assert!(end.error.is_none(), "{end:?}");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            djbod_proto::message::ScrubEvent::NodeFinding { .. }
+                | djbod_proto::message::ScrubEvent::ClusterFinding(_)
+        )),
+        "{events:?}"
+    );
+}
+
+/// Drain `device` through `client` until the pass ends cleanly.
+async fn drain_clean(client: &mut Connection, device: DeviceId) {
+    let id = client
+        .start_drain(device, false)
+        .await
+        .expect("start drain");
+    loop {
+        match client.next_drain_event(id).await.expect("event") {
+            Ok(_) => {}
+            Err(end) => {
+                assert!(end.error.is_none(), "{end:?}");
+                return;
+            }
+        }
+    }
+}
+
+async fn put_objects(
+    client: &mut Connection,
+    count: u64,
+    seed: u64,
+) -> Vec<djbod_core::record::MetadataRecord> {
+    let mut records = Vec::new();
+    for i in 0..count {
+        let body = xorshift64_bytes(2 * 2 * BLOCK as usize + i as usize, seed + i);
+        let key = format!("obj-{i}");
+        client
+            .put_object(&key, &body, 100_000, None)
+            .await
+            .expect("put");
+        match client
+            .request(Request::HeadObject { key })
+            .await
+            .expect("head")
+        {
+            Response::HeadObject { record } => records.push(record),
+            other => panic!("{other:?}"),
+        }
+    }
+    records
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_drain() {
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(2, &a).await;
+    let c = joined_node(1, &b).await;
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 3, 100).await;
+    // Four devices, three shards per version: at least one of b's two
+    // devices holds a shard of obj-0. Remove that one.
+    let device = b
+        .node
+        .devices()
+        .iter()
+        .map(|d| d.id())
+        .find(|d| records[0].shard_on(*d).is_some())
+        .expect("b holds a shard of obj-0");
+    let cluster = a.node.cluster_id();
+
+    match membership::remove_device(c.addr, cluster, device).await {
+        Err(membership::MembershipError::StillReferenced {
+            versions, examples, ..
+        }) => {
+            assert!(versions >= 1);
+            assert!(examples.contains(&"obj-0".to_string()), "{examples:?}");
+        }
+        other => panic!("expected StillReferenced, got {other:?}"),
+    }
+    assert_eq!(
+        a.node.document().device(device).expect("device").state,
+        DeviceState::Active
+    );
+
+    membership::set_device_state(c.addr, cluster, device, DeviceState::Draining)
+        .await
+        .expect("set state");
+    drain_clean(&mut client, device).await;
+    let (document, changed) = membership::remove_device(c.addr, cluster, device)
+        .await
+        .expect("remove device");
+    assert!(changed);
+    for n in [&a, &b, &c] {
+        assert_eq!(n.node.document().version, document.version);
+        assert_eq!(
+            n.node
+                .document()
+                .device(device)
+                .expect("still listed")
+                .state,
+            DeviceState::Removed
+        );
+    }
+    let (_, changed) = membership::remove_device(c.addr, cluster, device)
+        .await
+        .expect("remove again");
+    assert!(!changed);
+    // Three active devices remain, exactly k+m: writes and reads go on.
+    let body = xorshift64_bytes(BLOCK as usize, 7);
+    client
+        .put_object("after", &body, 100_000, None)
+        .await
+        .expect("put");
+    for i in 0..3 {
+        client.get_object(&format!("obj-{i}")).await.expect("get");
+    }
+    match client.request(Request::Status).await.expect("status") {
+        Response::Status { devices, .. } => {
+            let removed = devices.iter().find(|d| d.device == device).expect("listed");
+            assert_eq!(removed.state, DeviceState::Removed);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_only_wiped() {
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(1, &a).await;
+    let c = joined_node(1, &b).await;
+    let mut d = joined_node(1, &c).await;
+    let cluster = a.node.cluster_id();
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 3, 200).await;
+    let device = d.node.devices()[0].id();
+    let d_id = d.node.id();
+    let old_device_path = d.config.devices[0].clone();
+
+    if records.iter().any(|r| r.shard_on(device).is_some()) {
+        match membership::remove_node(a.addr, cluster, d_id).await {
+            Err(membership::MembershipError::StillReferenced { .. }) => {}
+            other => panic!("expected StillReferenced, got {other:?}"),
+        }
+        membership::set_device_state(a.addr, cluster, device, DeviceState::Draining)
+            .await
+            .expect("set state");
+        drain_clean(&mut client, device).await;
+    }
+    let document = membership::remove_node(a.addr, cluster, d_id)
+        .await
+        .expect("remove node");
+    assert!(document.node(d_id).is_none());
+    assert!(document.device(device).is_none());
+    for n in [&a, &b, &c] {
+        assert_eq!(n.node.document().version, document.version);
+    }
+    // d acknowledged the document that drops it, and stopped serving.
+    let server = d.server.take().expect("server handle");
+    tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("serve returned after removal")
+        .expect("serve task");
+    assert!(d.node.is_removed());
+    assert!(
+        Connection::connect(d.addr, Connection::client_hello(cluster))
+            .await
+            .is_err()
+    );
+    // It cannot come back as it was.
+    match Node::open(d.config.clone()) {
+        Err(djbod_node::node::NodeError::NotAMember { node }) => assert_eq!(node, d_id),
+        Err(other) => panic!("expected NotAMember, got {other:?}"),
+        Ok(_) => panic!("expected NotAMember, but the node opened"),
+    }
+    // Nor can its device rejoin unwiped; wiped, it joins as a new device.
+    match membership::join(&d.config, a.addr, cluster, false).await {
+        Err(membership::MembershipError::RemovedDevice {
+            path,
+            device: found,
+        }) => {
+            assert_eq!(path, old_device_path);
+            assert_eq!(found, device);
+        }
+        other => panic!("expected RemovedDevice, got {other:?}"),
+    }
+    let document = membership::join(&d.config, a.addr, cluster, true)
+        .await
+        .expect("join wiped");
+    let new_device = document
+        .devices
+        .iter()
+        .find(|e| e.node == d_id)
+        .expect("d has a device again")
+        .id;
+    assert_ne!(new_device, device);
+    let reopened = Arc::new(Node::open(d.config.clone()).expect("reopen"));
+    assert!(reopened.devices()[0]
+        .key_directories()
+        .expect("list")
+        .is_empty());
+    let listener = TcpListener::bind(d.addr).await.expect("rebind");
+    tokio::spawn(server::serve(reopened.clone(), listener));
+    let body = xorshift64_bytes(BLOCK as usize, 9);
+    client
+        .put_object("after", &body, 100_000, None)
+        .await
+        .expect("put with d back");
+    for i in 0..3 {
+        client.get_object(&format!("obj-{i}")).await.expect("get");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() {
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(1, &a).await;
+    let c = joined_node(1, &b).await;
+    let mut d = joined_node(1, &c).await;
+    let cluster = a.node.cluster_id();
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 3, 300).await;
+    let device = d.node.devices()[0].id();
+    let d_id = d.node.id();
+    let affected: Vec<String> = records
+        .iter()
+        .filter(|r| r.shard_on(device).is_some())
+        .map(|r| r.key.clone())
+        .collect();
+
+    // A live node cannot be forced.
+    match membership::plan_forced_removal(a.addr, cluster, d_id).await {
+        Err(membership::MembershipError::NodeIsAlive { node, .. }) => assert_eq!(node, d_id),
+        other => panic!("expected NodeIsAlive, got {other:?}"),
+    }
+
+    d.stop();
+    drop(d);
+    let plan = membership::plan_forced_removal(a.addr, cluster, d_id)
+        .await
+        .expect("plan");
+    assert_eq!(plan.devices, vec![device]);
+    let mut planned: Vec<String> = plan.affected.iter().map(|r| r.key.clone()).collect();
+    planned.sort();
+    assert_eq!(planned, affected);
+    assert!(plan.unrecoverable().is_empty(), "m = 1 and one device");
+    let document = membership::execute_forced_removal(&plan)
+        .await
+        .expect("execute");
+    assert!(document.node(d_id).is_none());
+    for n in [&a, &b, &c] {
+        assert_eq!(n.node.document().version, document.version);
+    }
+
+    // Step 3: one repair per affected key relocates the lost shards.
+    let mut client = b.client().await;
+    for key in &affected {
+        let report = match client
+            .request(Request::RepairObject { key: key.clone() })
+            .await
+            .expect("repair")
+        {
+            Response::RepairObject(report) => report,
+            other => panic!("{other:?}"),
+        };
+        let lost: Vec<_> = report
+            .shards
+            .iter()
+            .filter(|s| s.condition == ShardCondition::Lost)
+            .collect();
+        assert_eq!(lost.len(), 1, "{report:?}");
+        assert_eq!(lost[0].device, device);
+        assert!(lost[0].relocated_to.is_some());
+    }
+    for (i, record) in records.iter().enumerate() {
+        let key = format!("obj-{i}");
+        let (_, got) = client.get_object(&key).await.expect("get");
+        assert_eq!(got.len(), record.size as usize);
     }
     let (events, end) = run_scrub(&mut client, false).await;
     assert!(end.error.is_none(), "{end:?}");

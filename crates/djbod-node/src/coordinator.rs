@@ -1493,24 +1493,59 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
     let scheme = record
         .scheme()
         .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let document = node.document();
+    // Devices that have left the document (6.2.6.3) hold nothing the
+    // cluster can reach: their record copies cannot be rewritten and their
+    // shards are rebuilt onto other devices (18.3).
+    let lost: Vec<ShardIndex> = record
+        .shards
+        .iter()
+        .filter(|s| document.device(s.device).is_none())
+        .map(|s| ShardIndex(s.index))
+        .collect();
+    let missing_record_copies: Vec<DeviceId> = missing_record_copies
+        .into_iter()
+        .filter(|d| document.device(*d).is_some())
+        .collect();
 
-    let mut shards: Vec<ShardRepair> = Vec::with_capacity(scheme.total_shards());
     if record.size == 0 {
-        rewrite_record_copies(node, &record, &missing_record_copies).await?;
+        // No shard files exist; only the record's placement needs mending.
+        let (next, relocations) = relocate_lost_shards(node, &record, &lost).await?;
+        let rewritten_copies = if relocations.is_empty() {
+            rewrite_record_copies(node, &record, &missing_record_copies).await?;
+            missing_record_copies
+        } else {
+            let holders = holders_new_first(&next, &relocations);
+            rewrite_record_copies(node, &next, &holders).await?;
+            holders
+        };
         let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
-        for shard in &record.shards {
-            shards.push(ShardRepair {
-                index: shard.index,
-                device: shard.device,
-                condition: ShardCondition::Intact,
-                rewritten: false,
-            });
-        }
+        let shards = record
+            .shards
+            .iter()
+            .map(|shard| {
+                let relocated_to = relocations
+                    .iter()
+                    .find(|(i, _)| i.0 == shard.index)
+                    .map(|(_, d)| *d);
+                ShardRepair {
+                    index: shard.index,
+                    device: shard.device,
+                    condition: if relocated_to.is_some() {
+                        ShardCondition::Lost
+                    } else {
+                        ShardCondition::Intact
+                    },
+                    rewritten: false,
+                    relocated_to,
+                }
+            })
+            .collect();
         return Ok(Response::RepairObject(RepairReport {
             key: key.to_string(),
             version: record.version,
             shards,
-            record_copies_rewritten: missing_record_copies,
+            record_copies_rewritten: rewritten_copies,
             stale_copies_removed,
         }));
     }
@@ -1521,7 +1556,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         )
     })?;
 
-    let mut sources = open_repair_sources(node, key, &record, geometry.block_count).await?;
+    let mut sources = open_repair_sources(node, &record, geometry.block_count).await?;
 
     // Pass 1: read every stripe from every readable shard, verify, decode,
     // and re-encode, streaming the rebuilt blocks of damaged shards to
@@ -1613,6 +1648,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                     device: s.device,
                     condition: ShardCondition::Intact,
                     rewritten: false,
+                    relocated_to: None,
                 })
                 .collect(),
             record_copies_rewritten: missing_record_copies,
@@ -1620,19 +1656,37 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         }));
     }
 
-    // Pass 2: rebuild every damaged shard onto its own device from the
-    // intact ones. The old files are replaced only when each PutShard
+    // Pass 2: rebuild every damaged shard from the intact ones: onto its
+    // own device, or onto a freshly chosen one when its device has left
+    // the document. The old files are replaced only when each PutShard
     // finishes.
+    let (next, relocations) = relocate_lost_shards(node, &record, &lost).await?;
     let targets: Vec<(ShardIndex, DeviceId)> = damaged
         .iter()
-        .map(|&i| (sources[i].index, sources[i].device))
+        .map(|&i| {
+            let index = sources[i].index;
+            let destination = relocations
+                .iter()
+                .find(|(j, _)| *j == index)
+                .map(|(_, d)| *d)
+                .unwrap_or(sources[i].device);
+            (index, destination)
+        })
         .collect();
     rebuild_shards(node, key, &record, &sources, &targets).await?;
 
     // Shards first, record copies second: a crash between the two leaves a
     // shard without a record, which the scrub reports and a later repair
-    // completes.
-    rewrite_record_copies(node, &record, &missing_record_copies).await?;
+    // completes. A relocation moves the record on by one revision, written
+    // to the new holders first like a re-placement (18.8.2).
+    let rewritten_copies = if relocations.is_empty() {
+        rewrite_record_copies(node, &record, &missing_record_copies).await?;
+        missing_record_copies
+    } else {
+        let holders = holders_new_first(&next, &relocations);
+        rewrite_record_copies(node, &next, &holders).await?;
+        holders
+    };
     let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
 
     let rewritten: Vec<ShardIndex> = targets.iter().map(|(i, _)| *i).collect();
@@ -1646,11 +1700,97 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                 device: s.device,
                 condition: s.condition.clone(),
                 rewritten: rewritten.contains(&s.index),
+                relocated_to: relocations
+                    .iter()
+                    .find(|(i, _)| *i == s.index)
+                    .map(|(_, d)| *d),
             })
             .collect(),
-        record_copies_rewritten: missing_record_copies,
+        record_copies_rewritten: rewritten_copies,
         stale_copies_removed,
     }))
+}
+
+/// Choose a new device for each lost shard as a write would (10.4, 10.5):
+/// active, with room for the shard file, holding no shard of the version,
+/// most free space first, all distinct. Returns the record at the next
+/// revision with the new placement, and the (index, device) pairs chosen;
+/// with nothing lost the record is returned unchanged and the list empty.
+async fn relocate_lost_shards(
+    node: &Arc<Node>,
+    record: &MetadataRecord,
+    lost: &[ShardIndex],
+) -> Result<(MetadataRecord, Vec<(ShardIndex, DeviceId)>), Failure> {
+    if lost.is_empty() {
+        return Ok((record.clone(), Vec::new()));
+    }
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let shard_bytes = if record.size == 0 {
+        0
+    } else {
+        shard_file_length(scheme, record.block_size, record.size)
+            .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
+    };
+    let holders: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
+    let statuses = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
+    let mut ranked: Vec<DeviceStatus> = statuses
+        .into_iter()
+        .filter(|d| {
+            d.state == DeviceState::Active
+                && d.free_bytes >= shard_bytes
+                && !holders.contains(&d.device)
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.free_bytes
+            .cmp(&a.free_bytes)
+            .then(a.device.cmp(&b.device))
+    });
+    if ranked.len() < lost.len() {
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(record.key.clone()),
+            version: Some(record.version),
+            ..ErrorDetail::new(
+                ErrorCode::InsufficientDevices,
+                format!(
+                    "{} shard(s) are on devices no longer in the cluster, but only {} active device(s) with {shard_bytes} bytes free hold no shard of this version",
+                    lost.len(),
+                    ranked.len()
+                ),
+            )
+        }));
+    }
+    let mut next = record.clone();
+    next.revision += 1;
+    let mut relocations = Vec::with_capacity(lost.len());
+    for (index, status) in lost.iter().zip(ranked) {
+        for shard in next.shards.iter_mut() {
+            if shard.index == index.0 {
+                shard.device = status.device;
+            }
+        }
+        relocations.push((*index, status.device));
+    }
+    Ok((next, relocations))
+}
+
+/// Every holder of `record`, the newly chosen devices first.
+fn holders_new_first(
+    record: &MetadataRecord,
+    relocations: &[(ShardIndex, DeviceId)],
+) -> Vec<DeviceId> {
+    let new_devices: Vec<DeviceId> = relocations.iter().map(|(_, d)| *d).collect();
+    let mut order = new_devices.clone();
+    order.extend(
+        record
+            .shards
+            .iter()
+            .map(|s| s.device)
+            .filter(|d| !new_devices.contains(d)),
+    );
+    order
 }
 
 /// Open a block stream from every holder of `record`. A holder that
@@ -1658,7 +1798,6 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
 /// holder is a failure.
 async fn open_repair_sources(
     node: &Arc<Node>,
-    key: &str,
     record: &MetadataRecord,
     block_count: u64,
 ) -> Result<Vec<RepairSource>, Failure> {
@@ -1671,18 +1810,18 @@ async fn open_repair_sources(
         let device = record
             .device_for(index)
             .expect("validated record lists every index");
-        let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
-            Failure::Error(ErrorDetail {
-                device: Some(device),
-                key: Some(key.to_string()),
-                version: Some(record.version),
-                shard_index: Some(index.0),
-                ..ErrorDetail::new(
-                    ErrorCode::DeviceUnavailable,
-                    format!("{device} is not in the cluster document"),
-                )
-            })
-        })?;
+        // A device that has left the document (6.2.6.3) is a lost shard,
+        // to be rebuilt elsewhere (18.3), not a failure.
+        let Some(owner) = document.device(device).map(|d| d.node) else {
+            sources.push(RepairSource {
+                index,
+                device,
+                owner: node.id(),
+                stream: None,
+                condition: ShardCondition::Lost,
+            });
+            continue;
+        };
         let mut connection = connect_to(node, owner).await?;
         let request_id = connection
             .send_request(Request::GetShard {
@@ -2006,7 +2145,7 @@ async fn move_shard_of_record(
                             "record has an impossible size",
                         )
                     })?;
-                let sources = open_repair_sources(node, key, record, geometry.block_count).await?;
+                let sources = open_repair_sources(node, record, geometry.block_count).await?;
                 rebuild_shards(node, key, record, &sources, &[(index, destination.device)]).await?;
                 rebuilt = true;
             }

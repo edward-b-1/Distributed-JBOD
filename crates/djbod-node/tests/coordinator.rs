@@ -18,7 +18,7 @@ use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_proto::message::{
-    ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent,
+    ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent, ShardCondition,
 };
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -1312,4 +1312,60 @@ async fn drain_refuses_without_room_unless_partial_and_then_skips_what_cannot_mo
     assert_eq!(head(&mut client, "a").await.expect("head"), a);
     let (_, got) = client.get_object("a").await.expect("get");
     assert_eq!(got, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rebuilds_the_shards_of_a_device_that_left_the_document() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize + 9, 80);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let before = head(&mut client, "k").await.expect("head");
+    let lost = before.shards[2].device;
+    let spare = spare_device(&test, &before);
+
+    // The device leaves the document (as a forced removal does, 6.2.6.3).
+    let mut next = test.node.document();
+    next.version += 1;
+    next.devices.retain(|d| d.id != lost);
+    test.node.apply_document(next).expect("apply");
+    match client.get_object("k").await {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
+        }
+        other => panic!("expected DeviceUnavailable, got {other:?}"),
+    }
+
+    // Repair rebuilds the lost shard onto the spare device and moves the
+    // record on by one revision (18.3).
+    let report = repair(&mut client, "k").await;
+    let shard = report
+        .shards
+        .iter()
+        .find(|s| s.index == 2)
+        .expect("shard 2");
+    assert_eq!(shard.device, lost);
+    assert_eq!(shard.condition, ShardCondition::Lost);
+    assert!(shard.rewritten);
+    assert_eq!(shard.relocated_to, Some(spare));
+    assert!(report
+        .shards
+        .iter()
+        .filter(|s| s.index != 2)
+        .all(|s| s.condition == ShardCondition::Intact && s.relocated_to.is_none()));
+    assert_eq!(report.record_copies_rewritten[0], spare);
+    assert_eq!(report.record_copies_rewritten.len(), 4);
+
+    let after = head(&mut client, "k").await.expect("head");
+    assert_eq!(after.revision, 1);
+    assert_eq!(after.device_for(ShardIndex(2)), Some(spare));
+    assert!(test.shard_path(spare, "k", &after).exists());
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    // Nothing more to do: a second repair finds every shard intact.
+    let report = repair(&mut client, "k").await;
+    assert!(report.shards.iter().all(|s| !s.rewritten));
 }
