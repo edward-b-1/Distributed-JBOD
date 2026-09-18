@@ -42,7 +42,11 @@ directory. Each device must be **empty** when the cluster is created.
 mkdir -p /tmp/djbod/state /tmp/djbod/d0 /tmp/djbod/d1 /tmp/djbod/d2 /tmp/djbod/d3
 ```
 
-Write `node.toml`:
+Write the node's configuration file. It can live anywhere; the node is
+told where with `--config` and never looks for it elsewhere. For this
+walkthrough put it beside the state directory, at `/tmp/djbod/node.toml`.
+On a real installation `/etc/djbod/node.toml` is the natural place, with
+the state directory under `/var/lib/djbod`.
 
 ```toml
 node_id = "6a2d5c1e-3f0b-4b1a-9d2e-0c7e8a9b1f22"   # any UUID; `uuidgen` or /proc/sys/kernel/random/uuid
@@ -59,7 +63,7 @@ allow_shared_filesystem = true
 ## Create the cluster
 
 ```sh
-target/release/djbod-node init-cluster --config node.toml --k 3 --m 1
+target/release/djbod-node init-cluster --config /tmp/djbod/node.toml --k 3 --m 1
 ```
 
 `--k 3 --m 1` means every object is split into three data shards plus one
@@ -85,7 +89,7 @@ The warning about devices sharing a filesystem is expected here.
 In one terminal:
 
 ```sh
-target/release/djbod-node run --config node.toml
+target/release/djbod-node run --config /tmp/djbod/node.toml
 ```
 
 It logs one `node running` line and waits. Stop it with Ctrl-C. To see
