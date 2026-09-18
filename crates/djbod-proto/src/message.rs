@@ -143,6 +143,11 @@ pub enum Request {
         key: String,
     },
     ListKeys(ListQuery),
+    /// Rebuild every damaged or missing shard of a key's newest version
+    /// from the intact ones (SPEC 18.3, 18.4). Administrative.
+    RepairObject {
+        key: String,
+    },
 
     // ---- node to node
     LocalStatus,
@@ -217,6 +222,34 @@ pub struct KeyEntry {
     pub version: VersionId,
 }
 
+/// What repair found for one shard, and what it did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShardCondition {
+    /// Every block verified.
+    Intact,
+    /// The shard file could not be opened: missing or structurally
+    /// corrupt. Rewritten.
+    Unreadable { reason: String },
+    /// The file opened but some blocks failed their checksums. Rewritten.
+    CorruptBlocks { stripes: Vec<u64> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardRepair {
+    pub index: u8,
+    pub device: DeviceId,
+    pub condition: ShardCondition,
+    pub rewritten: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepairReport {
+    pub key: String,
+    pub version: VersionId,
+    pub shards: Vec<ShardRepair>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocatedRecord {
     pub device: DeviceId,
@@ -250,6 +283,7 @@ pub enum Response {
         keys: Vec<KeyEntry>,
         truncated: bool,
     },
+    RepairObject(RepairReport),
 
     // ---- node to node
     LocalStatus {

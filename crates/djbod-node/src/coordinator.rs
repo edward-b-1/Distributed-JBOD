@@ -28,7 +28,7 @@ use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    Request, Response, StreamEnd,
+    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::client::{ClientError, Connection, StreamItem};
@@ -52,6 +52,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::HeadObject { .. }
             | Request::DeleteObject { .. }
             | Request::ListKeys(_)
+            | Request::RepairObject { .. }
     )
 }
 
@@ -69,6 +70,7 @@ pub async fn handle(
         Request::HeadObject { key } => respond(writer, id, head_object(node, &key).await).await,
         Request::DeleteObject { key } => respond(writer, id, delete_object(node, &key).await).await,
         Request::ListKeys(query) => respond(writer, id, list_keys(node, query).await).await,
+        Request::RepairObject { key } => respond(writer, id, repair_object(node, &key).await).await,
         Request::GetObject { key } => get_object(node, id, writer, &key).await,
         Request::PutObject {
             key,
@@ -1201,4 +1203,452 @@ async fn write_records(holders: &mut [Holder], record: &MetadataRecord) -> Resul
         }
     }
     Ok(())
+}
+
+// --------------------------------------------------------------- REPAIR
+
+/// One shard as the repair sees it: a stream of blocks from its holder,
+/// or nothing if the file could not be opened.
+struct RepairSource {
+    index: ShardIndex,
+    device: DeviceId,
+    owner: NodeId,
+    /// `None` when the shard file could not be opened.
+    stream: Option<(Connection, u32)>,
+    condition: ShardCondition,
+}
+
+/// Rebuild every damaged or missing shard of a key's newest version
+/// (SPEC 18.3, 18.4). Every intact shard is read in full and verified;
+/// every stripe is decoded, checked, and re-encoded; each damaged shard
+/// is written afresh through `PutShard` to the device the record names,
+/// replacing the old file only once the whole object has verified against
+/// the record's checksum. Fail-stop: an unreachable holder or more than m
+/// damaged shards is an error and nothing is changed.
+async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
+    let record = newest_version(node, key).await?;
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let document = node.document();
+
+    let mut shards: Vec<ShardRepair> = Vec::with_capacity(scheme.total_shards());
+    if record.size == 0 {
+        for shard in &record.shards {
+            shards.push(ShardRepair {
+                index: shard.index,
+                device: shard.device,
+                condition: ShardCondition::Intact,
+                rewritten: false,
+            });
+        }
+        return Ok(Response::RepairObject(RepairReport {
+            key: key.to_string(),
+            version: record.version,
+            shards,
+        }));
+    }
+    let geometry = shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
+        error(
+            ErrorCode::RecordsInconsistent,
+            "record has an impossible size",
+        )
+    })?;
+
+    // Open a block stream from every holder. A holder that cannot open the
+    // file is a damaged shard, not a failure; an unreachable holder is a
+    // failure.
+    let mut sources: Vec<RepairSource> = Vec::with_capacity(scheme.total_shards());
+    for index in scheme.shard_indices() {
+        let device = record
+            .device_for(index)
+            .expect("validated record lists every index");
+        let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
+            Failure::Error(ErrorDetail {
+                device: Some(device),
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                shard_index: Some(index.0),
+                ..ErrorDetail::new(
+                    ErrorCode::DeviceUnavailable,
+                    format!("{device} is not in the cluster document"),
+                )
+            })
+        })?;
+        let mut connection = connect_to(node, owner).await?;
+        let request_id = connection
+            .send_request(Request::GetShard {
+                device,
+                key_hash: record.key_hash,
+                version: record.version,
+                shard_index: index.0,
+                first_block: 0,
+                block_count: geometry.block_count,
+            })
+            .await
+            .map_err(|e| remote_failure(owner, e))?;
+        let (stream, condition) = match connection.read_response(request_id).await {
+            Ok(Response::GetShard { .. }) => {
+                (Some((connection, request_id)), ShardCondition::Intact)
+            }
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{owner} answered GetShard with {other:?}"),
+                ))
+            }
+            // The holder answered, but could not serve the file: damaged.
+            Err(ClientError::Remote(detail)) => (
+                None,
+                ShardCondition::Unreadable {
+                    reason: detail.message,
+                },
+            ),
+            Err(e) => return Err(remote_failure(owner, e)),
+        };
+        sources.push(RepairSource {
+            index,
+            device,
+            owner,
+            stream,
+            condition,
+        });
+    }
+
+    // Pass 1: read every stripe from every readable shard, verify, decode,
+    // and re-encode, streaming the rebuilt blocks of damaged shards to
+    // fresh files. Damaged shards are known fully only at the end of the
+    // pass (a block may fail in the last stripe), so rebuilt blocks for
+    // every shard that has shown any damage so far cannot be sent
+    // incrementally without knowing the set up front. Instead this pass
+    // records per-stripe faults and buffers nothing; pass 2 re-reads.
+    let code = ReedSolomonCode::new(scheme);
+    let all_indices = scheme.shard_indices();
+    let stripe_size = scheme.data_shards() as u64 * record.block_size;
+    let mut hasher = Xxh3::new();
+    let mut corrupt_stripes: Vec<Vec<u64>> = vec![Vec::new(); scheme.total_shards()];
+    for stripe in 0..geometry.block_count {
+        let received = read_repair_stripe(&mut sources, stripe, key, &record).await?;
+        let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
+        let decoded = decode_stripe(&code, &all_indices, &received, stripe_len)
+            .map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
+        let data = match decoded {
+            DecodedStripe::Intact { data } => data,
+            DecodedStripe::Repaired { data, faults } => {
+                for fault in faults {
+                    corrupt_stripes[fault.index.as_usize()].push(stripe);
+                }
+                data
+            }
+            DecodedStripe::Unrecoverable {
+                faults,
+                usable,
+                needed,
+            } => {
+                return Err(Failure::Error(ErrorDetail {
+                    key: Some(key.to_string()),
+                    version: Some(record.version),
+                    stripe: Some(stripe),
+                    ..ErrorDetail::new(
+                        ErrorCode::BlockChecksumMismatch,
+                        format!(
+                            "stripe {stripe} has {usable} usable blocks of {needed} needed; {} damaged shard(s): {:?}",
+                            faults.len(),
+                            faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
+                        ),
+                    )
+                }));
+            }
+        };
+        hasher.update(&data);
+    }
+    finish_repair_streams(&mut sources, key, &record).await?;
+    let computed = BlockChecksum(hasher.digest());
+    if computed != record.object_checksum {
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(key.to_string()),
+            version: Some(record.version),
+            ..ErrorDetail::new(
+                ErrorCode::ObjectChecksumMismatch,
+                format!(
+                    "the intact shards decode to an object with checksum {computed:?}, but the record says {:?}; nothing rewritten",
+                    record.object_checksum
+                ),
+            )
+        }));
+    }
+
+    // Which shards need rewriting: unreadable ones, and readable ones
+    // with any corrupt block.
+    for source in sources.iter_mut() {
+        let stripes = std::mem::take(&mut corrupt_stripes[source.index.as_usize()]);
+        if source.stream.is_some() && !stripes.is_empty() {
+            source.condition = ShardCondition::CorruptBlocks { stripes };
+        }
+    }
+    let damaged: Vec<usize> = sources
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.condition != ShardCondition::Intact)
+        .map(|(i, _)| i)
+        .collect();
+    if damaged.is_empty() {
+        return Ok(Response::RepairObject(RepairReport {
+            key: key.to_string(),
+            version: record.version,
+            shards: sources
+                .iter()
+                .map(|s| ShardRepair {
+                    index: s.index.0,
+                    device: s.device,
+                    condition: ShardCondition::Intact,
+                    rewritten: false,
+                })
+                .collect(),
+        }));
+    }
+
+    // Pass 2: stream the intact shards again, re-encode each stripe, and
+    // send the damaged shards' blocks to fresh files on their devices.
+    // The old files are replaced only when each PutShard finishes.
+    let mut writers: Vec<Holder> = Vec::with_capacity(damaged.len());
+    for &i in &damaged {
+        let source = &sources[i];
+        let mut connection = connect_to(node, source.owner).await?;
+        let request_id = connection
+            .send_request(Request::PutShard {
+                device: source.device,
+                key_hash: record.key_hash,
+                version: record.version,
+                shard_index: source.index.0,
+                k: scheme.data_shards() as u8,
+                m: scheme.parity_shards() as u8,
+                block_length: record.block_size,
+                object_size: record.size,
+            })
+            .await
+            .map_err(|e| remote_failure(source.owner, e))?;
+        match connection.read_response(request_id).await {
+            Ok(Response::PutShardReady) => {}
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{} answered PutShard with {other:?}", source.owner),
+                ))
+            }
+            Err(e) => return Err(remote_failure(source.owner, e)),
+        }
+        writers.push(Holder {
+            index: source.index,
+            device: source.device,
+            owner: source.owner,
+            connection,
+            request_id,
+        });
+    }
+    let mut readers = reopen_intact_streams(node, &sources, &record, geometry.block_count).await?;
+    for stripe in 0..geometry.block_count {
+        let received = read_repair_stripe(&mut readers, stripe, key, &record).await?;
+        let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
+        let data = match decode_stripe(&code, &all_indices, &received, stripe_len)
+            .map_err(|e| error(ErrorCode::Internal, e.to_string()))?
+        {
+            DecodedStripe::Intact { data } | DecodedStripe::Repaired { data, .. } => data,
+            DecodedStripe::Unrecoverable { .. } => {
+                return Err(error(
+                    ErrorCode::BlockChecksumMismatch,
+                    format!("stripe {stripe} became unrecoverable between passes"),
+                ))
+            }
+        };
+        let blocks = encode_stripe(&code, &data, record.block_size as usize)
+            .map_err(|e| error(ErrorCode::Internal, format!("encode failed: {e}")))?;
+        for writer in writers.iter_mut() {
+            let block = &blocks[writer.index.as_usize()];
+            writer
+                .connection
+                .send_data(
+                    writer.request_id,
+                    DataFrame {
+                        sequence: stripe,
+                        checksum: block.checksum,
+                        bytes: block.bytes.clone(),
+                    },
+                )
+                .await
+                .map_err(|e| remote_failure(writer.owner, e))?;
+        }
+    }
+    finish_repair_streams(&mut readers, key, &record).await?;
+    for writer in writers.iter_mut() {
+        writer
+            .connection
+            .send_end(
+                writer.request_id,
+                StreamEnd {
+                    error: None,
+                    object_size: Some(record.size),
+                    object_checksum: Some(record.object_checksum),
+                },
+            )
+            .await
+            .map_err(|e| remote_failure(writer.owner, e))?;
+    }
+    for writer in writers.iter_mut() {
+        match writer.connection.read_response(writer.request_id).await {
+            Ok(Response::PutShardDone) => {}
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{} ended PutShard with {other:?}", writer.owner),
+                ))
+            }
+            Err(e) => return Err(remote_failure(writer.owner, e)),
+        }
+    }
+
+    let rewritten: Vec<ShardIndex> = writers.iter().map(|w| w.index).collect();
+    Ok(Response::RepairObject(RepairReport {
+        key: key.to_string(),
+        version: record.version,
+        shards: sources
+            .iter()
+            .map(|s| ShardRepair {
+                index: s.index.0,
+                device: s.device,
+                condition: s.condition.clone(),
+                rewritten: rewritten.contains(&s.index),
+            })
+            .collect(),
+    }))
+}
+
+/// Read stripe `stripe` from every source that has a stream. Blocks are
+/// returned unverified for the decoder, which treats mismatches as
+/// erasures; a source with no stream contributes nothing.
+async fn read_repair_stripe(
+    sources: &mut [RepairSource],
+    stripe: u64,
+    key: &str,
+    record: &MetadataRecord,
+) -> Result<Vec<ShardBlock>, Failure> {
+    let mut received = Vec::with_capacity(sources.len());
+    for source in sources.iter_mut() {
+        let Some((connection, request_id)) = source.stream.as_mut() else {
+            continue;
+        };
+        match connection.read_stream_item(*request_id).await {
+            Ok(StreamItem::Data(data)) if data.sequence == stripe => received.push(ShardBlock {
+                index: source.index,
+                bytes: data.bytes,
+                checksum: data.checksum,
+            }),
+            Ok(StreamItem::Data(data)) => {
+                return Err(Failure::Error(ErrorDetail {
+                    node: Some(source.owner),
+                    device: Some(source.device),
+                    key: Some(key.to_string()),
+                    version: Some(record.version),
+                    shard_index: Some(source.index.0),
+                    stripe: Some(stripe),
+                    ..ErrorDetail::new(
+                        ErrorCode::ProtocolViolation,
+                        format!(
+                            "holder sent block {} when {stripe} was expected",
+                            data.sequence
+                        ),
+                    )
+                }))
+            }
+            Ok(StreamItem::End(end)) => {
+                // A holder whose file fails part way (a read error) ends
+                // its stream early. Treat the shard as unreadable from
+                // here on and let the decoder work without it.
+                source.condition = ShardCondition::Unreadable {
+                    reason: end
+                        .error
+                        .map(|e| e.message)
+                        .unwrap_or_else(|| "stream ended early".to_string()),
+                };
+                source.stream = None;
+            }
+            Err(e) => return Err(remote_failure(source.owner, e)),
+        }
+    }
+    Ok(received)
+}
+
+/// Consume the clean end of every remaining stream.
+async fn finish_repair_streams(
+    sources: &mut [RepairSource],
+    key: &str,
+    record: &MetadataRecord,
+) -> Result<(), Failure> {
+    for source in sources.iter_mut() {
+        let Some((connection, request_id)) = source.stream.as_mut() else {
+            continue;
+        };
+        match connection.read_stream_item(*request_id).await {
+            Ok(StreamItem::End(end)) if end.error.is_none() => {}
+            other => {
+                return Err(Failure::Error(ErrorDetail {
+                    node: Some(source.owner),
+                    device: Some(source.device),
+                    key: Some(key.to_string()),
+                    version: Some(record.version),
+                    shard_index: Some(source.index.0),
+                    ..ErrorDetail::new(
+                        ErrorCode::ProtocolViolation,
+                        format!("holder did not end its stream cleanly: {other:?}"),
+                    )
+                }))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fresh block streams for the shards found intact in pass 1.
+async fn reopen_intact_streams(
+    node: &Arc<Node>,
+    sources: &[RepairSource],
+    record: &MetadataRecord,
+    block_count: u64,
+) -> Result<Vec<RepairSource>, Failure> {
+    let mut readers = Vec::new();
+    for source in sources
+        .iter()
+        .filter(|s| s.condition == ShardCondition::Intact)
+    {
+        let mut connection = connect_to(node, source.owner).await?;
+        let request_id = connection
+            .send_request(Request::GetShard {
+                device: source.device,
+                key_hash: record.key_hash,
+                version: record.version,
+                shard_index: source.index.0,
+                first_block: 0,
+                block_count,
+            })
+            .await
+            .map_err(|e| remote_failure(source.owner, e))?;
+        match connection.read_response(request_id).await {
+            Ok(Response::GetShard { .. }) => {}
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{} answered GetShard with {other:?}", source.owner),
+                ))
+            }
+            Err(e) => return Err(remote_failure(source.owner, e)),
+        }
+        readers.push(RepairSource {
+            index: source.index,
+            device: source.device,
+            owner: source.owner,
+            stream: Some((connection, request_id)),
+            condition: ShardCondition::Intact,
+        });
+    }
+    Ok(readers)
 }

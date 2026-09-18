@@ -170,13 +170,29 @@ target/release/djbod get photos/cat.jpg copy.jpg
 ```
 
 The read fails and names the device, shard, and stripe. This is the
-fail-stop behaviour of version 1: the parity could repair it, but the
-specification says to report rather than heal, and the repair job comes
-later. `head` still works, because the records are intact. To put the
-object back, `put` it again.
+fail-stop behaviour of version 1: reads report damage rather than healing
+it. `head` still works, because the records are intact. To fix it:
+
+```sh
+target/release/djbod repair photos/cat.jpg
+```
+
+Repair reads every shard, rebuilds the damaged one from the other three,
+verifies the whole object against the record, and rewrites the damaged
+file. The report names each shard's condition and what was rewritten.
+`get` then works again.
+
+Use `dd` or `printf` as above to damage a file in place. A text editor
+will save it with a trailing newline or re-encoded bytes, which changes
+its length; the node reports that as a trailer that does not describe the
+file, and `repair` fixes it just the same.
 
 **A missing shard.** Delete a `.shard` file and `get` fails with
-`NotFound` naming the device that lost it.
+`NotFound` naming the device that lost it; `repair` recreates the file.
+
+**Too much damage.** Damage two shards of a 3+1 object and `repair`
+refuses, naming the stripe where only two of the three needed blocks were
+usable, and changes nothing.
 
 **A damaged record.** Edit a number in one `.meta.json` and `head` fails
 with `RecordsInconsistent`, because the record's own checksum no longer

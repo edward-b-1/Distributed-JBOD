@@ -79,6 +79,8 @@ enum Command {
     },
     /// Print the cluster document.
     ClusterConfig,
+    /// Rebuild damaged or missing shards of an object from the intact ones.
+    Repair { key: String },
 }
 
 #[tokio::main]
@@ -337,6 +339,50 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 keys.last().map(|k| k.key.as_str()).unwrap_or("")
                             );
                         }
+                    }
+                }
+                other => bail!("unexpected response {other:?}"),
+            }
+        }
+        Command::Repair { key } => {
+            let mut conn = connect(&cli).await?;
+            match conn
+                .request(Request::RepairObject { key: key.clone() })
+                .await
+                .map_err(remote)?
+            {
+                Response::RepairObject(report) => {
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("key      {}", report.key);
+                        println!("version  {}", report.version);
+                        for shard in &report.shards {
+                            let condition = match &shard.condition {
+                                djbod_proto::message::ShardCondition::Intact => {
+                                    "intact".to_string()
+                                }
+                                djbod_proto::message::ShardCondition::Unreadable { reason } => {
+                                    format!("unreadable ({reason})")
+                                }
+                                djbod_proto::message::ShardCondition::CorruptBlocks { stripes } => {
+                                    format!("corrupt blocks in stripes {stripes:?}")
+                                }
+                            };
+                            println!(
+                                "shard {:<3}  device {}  {}{}",
+                                shard.index,
+                                shard.device.0,
+                                condition,
+                                if shard.rewritten {
+                                    "  -> rewritten"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        let count = report.shards.iter().filter(|s| s.rewritten).count();
+                        println!("{count} shard(s) rewritten");
                     }
                 }
                 other => bail!("unexpected response {other:?}"),
