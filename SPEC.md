@@ -1255,6 +1255,12 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Object versioning (9.2). Planned; may be a client-side wrapper; may be
   dropped.
 - Buckets beyond `default` (2, 9.1.9).
+- **Human-readable device labels.** A short administrator-chosen name for
+  each device beside its UUID in the cluster document, for example
+  `nas1-bay3`, shown by `status` and in errors. Paths are deliberately
+  not recorded (5.2), so today a cluster-wide listing can show only UUIDs
+  and a node's own configuration order. To settle with the join procedure
+  (milestone 3), since the label is set when a device enters the document.
 - Failure domain hierarchy and configurable independence level (7).
 - Coordinator coding limit and refusal (6.1.3, 17.3, 17.4, 17.5).
 - Randomised or round-robin placement for load spreading (10.5).
