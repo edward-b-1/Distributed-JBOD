@@ -1,15 +1,16 @@
 //! Accepting connections and dispatching requests (SPEC 4.4, 19.1.5).
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::io::BufReader;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+use tracing::Instrument;
 
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{ErrorCode, ErrorDetail, Message, Response};
 
+use crate::coordinator;
 use crate::local_ops;
 use crate::node::Node;
 use crate::wire::{read_message, write_message, WireError};
@@ -42,13 +43,25 @@ pub async fn serve(node: Arc<Node>, listener: TcpListener) {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 let node = node.clone();
-                tokio::spawn(async move {
-                    let end = handle_connection(node, stream, peer).await;
-                    match end {
-                        ConnectionEnd::PeerClosed => tracing::debug!(%peer, "connection closed"),
-                        other => tracing::info!(%peer, ?other, "connection ended"),
+                // The connection span (SPEC 20.4.2): every event on this
+                // connection carries the peer address; kind and node id
+                // are recorded once the Hello arrives.
+                let span = tracing::info_span!(
+                    "connection",
+                    %peer,
+                    kind = tracing::field::Empty,
+                    node = tracing::field::Empty
+                );
+                tokio::spawn(
+                    async move {
+                        let end = handle_connection(node, stream).await;
+                        match end {
+                            ConnectionEnd::PeerClosed => tracing::debug!("connection closed"),
+                            other => tracing::info!(?other, "connection ended"),
+                        }
                     }
-                });
+                    .instrument(span),
+                );
             }
             Err(e) => {
                 tracing::error!(error = %e, "accept failed");
@@ -68,7 +81,7 @@ pub fn our_hello(node: &Node) -> Hello {
     }
 }
 
-async fn handle_connection(node: Arc<Node>, stream: TcpStream, peer: SocketAddr) -> ConnectionEnd {
+async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd {
     if let Err(e) = stream.set_nodelay(true) {
         return ConnectionEnd::Wire(WireError::Io(e));
     }
@@ -108,7 +121,12 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream, peer: SocketAddr)
     if let Err(e) = write_message(&mut writer, &Message::Hello(our_hello(&node))).await {
         return e.into();
     }
-    tracing::debug!(%peer, kind = ?hello.kind, node = ?hello.node_id, "connection accepted");
+    let span = tracing::Span::current();
+    span.record("kind", tracing::field::debug(hello.kind));
+    if let Some(node_id) = hello.node_id {
+        span.record("node", tracing::field::display(node_id.0));
+    }
+    tracing::debug!("connection accepted");
 
     loop {
         let (id, request) = match read_message(&mut reader).await {
@@ -120,8 +138,66 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream, peer: SocketAddr)
             }
             Err(e) => return e.into(),
         };
-        if let Err(end) = local_ops::handle(&node, id, request, &mut reader, &mut writer).await {
+        // The request span (SPEC 20.4.2): id, operation, and the key for
+        // object operations.
+        let span = tracing::info_span!(
+            "request",
+            id,
+            op = operation_name(&request),
+            key = request_key(&request)
+        );
+        let result = async {
+            if coordinator::is_client_operation(&request) {
+                coordinator::handle(
+                    &node,
+                    node.versions(),
+                    id,
+                    request,
+                    &mut reader,
+                    &mut writer,
+                )
+                .await
+            } else {
+                local_ops::handle(&node, id, request, &mut reader, &mut writer).await
+            }
+        }
+        .instrument(span)
+        .await;
+        if let Err(end) = result {
             return end;
         }
+    }
+}
+
+fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
+    use djbod_proto::message::Request::*;
+    match request {
+        Status => "Status",
+        PutObject { .. } => "PutObject",
+        GetObject { .. } => "GetObject",
+        HeadObject { .. } => "HeadObject",
+        DeleteObject { .. } => "DeleteObject",
+        ListKeys(_) => "ListKeys",
+        LocalStatus => "LocalStatus",
+        LocalLookup { .. } => "LocalLookup",
+        LocalList(_) => "LocalList",
+        PutShard { .. } => "PutShard",
+        GetShard { .. } => "GetShard",
+        PutMeta { .. } => "PutMeta",
+        GetMeta { .. } => "GetMeta",
+        DeleteVersion { .. } => "DeleteVersion",
+        AbortShard { .. } => "AbortShard",
+        GetClusterConfig => "GetClusterConfig",
+        ApplyClusterConfig { .. } => "ApplyClusterConfig",
+    }
+}
+
+fn request_key(request: &djbod_proto::message::Request) -> Option<&str> {
+    use djbod_proto::message::Request::*;
+    match request {
+        PutObject { key, .. } | GetObject { key } | HeadObject { key } | DeleteObject { key } => {
+            Some(key.as_str())
+        }
+        _ => None,
     }
 }

@@ -145,14 +145,15 @@ pub async fn handle(
                 .map(|_| Response::ApplyClusterConfig);
             respond(writer, id, result.map_err(Failure::from)).await
         }
-        // Client-facing operations are the coordinator's job (next step).
+        // Client-facing operations are dispatched to the coordinator by
+        // the server before reaching here.
         other => {
             respond(
                 writer,
                 id,
                 Err(Failure::Error(ErrorDetail::new(
                     ErrorCode::ProtocolViolation,
-                    format!("{other:?} is not served by this node yet"),
+                    format!("{other:?} is a client operation, not a node-to-node one"),
                 ))),
             )
             .await
@@ -167,7 +168,7 @@ pub async fn handle(
 
 /// How a handler failed: something to tell the peer, or a reason to close
 /// the connection.
-enum Failure {
+pub(crate) enum Failure {
     Error(ErrorDetail),
     Close(ConnectionEnd),
 }
@@ -204,7 +205,7 @@ impl From<crate::wire::WireError> for Failure {
 }
 
 /// Write the response for `id`, or the error, to the peer.
-async fn respond(
+pub(crate) async fn respond(
     writer: &mut Writer,
     id: u32,
     result: Result<Response, Failure>,
@@ -220,7 +221,7 @@ async fn respond(
     outcome
 }
 
-fn device_error_detail(e: DeviceError) -> ErrorDetail {
+pub(crate) fn device_error_detail(e: DeviceError) -> ErrorDetail {
     let code = match &e {
         DeviceError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
             ErrorCode::NotFound
@@ -564,7 +565,7 @@ async fn put_shard(
 }
 
 /// Report a mid-stream failure and close the connection.
-async fn stream_violation(writer: &mut Writer, id: u32, message: String) -> Failure {
+pub(crate) async fn stream_violation(writer: &mut Writer, id: u32, message: String) -> Failure {
     let detail = ErrorDetail::new(ErrorCode::ProtocolViolation, message.clone());
     let _ = write_message(
         writer,
