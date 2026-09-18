@@ -222,8 +222,12 @@ Configuration has three layers.
 
 ### 6.1 Per-node (local file)
 
-6.1.1 [D] Node UUID, listen addresses, the list of device paths, and one
-or more bootstrap peer addresses.
+6.1.1 [D] Node UUID, listen addresses, the list of device paths, one or
+more bootstrap peer addresses, and a state directory holding the node's
+copy of the cluster document. The file is TOML. The default listen port is
+5263, which IANA lists as unassigned (checked 18 September 2026) and which
+spells JBOD on a telephone keypad. 7400 was considered and rejected: it is
+the DDS/RTPS discovery port, in use wherever ROS 2 runs.
 
 6.1.2 [D] **No cluster secret.** A shared secret with an HMAC
 challenge-response handshake was designed, implemented, and then removed
