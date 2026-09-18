@@ -1178,11 +1178,48 @@ drain and repair, errors) is required eventually and deferred. Every
 administrative action it performs must also be available as a command-line
 operation over the native protocol.
 
-### 20.4 ext4 deployment notes
+### 20.4 Logging
 
-20.4.1 [D] One ext4 filesystem per disk, mounted separately.
+20.4.1 [D] **Framework: `tracing`.** Library crates emit events and spans
+with the `tracing` macros and depend on nothing else; only the binary
+installs a subscriber (`tracing-subscriber`) and so decides format and
+destination. Events carry named fields, not only a message, so a request
+id or a device UUID is data a collector can filter on rather than text it
+must parse. Alternatives considered: the `log` facade with `env_logger`
+or similar (unstructured), `slog` (superseded), and `tracing`'s own
+plug-ins `tracing-opentelemetry` and `tokio-console`, which can be added
+later without touching emitting code.
 
-20.4.2 [P] Format and mount recommendations for data devices:
+20.4.2 [D] **Spans.** The node opens a span per connection (peer address,
+peer kind, node id) and a span per request (request id, operation, and
+the key for object operations). Every event emitted inside inherits those
+fields, so a failure deep in a handler is tagged with which connection and
+which request produced it without threading the values through every
+function.
+
+20.4.3 [D] **Output.** Human-readable text on standard error by default,
+which is what systemd's journal captures; a `--log-format json` option for
+feeding a collector. The process writes no log files and performs no
+rotation; that is the platform's job. `RUST_LOG` overrides the level
+filter at run time; the default is `info`.
+
+20.4.4 [D] **Levels.** `error`: a client request failed under the
+fail-stop rule, with the fields of 16.2. `warn`: the administrator should
+see it but no request failed (orphan cleanup, the shared-filesystem
+override, a skipped unreadable record). `info`: lifecycle, meaning
+startup, shutdown, cluster document changes, node connections. `debug`:
+per-request flow. `trace`: per-block and per-frame detail, compiled out of
+release builds.
+
+20.4.5 [D] **Panics** are emitted as an `error` event by a panic hook
+before the process dies, so a crash leaves a line in the same stream as
+everything else.
+
+### 20.5 ext4 deployment notes
+
+20.5.1 [D] One ext4 filesystem per disk, mounted separately.
+
+20.5.2 [P] Format and mount recommendations for data devices:
 
 - Set reserved blocks to zero: `tune2fs -m 0 <dev>`. The default reserves
   five percent for root.
@@ -1194,7 +1231,7 @@ operation over the native protocol.
   it and Btrfs cannot guarantee it. If 10.6 adopts `fallocate`, the system
   requires native support.
 
-20.4.3 [D] Filename limit is 255 bytes and path limit is 4096 bytes. The
+20.5.3 [D] Filename limit is 255 bytes and path limit is 4096 bytes. The
 layout in section 9 uses fixed-length names and stays well within both.
 
 ## 21. Open questions
