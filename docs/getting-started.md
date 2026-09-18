@@ -187,6 +187,22 @@ will save it with a trailing newline or re-encoded bytes, which changes
 its length; the node reports that as a trailer that does not describe the
 file, and `repair` fixes it just the same.
 
+**Finding damage before a client does.** Repair fixes what a read has
+tripped over; the scrubber finds damage first:
+
+```sh
+target/release/djbod-node scrub --config /tmp/djbod/node.toml
+target/release/djbod-node scrub --config /tmp/djbod/node.toml --repair   # and fix it
+```
+
+It reads every record and every block on every device against their
+checksums and prints one line per finding, exit code 2 if anything is
+wrong, 0 if clean. It reads the disks directly, so it works whether the
+node is running or not; `--repair` needs the node running. `--rate-mib 50`
+caps the read rate on a busy machine, and `--json` gives one object per
+finding. On a real installation this runs from a cron job or a systemd
+timer.
+
 **A missing shard.** Delete a `.shard` file and `get` fails with
 `NotFound` naming the device that lost it; `repair` recreates the file.
 

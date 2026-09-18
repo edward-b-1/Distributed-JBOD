@@ -79,6 +79,26 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Verify every record and shard block on this node's devices against
+    /// their checksums and report what is wrong. Reads the disks directly;
+    /// the node may be running or not. With --repair, also asks the
+    /// running node to rebuild each damaged object.
+    Scrub {
+        #[arg(long)]
+        config: PathBuf,
+        /// Only this device path (may be repeated). Default: all.
+        #[arg(long)]
+        device: Vec<PathBuf>,
+        /// Cap on read rate in MiB per second. Default: unlimited.
+        #[arg(long)]
+        rate_mib: Option<u64>,
+        /// One JSON object per finding on standard output.
+        #[arg(long)]
+        json: bool,
+        /// Repair each damaged object through the running node.
+        #[arg(long)]
+        repair: bool,
+    },
 }
 
 #[tokio::main]
@@ -196,6 +216,13 @@ async fn main() -> anyhow::Result<()> {
             println!("restart the node to serve the new device(s)");
             Ok(())
         }
+        Command::Scrub {
+            config,
+            device,
+            rate_mib,
+            json,
+            repair,
+        } => scrub(&config, &device, rate_mib, json, repair).await,
         Command::Run { config } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
             let listen = config.listen;
@@ -217,5 +244,181 @@ async fn main() -> anyhow::Result<()> {
             server::serve(node, listener).await;
             Ok(())
         }
+    }
+}
+
+/// The `scrub` subcommand.
+async fn scrub(
+    config_path: &std::path::Path,
+    only: &[PathBuf],
+    rate_mib: Option<u64>,
+    json: bool,
+    repair: bool,
+) -> anyhow::Result<()> {
+    use djbod_core::device::Device;
+    use djbod_core::scrub::{scrub_device, Finding, ScrubOptions};
+    use djbod_node::client::Connection;
+    use djbod_proto::message::{Request, Response};
+
+    let config = NodeConfig::load(config_path).context("loading node configuration")?;
+    let document_path = config
+        .state_dir
+        .join(djbod_node::node::CLUSTER_DOCUMENT_FILE);
+    let document: djbod_core::cluster::ClusterDocument = serde_json::from_str(
+        &std::fs::read_to_string(&document_path)
+            .with_context(|| format!("reading {}", document_path.display()))?,
+    )
+    .context("parsing cluster document")?;
+
+    let options = ScrubOptions {
+        max_bytes_per_second: rate_mib.map(|m| m * 1024 * 1024),
+        temporary_max_age: std::time::Duration::from_secs(config.temporary_max_age_secs),
+    };
+    let selected: Vec<&PathBuf> = config
+        .devices
+        .iter()
+        .filter(|p| only.is_empty() || only.contains(p))
+        .collect();
+    if selected.is_empty() {
+        anyhow::bail!("no configured device matches --device");
+    }
+
+    let mut all_findings: Vec<Finding> = Vec::new();
+    let mut totals = (0u64, 0u64, 0u64, 0u64);
+    for path in selected {
+        let device = Device::open(path, Some(document.cluster_id))
+            .with_context(|| format!("opening device {}", path.display()))?;
+        let mut print = |finding: &Finding| {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(finding).expect("finding serializes")
+                );
+            } else {
+                println!("{}", describe_finding(finding));
+            }
+        };
+        let summary = tokio::task::block_in_place(|| scrub_device(&device, &options, &mut print))
+            .with_context(|| format!("scrubbing {}", path.display()))?;
+        totals.0 += summary.records_checked;
+        totals.1 += summary.shards_checked;
+        totals.2 += summary.blocks_checked;
+        totals.3 += summary.bytes_read;
+        if !json {
+            eprintln!(
+                "{}: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+                path.display(),
+                summary.records_checked,
+                summary.shards_checked,
+                summary.blocks_checked,
+                human_bytes(summary.bytes_read),
+                summary.findings.len()
+            );
+        }
+        all_findings.extend(summary.findings);
+    }
+    if !json {
+        eprintln!(
+            "total: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+            totals.0,
+            totals.1,
+            totals.2,
+            human_bytes(totals.3),
+            all_findings.len()
+        );
+    }
+
+    if repair {
+        let mut keys: Vec<&str> = all_findings.iter().filter_map(|f| f.repair_key()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        if !keys.is_empty() {
+            let address = config.advertised_address();
+            let mut connection =
+                Connection::connect(address, Connection::client_hello(document.cluster_id))
+                    .await
+                    .with_context(|| {
+                        format!("connecting to the node at {address} for repair; is it running?")
+                    })?;
+            for key in keys {
+                match connection
+                    .request(Request::RepairObject {
+                        key: key.to_string(),
+                    })
+                    .await
+                {
+                    Ok(Response::RepairObject(report)) => {
+                        let rewritten = report.shards.iter().filter(|s| s.rewritten).count();
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string(&report).expect("report serializes")
+                            );
+                        } else {
+                            eprintln!("repaired {key}: {rewritten} shard(s) rewritten");
+                        }
+                    }
+                    Ok(other) => eprintln!("repair of {key}: unexpected response {other:?}"),
+                    Err(e) => eprintln!("repair of {key} failed: {e}"),
+                }
+            }
+        }
+    }
+
+    if all_findings.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(2)
+    }
+}
+
+fn describe_finding(finding: &djbod_core::scrub::Finding) -> String {
+    use djbod_core::scrub::Finding::*;
+    match finding {
+        RecordCorrupt { path, reason } => {
+            format!("record corrupt      {}  {reason}", path.display())
+        }
+        ShardUnreadable { path, reason, .. } => {
+            format!("shard unreadable    {}  {reason}", path.display())
+        }
+        ShardMisplaced { path, reason, .. } => {
+            format!("shard misplaced     {}  {reason}", path.display())
+        }
+        ShardBlocksCorrupt { path, stripes, .. } => {
+            format!(
+                "shard blocks corrupt {}  stripes {stripes:?}",
+                path.display()
+            )
+        }
+        ShardWithoutRecord { path, .. } => format!("shard without record {}", path.display()),
+        RecordWithoutShard {
+            path, shard_index, ..
+        } => {
+            format!(
+                "record without shard {}  shard {shard_index} missing",
+                path.display()
+            )
+        }
+        RecordNotForThisDevice { path, .. } => {
+            format!("record not for this device {}", path.display())
+        }
+        StaleTemporary { path, age_secs } => {
+            format!("stale temporary     {}  {age_secs}s old", path.display())
+        }
+    }
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }

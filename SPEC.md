@@ -1273,15 +1273,30 @@ native bucket exists it serves a single S3 bucket mapped to `default`.
 
 ### 20.1 Scrubber
 
-20.1.1 [X] Not in v1, but required before the system is trusted with data.
-Because every shard block has a checksum stored beside it, a device can be
-scrubbed locally at disk speed with no network traffic and no coordination.
+20.1.1 [D] Because every shard block and every record carries a checksum
+stored beside it, a device can be scrubbed locally at disk speed with no
+network traffic and no coordination. Implemented as `djbod-node scrub`.
 
-20.1.2 [O] Two designs were identified. A separate process per machine that
-asks the node, over a local socket, to verify shard files at a configured
-rate. Or a separate process that reads the on-disk format directly. The
-first is simpler and reuses the node's code; the second is independent of
-the node's health and probably more efficient.
+20.1.2 [D] **Design: a separate process reading the on-disk format
+directly.** `djbod-node scrub --config node.toml` opens each configured
+device (or those named with `--device`) and, for every key directory,
+parses and verifies every record (checksum, validation, key hash against
+the directory), opens every shard file (header, footer, trailer, geometry,
+and header against the file's name, its directory, and its record), and
+reads every block against its checksum. It also reports a record whose
+shard is not on the device, a shard with no record, a record that does
+not list the device, and temporaries older than the configured age.
+Findings print as text or, with `--json`, one object per line, each naming
+the path and, where a record was readable, the key; the exit code is 2 if
+anything was found. `--rate-mib` caps the read rate so a scrub does not
+starve clients. Because files are immutable once renamed and temporaries
+carry a suffix, the scrub is safe while the node runs, and a file that
+vanishes mid-scrub is a concurrent delete, not damage. With `--repair` it
+connects to the running node and issues `RepairObject` for every key it
+found damaged. The alternative, asking the node over a socket, was
+rejected: it would tie the scrub to the node's health and run every byte
+through a second process for no gain. Scheduling is left to cron or a
+systemd timer for now; a built-in schedule is a later addition.
 
 20.1.3 [D] Since reads report rather than heal, scrubbing is the mechanism
 by which corruption is found before a client encounters it.
@@ -1363,10 +1378,9 @@ layout in section 9 uses fixed-length names and stays well within both.
 | # | Question | Where | Recommendation |
 |---|----------|-------|----------------|
 | 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
-| 21.2 | Scrubber architecture. | 20.1.2 | Direct on-disk reader. |
-| 21.3 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
-| 21.4 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.5 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
+| 21.2 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
+| 21.3 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.4 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
 
 ## 22. Deferred items
 
@@ -1383,7 +1397,8 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Coordinator coding limit and refusal (6.1.3, 17.3, 17.4, 17.5).
 - Randomised or round-robin placement for load spreading (10.5).
 - Inline reconstruction on read (16.5).
-- Scrubber (20.1).
+- A built-in scrub schedule inside the node; today `djbod-node scrub` is
+  run by cron or a systemd timer (20.1.2).
 - Rebalance (18.7).
 - Non-systematic encoding option (8.1.6).
 - Optional parity verification on read, for deployments that want it.
