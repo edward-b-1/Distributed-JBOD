@@ -39,6 +39,12 @@ pub const SYSTEM_NAME: &str = "distributed-jbod";
 #[serde(transparent)]
 pub struct DeviceId(pub Uuid);
 
+impl std::fmt::Display for DeviceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "device {}", self.0)
+    }
+}
+
 /// Where one shard of a version lives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardLocation {
