@@ -125,12 +125,23 @@ fn write_file_atomically(final_path: &Path, bytes: &[u8]) -> Result<(), DeviceEr
     fsync_directory(dir)
 }
 
+/// Temporary names carry a token unique to this process and call, so two
+/// writers that somehow target the same final name can never share a
+/// temporary file (SPEC 20.1.2.1). The `.tmp` suffix is what cleanup and
+/// the scrubber look for.
 fn temporary_path(final_path: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut name = final_path
         .file_name()
         .expect("a file path has a name")
         .to_os_string();
-    name.push(TEMPORARY_SUFFIX);
+    name.push(format!(
+        ".{}-{}{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        TEMPORARY_SUFFIX
+    ));
     final_path.with_file_name(name)
 }
 

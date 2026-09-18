@@ -27,8 +27,9 @@ use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd,
+    ClusterFinding, DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    LocatedRecord, Message, RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition,
+    ShardRepair, StreamEnd,
 };
 
 use crate::client::{ClientError, Connection, StreamItem};
@@ -53,6 +54,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::DeleteObject { .. }
             | Request::ListKeys(_)
             | Request::RepairObject { .. }
+            | Request::Scrub { .. }
     )
 }
 
@@ -71,6 +73,10 @@ pub async fn handle(
         Request::DeleteObject { key } => respond(writer, id, delete_object(node, &key).await).await,
         Request::ListKeys(query) => respond(writer, id, list_keys(node, query).await).await,
         Request::RepairObject { key } => respond(writer, id, repair_object(node, &key).await).await,
+        Request::Scrub {
+            max_bytes_per_second,
+            repair,
+        } => scrub(node, id, writer, max_bytes_per_second, repair).await,
         Request::GetObject { key } => get_object(node, id, writer, &key).await,
         Request::PutObject {
             key,
@@ -1658,4 +1664,330 @@ async fn reopen_intact_streams(
         });
     }
     Ok(readers)
+}
+
+// ---------------------------------------------------------------- SCRUB
+
+/// Write one scrub event to the client as a CBOR data frame.
+async fn send_event(
+    writer: &mut Writer,
+    id: u32,
+    sequence: &mut u64,
+    event: &ScrubEvent,
+) -> Result<(), Failure> {
+    let bytes = djbod_proto::codec::encode_cbor(event)
+        .map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
+    write_message(
+        writer,
+        &Message::Data {
+            id,
+            data: DataFrame {
+                sequence: *sequence,
+                checksum: checksum_block(&bytes),
+                bytes,
+            },
+        },
+    )
+    .await?;
+    *sequence += 1;
+    Ok(())
+}
+
+/// The cluster-wide scrub (SPEC 20.1.2): every node's local scrub, run
+/// concurrently and relayed as it happens; then the cross-node checks;
+/// then, if asked, one repair per damaged key.
+async fn scrub(
+    node: &Arc<Node>,
+    id: u32,
+    writer: &mut Writer,
+    max_bytes_per_second: Option<u64>,
+    repair: bool,
+) -> Result<(), Failure> {
+    respond(writer, id, Ok(Response::ScrubStarted)).await?;
+    let mut sequence: u64 = 0;
+    let mut damaged_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut failed_nodes = 0usize;
+    let mut finding_count = 0usize;
+
+    // Phase 1: every node's local scrub, concurrently, relayed as events
+    // arrive over a channel.
+    let document = node.document();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
+    let mut tasks = JoinSet::new();
+    for entry in &document.nodes {
+        let target = entry.id;
+        let node = node.clone();
+        let sender = sender.clone();
+        tasks.spawn(async move {
+            if let Err(f) = relay_local_scrub(&node, target, max_bytes_per_second, &sender).await {
+                let detail = match f {
+                    Failure::Error(detail) => detail,
+                    Failure::Close(end) => {
+                        ErrorDetail::new(ErrorCode::NodeUnreachable, format!("{end:?}"))
+                    }
+                };
+                let _ = sender
+                    .send(ScrubEvent::NodeFailed {
+                        node: target,
+                        detail,
+                    })
+                    .await;
+            }
+        });
+    }
+    drop(sender);
+    while let Some(event) = receiver.recv().await {
+        match &event {
+            ScrubEvent::NodeFinding { finding, .. } => {
+                finding_count += 1;
+                if let Some(key) = finding.repair_key() {
+                    damaged_keys.insert(key.to_string());
+                }
+            }
+            ScrubEvent::NodeFailed { .. } => failed_nodes += 1,
+            _ => {}
+        }
+        send_event(writer, id, &mut sequence, &event).await?;
+    }
+    while tasks.join_next().await.is_some() {}
+
+    // Phase 2: cross-node checks over every key (20.1.2, 18.5).
+    let mut keys: Vec<String> = Vec::new();
+    match list_keys(
+        node,
+        ListQuery {
+            prefix: None,
+            start_after: None,
+            limit: None,
+        },
+    )
+    .await
+    {
+        Ok(Response::ListKeys { keys: entries, .. }) => {
+            keys.extend(entries.into_iter().map(|e| e.key))
+        }
+        Ok(_) => {}
+        Err(Failure::Error(detail)) => {
+            let end = StreamEnd::failed(ErrorDetail {
+                message: format!(
+                    "listing keys for the cross-node checks failed: {}",
+                    detail.message
+                ),
+                ..detail
+            });
+            write_message(writer, &Message::EndOfStream { id, end }).await?;
+            return Ok(());
+        }
+        Err(other) => return Err(other),
+    }
+    for key in &keys {
+        for finding in cross_check_key(node, key).await {
+            finding_count += 1;
+            damaged_keys.insert(key.clone());
+            send_event(
+                writer,
+                id,
+                &mut sequence,
+                &ScrubEvent::ClusterFinding(finding),
+            )
+            .await?;
+        }
+    }
+
+    // Phase 3: repairs, one per damaged key, from this one place.
+    let mut repair_failures = 0usize;
+    if repair {
+        for key in &damaged_keys {
+            let event = match repair_object(node, key).await {
+                Ok(Response::RepairObject(report)) => ScrubEvent::Repaired {
+                    key: key.clone(),
+                    report,
+                },
+                Ok(other) => ScrubEvent::RepairFailed {
+                    key: key.clone(),
+                    detail: ErrorDetail::new(ErrorCode::Internal, format!("unexpected {other:?}")),
+                },
+                Err(Failure::Error(detail)) => {
+                    repair_failures += 1;
+                    ScrubEvent::RepairFailed {
+                        key: key.clone(),
+                        detail,
+                    }
+                }
+                Err(other) => return Err(other),
+            };
+            send_event(writer, id, &mut sequence, &event).await?;
+        }
+    }
+
+    let end = if failed_nodes > 0 {
+        StreamEnd::failed(ErrorDetail::new(
+            ErrorCode::NodeUnreachable,
+            format!(
+                "{failed_nodes} node(s) could not be scrubbed; {finding_count} finding(s) elsewhere"
+            ),
+        ))
+    } else if repair_failures > 0 {
+        StreamEnd::failed(ErrorDetail::new(
+            ErrorCode::WriteFailed,
+            format!("{repair_failures} repair(s) failed"),
+        ))
+    } else {
+        StreamEnd::ok()
+    };
+    write_message(writer, &Message::EndOfStream { id, end }).await?;
+    Ok(())
+}
+
+/// Run one node's `LocalScrub` and forward its items as events.
+async fn relay_local_scrub(
+    node: &Arc<Node>,
+    target: NodeId,
+    max_bytes_per_second: Option<u64>,
+    sender: &tokio::sync::mpsc::Sender<ScrubEvent>,
+) -> Result<(), Failure> {
+    let mut connection = connect_to(node, target).await?;
+    let request_id = connection
+        .send_request(Request::LocalScrub {
+            max_bytes_per_second,
+        })
+        .await
+        .map_err(|e| remote_failure(target, e))?;
+    match connection.read_response(request_id).await {
+        Ok(Response::LocalScrubStarted) => {}
+        Ok(other) => {
+            return Err(error(
+                ErrorCode::ProtocolViolation,
+                format!("{target} answered LocalScrub with {other:?}"),
+            ))
+        }
+        Err(e) => return Err(remote_failure(target, e)),
+    }
+    loop {
+        match connection.read_stream_item(request_id).await {
+            Ok(StreamItem::Data(data)) => {
+                if checksum_block(&data.bytes) != data.checksum {
+                    return Err(error(
+                        ErrorCode::ProtocolViolation,
+                        "scrub item corrupt in transit",
+                    ));
+                }
+                let item: ScrubItem = djbod_proto::codec::decode_cbor(&data.bytes)
+                    .map_err(|e| error(ErrorCode::ProtocolViolation, e.to_string()))?;
+                let event = match item {
+                    ScrubItem::Finding { device, finding } => ScrubEvent::NodeFinding {
+                        node: target,
+                        device,
+                        finding,
+                    },
+                    ScrubItem::Summary { device, summary } => ScrubEvent::NodeSummary {
+                        node: target,
+                        device,
+                        summary,
+                    },
+                };
+                if sender.send(event).await.is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(StreamItem::End(end)) => {
+                return match end.error {
+                    None => Ok(()),
+                    Some(detail) => Err(Failure::Error(ErrorDetail {
+                        node: Some(target),
+                        ..detail
+                    })),
+                }
+            }
+            Err(e) => return Err(remote_failure(target, e)),
+        }
+    }
+}
+
+/// The checks only the coordinator can make for one key: record copies
+/// complete and agreeing, and every listed holder actually holding its
+/// shard file.
+async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
+    let mut findings = Vec::new();
+    let located = match lookup(node, hash_key(key.as_bytes())).await {
+        Ok(located) => located,
+        Err(Failure::Error(detail)) => {
+            findings.push(ClusterFinding::RecordsInconsistent {
+                key: key.to_string(),
+                version: detail.version,
+                detail: detail.message,
+            });
+            return findings;
+        }
+        Err(_) => return findings,
+    };
+    let versions = match versions_of(key, located) {
+        Ok(versions) => versions,
+        Err(Failure::Error(detail)) => {
+            findings.push(ClusterFinding::RecordsInconsistent {
+                key: key.to_string(),
+                version: detail.version,
+                detail: detail.message,
+            });
+            return findings;
+        }
+        Err(_) => return findings,
+    };
+    let document = node.document();
+    for record in versions {
+        if record.size == 0 {
+            continue;
+        }
+        for shard in &record.shards {
+            let Some(owner) = document.device(shard.device).map(|d| d.node) else {
+                findings.push(ClusterFinding::HolderUnavailable {
+                    key: key.to_string(),
+                    version: record.version,
+                    device: shard.device,
+                    detail: "device is not in the cluster document".to_string(),
+                });
+                continue;
+            };
+            let probe = async {
+                let mut connection = connect_to(node, owner).await?;
+                connection
+                    .request(Request::GetMeta {
+                        device: shard.device,
+                        key_hash: record.key_hash,
+                        version: record.version,
+                        probe: true,
+                    })
+                    .await
+                    .map_err(|e| remote_failure(owner, e))
+            };
+            match probe.await {
+                Ok(Response::GetMeta {
+                    shard_present: Some(true),
+                    ..
+                }) => {}
+                Ok(Response::GetMeta { .. }) => {
+                    findings.push(ClusterFinding::ShardMissingOnHolder {
+                        key: key.to_string(),
+                        version: record.version,
+                        device: shard.device,
+                        shard_index: shard.index,
+                    })
+                }
+                Ok(other) => findings.push(ClusterFinding::HolderUnavailable {
+                    key: key.to_string(),
+                    version: record.version,
+                    device: shard.device,
+                    detail: format!("unexpected response {other:?}"),
+                }),
+                Err(Failure::Error(detail)) => findings.push(ClusterFinding::HolderUnavailable {
+                    key: key.to_string(),
+                    version: record.version,
+                    device: shard.device,
+                    detail: detail.message,
+                }),
+                Err(_) => {}
+            }
+        }
+    }
+    findings
 }

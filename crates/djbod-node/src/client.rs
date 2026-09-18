@@ -450,6 +450,55 @@ impl Connection {
     }
 }
 
+impl Connection {
+    /// Start a cluster-wide scrub. Returns the request id; then call
+    /// `next_scrub_event` until it yields the stream's end.
+    pub async fn start_scrub(
+        &mut self,
+        max_bytes_per_second: Option<u64>,
+        repair: bool,
+    ) -> Result<u32, ClientError> {
+        let id = self
+            .send_request(Request::Scrub {
+                max_bytes_per_second,
+                repair,
+            })
+            .await?;
+        match self.read_response(id).await? {
+            Response::ScrubStarted => Ok(id),
+            other => Err(ClientError::UnexpectedMessage {
+                expected: "ScrubStarted",
+                got: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// The next scrub event, or the stream's end.
+    pub async fn next_scrub_event(
+        &mut self,
+        id: u32,
+    ) -> Result<Result<djbod_proto::message::ScrubEvent, StreamEnd>, ClientError> {
+        match self.read_stream_item(id).await? {
+            StreamItem::Data(data) => {
+                if checksum_block(&data.bytes) != data.checksum {
+                    return Err(ClientError::StreamFailed(ErrorDetail::new(
+                        djbod_proto::message::ErrorCode::ProtocolViolation,
+                        "scrub event corrupt in transit",
+                    )));
+                }
+                let event = djbod_proto::codec::decode_cbor(&data.bytes).map_err(|e| {
+                    ClientError::StreamFailed(ErrorDetail::new(
+                        djbod_proto::message::ErrorCode::ProtocolViolation,
+                        e.to_string(),
+                    ))
+                })?;
+                Ok(Ok(event))
+            }
+            StreamItem::End(end) => Ok(Err(end)),
+        }
+    }
+}
+
 /// A checksummed data frame for a chunk of object body.
 pub fn body_frame(sequence: u64, bytes: Vec<u8>) -> DataFrame {
     DataFrame {

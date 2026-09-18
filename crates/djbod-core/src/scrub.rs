@@ -13,7 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::checksum::block_matches_checksum;
 use crate::device::{read_dir_sorted, Device, DeviceError, TEMPORARY_SUFFIX};
@@ -45,7 +45,7 @@ impl Default for ScrubOptions {
 /// One thing wrong on a device. Every variant names the path, and where
 /// a record was readable, the key, so an administrator can act and a
 /// repair can be driven.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Finding {
     /// The record failed to parse, failed its own checksum, or failed
@@ -112,7 +112,7 @@ impl Finding {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScrubSummary {
     pub device: Option<DeviceId>,
     pub records_checked: u64,

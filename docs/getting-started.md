@@ -188,21 +188,25 @@ its length; the node reports that as a trailer that does not describe the
 file, and `repair` fixes it just the same.
 
 **Finding damage before a client does.** Repair fixes what a read has
-tripped over; a scrub finds damage first. Today the check is a
-single-machine, offline tool:
+tripped over; a scrub finds damage first:
 
 ```sh
-target/release/djbod-node scrub --config /tmp/djbod/node.toml
+target/release/djbod scrub            # every node checks its own disks; then cross-node checks
+target/release/djbod scrub --repair   # and rebuild what was found
 ```
 
-It reads every record and every block on this machine's devices against
-their checksums and prints one line per finding, exit code 2 if anything
-is wrong, 0 if clean. It reads the disks directly and needs no running
-node. `--rate-mib 50` caps the read rate, and `--json` gives one object
-per finding. Fix what it finds with `djbod repair <key>`.
+Each node reads every record and every block on its own devices against
+their checksums, no data crosses the network for that, and streams its
+findings back as it goes. The coordinator then checks what no single node
+can: that every object's record copies are complete and agree, and that
+every holder has its shard file. Exit code 0 when clean, 2 when anything
+was found or a node could not be scrubbed. `--rate-mib 50` caps each
+node's read rate; `--json` gives one event per line. On a real
+installation this runs from a cron job or a systemd timer on any one
+machine.
 
-The cluster-wide scrub, `djbod scrub`, which sweeps every node from one
-command and repairs what it finds, arrives with multi-node support.
+There is also an offline single-machine check, `djbod-node scrub --config
+<file>`, for a node that is not running.
 
 **A missing shard.** Delete a `.shard` file and `get` fails with
 `NotFound` naming the device that lost it; `repair` recreates the file.

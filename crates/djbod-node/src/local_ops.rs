@@ -17,10 +17,10 @@ use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    Request, Response, StreamEnd,
+    Request, Response, ScrubItem, StreamEnd,
 };
 
-use crate::node::{Node, NodeError};
+use crate::node::{Node, NodeError, ShardWriteKey};
 use crate::server::{ConnectionEnd, Reader, Writer};
 use crate::wire::{read_message, write_message};
 
@@ -39,6 +39,9 @@ pub async fn handle(
             respond(writer, id, local_lookup(node, key_hash).await).await
         }
         Request::LocalList(query) => respond(writer, id, local_list(node, query).await).await,
+        Request::LocalScrub {
+            max_bytes_per_second,
+        } => local_scrub(node, id, writer, max_bytes_per_second).await,
         Request::PutShard {
             device,
             key_hash,
@@ -437,6 +440,28 @@ async fn put_shard(
         )
         .await;
     }
+    // One writer per shard per device (20.1.2.1). The guard is held until
+    // this function returns, by success or by any failure path.
+    let Some(_write_guard) = node.begin_shard_write(ShardWriteKey {
+        device: params.device,
+        key_hash: params.key_hash,
+        version: params.version,
+        shard_index: params.shard_index,
+    }) else {
+        let detail = with_device(
+            ErrorDetail {
+                version: Some(params.version),
+                shard_index: Some(params.shard_index),
+                ..ErrorDetail::new(
+                    ErrorCode::WriteFailed,
+                    "this shard is already being written on this device by another request"
+                        .to_string(),
+                )
+            },
+            params.device,
+        );
+        return respond(writer, id, Err(Failure::Error(detail))).await;
+    };
     let header = ShardFileHeader {
         scheme,
         shard_index,
@@ -764,4 +789,71 @@ async fn abort_shard(
         other => other,
     })?;
     Ok(Response::AbortShard)
+}
+
+/// `LocalScrub`: run the local scrub engine over every device, streaming
+/// each finding as a CBOR `ScrubItem` frame as it is made, then a summary
+/// per device, then end-of-stream. The engine runs on a blocking thread
+/// and hands findings over a channel so the stream is written as they
+/// arise rather than at the end.
+async fn local_scrub(
+    node: &Arc<Node>,
+    id: u32,
+    writer: &mut Writer,
+    max_bytes_per_second: Option<u64>,
+) -> Result<(), Failure> {
+    use djbod_core::scrub::{scrub_device, ScrubOptions};
+    respond(writer, id, Ok(Response::LocalScrubStarted)).await?;
+    let options = ScrubOptions {
+        max_bytes_per_second,
+        temporary_max_age: std::time::Duration::from_secs(node.config().temporary_max_age_secs),
+    };
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubItem>(64);
+    let devices = node.devices();
+    let engine = tokio::task::spawn_blocking(move || -> Result<(), DeviceError> {
+        for device in devices {
+            let device_id = device.id();
+            let sender_for_findings = sender.clone();
+            let mut on_finding = |finding: &djbod_core::scrub::Finding| {
+                let _ = sender_for_findings.blocking_send(ScrubItem::Finding {
+                    device: device_id,
+                    finding: finding.clone(),
+                });
+            };
+            let summary = scrub_device(&device, &options, &mut on_finding)?;
+            let _ = sender.blocking_send(ScrubItem::Summary {
+                device: device_id,
+                summary,
+            });
+        }
+        Ok(())
+    });
+    let mut sequence: u64 = 0;
+    while let Some(item) = receiver.recv().await {
+        let bytes = djbod_proto::codec::encode_cbor(&item)
+            .map_err(|e| Failure::Error(ErrorDetail::new(ErrorCode::Internal, e.to_string())))?;
+        write_message(
+            writer,
+            &Message::Data {
+                id,
+                data: DataFrame {
+                    sequence,
+                    checksum: djbod_core::checksum::checksum_block(&bytes),
+                    bytes,
+                },
+            },
+        )
+        .await?;
+        sequence += 1;
+    }
+    let end = match engine.await {
+        Ok(Ok(())) => StreamEnd::ok(),
+        Ok(Err(e)) => StreamEnd::failed(device_error_detail(e)),
+        Err(join) => StreamEnd::failed(ErrorDetail::new(
+            ErrorCode::Internal,
+            format!("scrub task failed: {join}"),
+        )),
+    };
+    write_message(writer, &Message::EndOfStream { id, end }).await?;
+    Ok(())
 }

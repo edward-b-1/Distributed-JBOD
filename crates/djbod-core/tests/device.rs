@@ -335,6 +335,40 @@ fn a_dropped_or_aborted_shard_write_leaves_nothing_behind() {
 }
 
 #[test]
+fn two_writes_of_the_same_shard_never_share_a_temporary_file() {
+    // SPEC 20.1.2.1: even if two writers target the same final name, their
+    // temporaries differ, so neither can interleave into the other's file.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let device = new_device(dir.path());
+    let scheme = Scheme::new(1, 0).expect("scheme");
+    let header = ShardFileHeader {
+        scheme,
+        shard_index: ShardIndex(0),
+        block_length: BLOCK as u64,
+        key_hash: hash_key(b"k"),
+        version_id: VersionId([8u8; 16]),
+    };
+    let first = device
+        .begin_shard(&hash_key(b"k"), header.clone(), BLOCK as u64)
+        .expect("begin");
+    let second = device
+        .begin_shard(&hash_key(b"k"), header, BLOCK as u64)
+        .expect("begin");
+    assert_ne!(first.temporary_path(), second.temporary_path());
+    assert_eq!(first.final_path(), second.final_path());
+    assert!(first
+        .temporary_path()
+        .to_string_lossy()
+        .ends_with(TEMPORARY_SUFFIX));
+    first.abort();
+    assert!(
+        second.temporary_path().exists(),
+        "aborting one must not remove the other's file"
+    );
+    second.abort();
+}
+
+#[test]
 fn finishing_with_the_wrong_geometry_removes_the_temporary_file() {
     let dir = tempfile::tempdir().expect("failed to create temp dir");
     let device = new_device(dir.path());

@@ -1,10 +1,10 @@
 //! A node's state: its configuration, its devices, and its copy of the
 //! cluster document (SPEC 5, 6.2).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -15,7 +15,9 @@ use djbod_core::cluster::{
     NodeId,
 };
 use djbod_core::device::{Device, DeviceError};
+use djbod_core::keyhash::KeyHash;
 use djbod_core::record::DeviceId;
+use djbod_core::version::VersionId;
 
 use crate::config::NodeConfig;
 use crate::ulid::VersionGenerator;
@@ -78,6 +80,35 @@ pub struct Node {
     devices: Vec<Arc<Device>>,
     devices_by_id: HashMap<DeviceId, Arc<Device>>,
     versions: VersionGenerator,
+    /// Shard writes in progress on this node, so a second `PutShard` for
+    /// the same shard is refused rather than racing the first
+    /// (SPEC 20.1.2.1).
+    writes_in_flight: Mutex<HashSet<ShardWriteKey>>,
+}
+
+/// Identifies one shard file being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ShardWriteKey {
+    pub device: DeviceId,
+    pub key_hash: KeyHash,
+    pub version: VersionId,
+    pub shard_index: u8,
+}
+
+/// Held for the duration of a shard write; releases the slot on drop.
+pub struct ShardWriteGuard {
+    node: Arc<Node>,
+    key: ShardWriteKey,
+}
+
+impl Drop for ShardWriteGuard {
+    fn drop(&mut self) {
+        self.node
+            .writes_in_flight
+            .lock()
+            .expect("writes lock")
+            .remove(&self.key);
+    }
 }
 
 impl Node {
@@ -103,6 +134,19 @@ impl Node {
 
     pub fn versions(&self) -> &VersionGenerator {
         &self.versions
+    }
+
+    /// Claim a shard for writing. `None` if a write for the same shard on
+    /// the same device is already in progress.
+    pub fn begin_shard_write(self: &Arc<Self>, key: ShardWriteKey) -> Option<ShardWriteGuard> {
+        let mut in_flight = self.writes_in_flight.lock().expect("writes lock");
+        if !in_flight.insert(key) {
+            return None;
+        }
+        Some(ShardWriteGuard {
+            node: self.clone(),
+            key,
+        })
     }
 
     pub fn device(&self, id: DeviceId) -> Option<Arc<Device>> {
@@ -250,6 +294,7 @@ impl Node {
             devices: ordered,
             devices_by_id: by_id,
             versions: VersionGenerator::new(),
+            writes_in_flight: Mutex::new(HashSet::new()),
         })
     }
 
