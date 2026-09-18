@@ -338,8 +338,6 @@ plain `remove-node` (18.2.1), which spends no parity. Forcing a live node
 would rebuild from parity what could simply be copied, and would leave it
 serving under a document that no longer lists it.
 
-
-
 The forced path:
 
 1. **Show the cost first.** Using the reachable nodes' records, count the
