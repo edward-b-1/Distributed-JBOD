@@ -61,10 +61,20 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    // Logs go to standard error (SPEC 20.4.3); tracing-subscriber's own
+    // default is standard output. Colour and styling only when a person
+    // is watching; a log file or the journal gets plain text.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
     match cli.log_format {
-        LogFormat::Text => tracing_subscriber::fmt().with_env_filter(filter).init(),
+        LogFormat::Text => tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .with_ansi(ansi)
+            .with_env_filter(filter)
+            .init(),
         LogFormat::Json => tracing_subscriber::fmt()
             .json()
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
             .with_env_filter(filter)
             .init(),
     }
