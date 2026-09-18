@@ -289,12 +289,34 @@ impl Connection {
         chunk: usize,
         content_type: Option<String>,
     ) -> Result<djbod_core::version::VersionId, ClientError> {
+        self.put_object_with_metadata(
+            key,
+            size,
+            source,
+            chunk,
+            content_type,
+            std::collections::BTreeMap::new(),
+        )
+        .await
+    }
+
+    /// `put_object_from_reader` with the client-owned metadata map as
+    /// well, for copies that must preserve it (re-encoding, 18.9).
+    pub async fn put_object_with_metadata<R: AsyncRead + Unpin>(
+        &mut self,
+        key: &str,
+        size: u64,
+        source: &mut R,
+        chunk: usize,
+        content_type: Option<String>,
+        user_metadata: std::collections::BTreeMap<String, String>,
+    ) -> Result<djbod_core::version::VersionId, ClientError> {
         let id = self
             .send_request(Request::PutObject {
                 key: key.to_string(),
                 size,
                 content_type,
-                user_metadata: Default::default(),
+                user_metadata,
             })
             .await?;
         let chunk = chunk.max(1);
