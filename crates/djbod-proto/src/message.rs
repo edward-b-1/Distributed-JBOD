@@ -1,0 +1,445 @@
+//! Every message of the native protocol (SPEC 19.1.3), and how each maps
+//! onto a frame.
+//!
+//! A conversation is: one `Hello` each way, then any number of requests. A request is one `Request`
+//! frame. Its answer is one `Response` frame. Streaming operations add
+//! `Data` frames, each carrying a sequence number, a checksum, and raw
+//! bytes, and end with an `EndOfStream` frame carrying a status. All
+//! frames of one operation share the request id.
+//!
+//! Streams and who sends them:
+//!
+//! | operation   | after the request         | after the response        |
+//! |-------------|---------------------------|---------------------------|
+//! | PutObject   | client: body bytes        |                           |
+//! | GetObject   |                           | coordinator: body bytes   |
+//! | PutShard    | sender: blocks (on READY) |                           |
+//! | GetShard    |                           | holder: blocks            |
+//!
+//! Body streams are chunked at the coordinator's discretion; each chunk is
+//! checksummed like a block so the transport is checked end to end.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use uuid::Uuid;
+
+use djbod_core::checksum::BlockChecksum;
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
+use djbod_core::keyhash::KeyHash;
+use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::version::VersionId;
+
+use crate::codec::{decode_cbor, encode_cbor, CodecError};
+use crate::frame::{Frame, FrameError, MessageType};
+use crate::handshake::Hello;
+
+// ---------------------------------------------------------------- errors
+
+/// Machine-readable reason for a failure. The `ErrorDetail` around it
+/// carries what SPEC 16.2 requires for an administrator to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// A node in the cluster document did not respond.
+    NodeUnreachable,
+    /// A device needed for the request could not be reached or opened.
+    DeviceUnavailable,
+    /// A shard block failed its checksum.
+    BlockChecksumMismatch,
+    /// The whole-object checksum of a completed read did not match.
+    ObjectChecksumMismatch,
+    /// Record copies disagree, or fewer than k+m were found.
+    RecordsInconsistent,
+    /// The key in a record does not match the requested key.
+    KeyMismatch,
+    /// No object under this key.
+    NotFound,
+    /// Fewer than k+m eligible devices for a write.
+    InsufficientDevices,
+    /// A shard or record write failed and no replacement was found.
+    WriteFailed,
+    /// Peers hold different cluster document versions.
+    DocumentVersionMismatch,
+    /// Key exceeds the sanity limit.
+    KeyTooLong,
+    /// Object exceeds the maximum size.
+    ObjectTooLarge,
+    /// The request was malformed or out of sequence.
+    ProtocolViolation,
+    /// Handshake failed.
+    Unauthorised,
+    /// Anything else; the message says what.
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorDetail {
+    pub code: ErrorCode,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<VersionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_index: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stripe: Option<u64>,
+}
+
+impl ErrorDetail {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> ErrorDetail {
+        ErrorDetail {
+            code,
+            message: message.into(),
+            node: None,
+            device: None,
+            key: None,
+            version: None,
+            shard_index: None,
+            stripe: None,
+        }
+    }
+}
+
+// -------------------------------------------------------------- requests
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+// `PartialEq` only: the cluster document carries a float (headroom).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Request {
+    // ---- client to coordinator
+    Status,
+    /// Followed by a body stream of exactly `size` bytes.
+    PutObject {
+        key: String,
+        size: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        user_metadata: BTreeMap<String, String>,
+    },
+    GetObject {
+        key: String,
+    },
+    HeadObject {
+        key: String,
+    },
+    DeleteObject {
+        key: String,
+    },
+    ListKeys(ListQuery),
+
+    // ---- node to node
+    LocalStatus,
+    LocalLookup {
+        key_hash: KeyHash,
+    },
+    LocalList(ListQuery),
+    /// Answered with `PutShardReady`, then the sender streams blocks, then
+    /// the holder answers `PutShardDone`.
+    PutShard {
+        device: DeviceId,
+        key_hash: KeyHash,
+        version: VersionId,
+        shard_index: u8,
+        k: u8,
+        m: u8,
+        block_length: u64,
+        object_size: u64,
+    },
+    /// Answered with `GetShard`, then a block stream.
+    GetShard {
+        device: DeviceId,
+        key_hash: KeyHash,
+        version: VersionId,
+        shard_index: u8,
+        first_block: u64,
+        block_count: u64,
+    },
+    PutMeta {
+        device: DeviceId,
+        record: MetadataRecord,
+    },
+    GetMeta {
+        device: DeviceId,
+        key_hash: KeyHash,
+        version: VersionId,
+        /// Also report whether the shard file is present.
+        probe: bool,
+    },
+    DeleteVersion {
+        device: DeviceId,
+        key_hash: KeyHash,
+        version: VersionId,
+    },
+    AbortShard {
+        device: DeviceId,
+        key_hash: KeyHash,
+        version: VersionId,
+        shard_index: u8,
+    },
+    GetClusterConfig,
+    ApplyClusterConfig {
+        document: ClusterDocument,
+    },
+}
+
+// ------------------------------------------------------------- responses
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceStatus {
+    pub device: DeviceId,
+    pub node: NodeId,
+    pub state: DeviceState,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyEntry {
+    pub key: String,
+    pub size: u64,
+    pub version: VersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocatedRecord {
+    pub device: DeviceId,
+    pub record: MetadataRecord,
+}
+
+// `PartialEq` only: the cluster document carries a float (headroom).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Response {
+    Error(ErrorDetail),
+
+    // ---- client to coordinator
+    Status {
+        cluster_id: Uuid,
+        document_version: u64,
+        coordinator: NodeId,
+        devices: Vec<DeviceStatus>,
+    },
+    PutObject {
+        version: VersionId,
+    },
+    /// Followed by a body stream.
+    GetObject {
+        record: MetadataRecord,
+    },
+    HeadObject {
+        record: MetadataRecord,
+    },
+    DeleteObject,
+    ListKeys {
+        keys: Vec<KeyEntry>,
+        truncated: bool,
+    },
+
+    // ---- node to node
+    LocalStatus {
+        node: NodeId,
+        document_version: u64,
+        devices: Vec<DeviceStatus>,
+    },
+    LocalLookup {
+        records: Vec<LocatedRecord>,
+    },
+    LocalList {
+        entries: Vec<KeyEntry>,
+    },
+    /// The holder has created and reserved the file; send blocks.
+    PutShardReady,
+    /// The holder has fsynced and renamed the file.
+    PutShardDone,
+    /// Followed by a block stream.
+    GetShard {
+        block_count: u64,
+    },
+    PutMeta,
+    GetMeta {
+        record: Option<MetadataRecord>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shard_present: Option<bool>,
+    },
+    DeleteVersion,
+    AbortShard,
+    GetClusterConfig {
+        document: ClusterDocument,
+    },
+    ApplyClusterConfig,
+}
+
+// --------------------------------------------------------------- streams
+
+/// One chunk of a stream. On the wire: sequence (u64), checksum (u64),
+/// then the bytes. For shard streams the sequence is the stripe number
+/// (SPEC 10.8); for body streams it counts chunks from zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataFrame {
+    pub sequence: u64,
+    pub checksum: BlockChecksum,
+    pub bytes: Vec<u8>,
+}
+
+pub const DATA_PREFIX_LEN: usize = 16;
+
+impl DataFrame {
+    pub fn encode_payload(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(DATA_PREFIX_LEN + self.bytes.len());
+        out.extend_from_slice(&self.sequence.to_le_bytes());
+        out.extend_from_slice(&self.checksum.0.to_le_bytes());
+        out.extend_from_slice(&self.bytes);
+        out
+    }
+
+    pub fn decode_payload(payload: &[u8]) -> Result<DataFrame, MessageError> {
+        if payload.len() < DATA_PREFIX_LEN {
+            return Err(MessageError::DataFrameTooShort(payload.len()));
+        }
+        let mut sequence = [0u8; 8];
+        sequence.copy_from_slice(&payload[0..8]);
+        let mut checksum = [0u8; 8];
+        checksum.copy_from_slice(&payload[8..16]);
+        Ok(DataFrame {
+            sequence: u64::from_le_bytes(sequence),
+            checksum: BlockChecksum(u64::from_le_bytes(checksum)),
+            bytes: payload[DATA_PREFIX_LEN..].to_vec(),
+        })
+    }
+}
+
+/// Terminates a stream. `error` is `None` on success. For `PutShard` the
+/// sender supplies the object size and checksum here so the holder can
+/// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
+/// coordinator reports the whole-object verification here (11.7), which
+/// is why a client must read this frame before trusting the body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamEnd {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ErrorDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_checksum: Option<BlockChecksum>,
+}
+
+impl StreamEnd {
+    pub fn ok() -> StreamEnd {
+        StreamEnd {
+            error: None,
+            object_size: None,
+            object_checksum: None,
+        }
+    }
+
+    pub fn failed(error: ErrorDetail) -> StreamEnd {
+        StreamEnd {
+            error: Some(error),
+            object_size: None,
+            object_checksum: None,
+        }
+    }
+}
+
+// --------------------------------------------------------------- message
+
+/// A decoded frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Message {
+    Hello(Hello),
+    Request { id: u32, request: Request },
+    Response { id: u32, response: Response },
+    Data { id: u32, data: DataFrame },
+    EndOfStream { id: u32, end: StreamEnd },
+}
+
+#[derive(Debug, Error)]
+pub enum MessageError {
+    #[error(transparent)]
+    Frame(#[from] FrameError),
+    #[error(transparent)]
+    Codec(#[from] CodecError),
+    #[error("data frame payload of {0} bytes is shorter than its 16-byte prefix")]
+    DataFrameTooShort(usize),
+}
+
+impl Message {
+    pub fn request_id(&self) -> Option<u32> {
+        match self {
+            Message::Hello(_) => None,
+            Message::Request { id, .. }
+            | Message::Response { id, .. }
+            | Message::Data { id, .. }
+            | Message::EndOfStream { id, .. } => Some(*id),
+        }
+    }
+
+    pub fn to_frame(&self) -> Result<Frame, MessageError> {
+        let frame = match self {
+            Message::Hello(hello) => Frame::new(MessageType::Hello, 0, encode_cbor(hello)?),
+            Message::Request { id, request } => {
+                Frame::new(MessageType::Request, *id, encode_cbor(request)?)
+            }
+            Message::Response { id, response } => {
+                Frame::new(MessageType::Response, *id, encode_cbor(response)?)
+            }
+            Message::Data { id, data } => Frame::new(MessageType::Data, *id, data.encode_payload()),
+            Message::EndOfStream { id, end } => {
+                Frame::new(MessageType::EndOfStream, *id, encode_cbor(end)?)
+            }
+        };
+        Ok(frame)
+    }
+
+    pub fn from_frame(frame: &Frame) -> Result<Message, MessageError> {
+        let id = frame.header.request_id;
+        let message = match frame.header.message_type {
+            MessageType::Hello => Message::Hello(decode_cbor(&frame.payload)?),
+            MessageType::Request => Message::Request {
+                id,
+                request: decode_cbor(&frame.payload)?,
+            },
+            MessageType::Response => Message::Response {
+                id,
+                response: decode_cbor(&frame.payload)?,
+            },
+            MessageType::Data => Message::Data {
+                id,
+                data: DataFrame::decode_payload(&frame.payload)?,
+            },
+            MessageType::EndOfStream => Message::EndOfStream {
+                id,
+                end: decode_cbor(&frame.payload)?,
+            },
+        };
+        Ok(message)
+    }
+
+    /// Encode to wire bytes.
+    pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        Ok(self.to_frame()?.encode())
+    }
+
+    /// Decode one message from the front of `bytes`, returning it and the
+    /// number of bytes consumed.
+    pub fn decode(bytes: &[u8]) -> Result<(Message, usize), MessageError> {
+        let (frame, consumed) = Frame::decode(bytes)?;
+        Ok((Message::from_frame(&frame)?, consumed))
+    }
+}

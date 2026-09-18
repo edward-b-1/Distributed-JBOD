@@ -21,11 +21,13 @@
 //!   JSON on every device that holds a shard of it (SPEC 9.4).
 //! - [`layout`]: the directory and file names under a device root
 //!   (SPEC 9.1).
+//! - [`cluster`]: the cluster-wide document every node holds (SPEC 6.2).
 //! - [`device`]: one device on disk: identity file, atomic writes of shard
 //!   files and records, reads, deletes, free space, and cleanup of
 //!   temporaries (SPEC 5, 9.3.3, 9.4.3, 10.6, 10.11).
 
 pub mod checksum;
+pub mod cluster;
 pub mod device;
 pub mod erasure;
 pub mod keyhash;
