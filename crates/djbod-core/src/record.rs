@@ -8,15 +8,10 @@
 //! tool needs no cluster configuration and the global values can change
 //! without making old objects unreadable.
 //!
-//! On disk the record is wrapped with a checksum of itself (9.4.5):
-//!
-//! ```json
-//! { "record": { ...the fields below... }, "checksum": "16 hex characters" }
-//! ```
-//!
-//! The checksum is XXH3-64 over the record's *canonical* form, not over
-//! the file's bytes, so the file may be pretty-printed and its keys may be
-//! in any order. Canonical form: JSON with object keys sorted bytewise, no
+//! On disk the record carries a `checksum` field beside its other fields
+//! (9.4.5). The checksum is XXH3-64 over the *canonical* form of the record
+//! without that field, not over the file's bytes, so the file may be
+//! pretty-printed and its keys may be in any order. Canonical form: JSON with object keys sorted bytewise, no
 //! whitespace, integers in decimal, strings with JSON's minimal escaping,
 //! optional fields omitted when absent. Modelled on the JSON
 //! Canonicalization Scheme (RFC 8785) for the value types used here, which
@@ -112,12 +107,9 @@ pub enum RecordError {
     DuplicateDevice(DeviceId),
 }
 
-/// The on-disk form: the record and a checksum of its canonical form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredRecord {
-    record: MetadataRecord,
-    checksum: BlockChecksum,
-}
+/// The name of the on-disk field holding the record checksum. It is not
+/// a field of `MetadataRecord`: it describes the file, not the version.
+pub const CHECKSUM_FIELD: &str = "checksum";
 
 /// Write a JSON value in canonical form: keys sorted bytewise, no
 /// whitespace. Numbers and strings are written as serde_json writes them,
@@ -168,28 +160,55 @@ impl MetadataRecord {
     }
 
     /// Serialize the on-disk form as indented JSON, for humans as much as
-    /// for machines. The checksum is computed here.
+    /// for machines: the record's fields plus a `checksum` field computed
+    /// here over the rest.
     pub fn to_json(&self) -> String {
-        let stored = StoredRecord {
-            record: self.clone(),
-            checksum: self.checksum(),
-        };
-        serde_json::to_string_pretty(&stored).expect("a metadata record always serializes")
+        // Serialize the struct directly so the file keeps the field order
+        // declared above (going through a JSON value would sort the keys),
+        // then append the checksum as the last field.
+        let mut json =
+            serde_json::to_string_pretty(self).expect("a metadata record always serializes");
+        let closing_brace = json
+            .trim_end()
+            .strip_suffix('}')
+            .expect("a struct serializes to an object")
+            .len();
+        json.truncate(closing_brace);
+        json.push_str(&format!(
+            ",\n  \"{CHECKSUM_FIELD}\": \"{}\"\n}}",
+            self.checksum().to_hex()
+        ));
+        json
     }
 
     /// Parse the on-disk form, verify its checksum, and validate.
     pub fn from_json(json: &str) -> Result<MetadataRecord, RecordError> {
-        let stored: StoredRecord =
+        let mut value: serde_json::Value =
             serde_json::from_str(json).map_err(|e| RecordError::Json(e.to_string()))?;
-        let computed = stored.record.checksum();
-        if computed != stored.checksum {
-            return Err(RecordError::ChecksumMismatch {
-                stored: stored.checksum,
-                computed,
-            });
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| RecordError::Json("record is not a JSON object".to_string()))?;
+        let stored = match fields.remove(CHECKSUM_FIELD) {
+            Some(serde_json::Value::String(hex)) => {
+                BlockChecksum::from_hex(&hex).ok_or_else(|| {
+                    RecordError::Json(format!("checksum {hex:?} is not 16 hex characters"))
+                })?
+            }
+            Some(_) => return Err(RecordError::Json("checksum is not a string".to_string())),
+            None => {
+                return Err(RecordError::Json(
+                    "record has no checksum field".to_string(),
+                ))
+            }
+        };
+        let record: MetadataRecord =
+            serde_json::from_value(value).map_err(|e| RecordError::Json(e.to_string()))?;
+        let computed = record.checksum();
+        if computed != stored {
+            return Err(RecordError::ChecksumMismatch { stored, computed });
         }
-        stored.record.validate()?;
-        Ok(stored.record)
+        record.validate()?;
+        Ok(record)
     }
 
     /// Check the invariants a record must satisfy regardless of where it

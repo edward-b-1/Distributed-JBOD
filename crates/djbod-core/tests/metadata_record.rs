@@ -70,12 +70,20 @@ fn json_round_trips_exactly() {
 #[test]
 fn json_is_readable_and_uses_the_specified_text_forms() {
     let json = sample_record().to_json();
-    // Wrapped with its checksum, indented for humans.
-    assert!(json.starts_with("{\n  \"record\": {"));
-    assert!(json.contains(&format!(
-        "\"checksum\": \"{}\"",
+    // Flat: fields in declaration order, indented for humans, and the
+    // checksum as the last field.
+    assert!(json.starts_with("{\n  \"format_version\": 1,\n  \"system\": \"distributed-jbod\","));
+    assert!(json.ends_with(&format!(
+        ",\n  \"checksum\": \"{}\"\n}}",
         sample_record().checksum().to_hex()
     )));
+    // And it is still valid JSON that round-trips.
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+    let record_fields = serde_json::to_value(sample_record()).expect("serialize");
+    assert_eq!(
+        value.as_object().expect("object").len(),
+        record_fields.as_object().expect("object").len() + 1
+    );
     // Field names and text forms a human would grep for on a disk.
     assert!(json.contains("\"system\": \"distributed-jbod\""));
     assert!(json.contains("\"key\": \"photos/2026/cat.jpg\""));
@@ -269,24 +277,22 @@ fn checksum_ignores_whitespace_and_key_order_but_not_content() {
         record
     );
 
-    // Nor does reordering keys: rebuild the record object with keys reversed.
-    let mut reordered = String::from("{\"checksum\": ");
-    reordered.push_str(&serde_json::to_string(&value["checksum"]).expect("serialize"));
-    reordered.push_str(", \"record\": {");
-    let record_map = value["record"].as_object().expect("record is an object");
-    let mut keys: Vec<&String> = record_map.keys().collect();
+    // Nor does reordering keys: rebuild the object with keys reversed.
+    let fields = value.as_object().expect("record is an object");
+    let mut keys: Vec<&String> = fields.keys().collect();
     keys.sort();
     keys.reverse();
+    let mut reordered = String::from("{");
     for (i, key) in keys.iter().enumerate() {
         if i > 0 {
             reordered.push(',');
         }
         reordered.push_str(&format!(
             "\"{key}\": {}",
-            serde_json::to_string(&record_map[*key]).expect("serialize")
+            serde_json::to_string(&fields[*key]).expect("serialize")
         ));
     }
-    reordered.push_str("}}");
+    reordered.push('}');
     assert_eq!(
         MetadataRecord::from_json(&reordered).expect("reordered parses"),
         record
@@ -310,8 +316,10 @@ fn checksum_ignores_whitespace_and_key_order_but_not_content() {
         Err(RecordError::ChecksumMismatch { .. })
     ));
 
-    // A record without the wrapper is not accepted.
-    let bare = serde_json::to_string(&value["record"]).expect("serialize");
+    // A record without a checksum field is not accepted.
+    let mut without = value.clone();
+    without.as_object_mut().expect("object").remove("checksum");
+    let bare = serde_json::to_string(&without).expect("serialize");
     assert!(matches!(
         MetadataRecord::from_json(&bare),
         Err(RecordError::Json(_))

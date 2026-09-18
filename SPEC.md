@@ -586,7 +586,7 @@ devices are not included; placement lives only in the record.
 ### 9.4 Metadata record
 
 9.4.1 [D] One record per version, in a human-readable format (JSON),
-stored on every device holding a shard of that version, wrapped with a
+stored on every device holding a shard of that version, carrying a
 checksum of itself (9.4.5).
 
 9.4.2 [P] Fields:
@@ -608,6 +608,8 @@ shards              array of { index, device }, exactly k+m entries, one per
 content_type        string, optional
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer
+checksum            16 hex characters, over the other fields (9.4.5);
+                    a property of the file, not of the version
 ```
 
 9.4.2.1 [P] The shard list names devices only, not nodes. A device's
@@ -621,9 +623,9 @@ scheme must be valid and the block size a positive multiple of 4096; the
 shard list must contain every index `0 .. k+m-1` exactly once on distinct
 devices. A record failing any check is treated as corrupt (16.1).
 
-9.4.5 [D] **Record checksum.** The file holds
-`{ "record": { ... }, "checksum": "<16 hex>" }`, where the checksum is
-XXH3-64 over the record's canonical form: JSON with object keys sorted
+9.4.5 [D] **Record checksum.** The file holds the record's fields plus one
+more top-level field, `checksum`, 16 hex characters: XXH3-64 over the
+canonical form of the record with that field removed: JSON with object keys sorted
 bytewise, no whitespace, integers in decimal, strings with JSON's minimal
 escaping, and absent optional fields omitted, modelled on the JSON
 Canonicalization Scheme (RFC 8785) for the value types a record uses,
