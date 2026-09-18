@@ -265,6 +265,10 @@ pub struct RepairReport {
     pub key: String,
     pub version: VersionId,
     pub shards: Vec<ShardRepair>,
+    /// Devices whose copy of the metadata record was missing and has
+    /// been rewritten from the agreeing copies (SPEC 18.4.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_copies_rewritten: Vec<DeviceId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

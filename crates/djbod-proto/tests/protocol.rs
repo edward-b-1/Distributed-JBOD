@@ -465,6 +465,7 @@ fn every_response_round_trips() {
                     rewritten: true,
                 },
             ],
+            record_copies_rewritten: vec![device(3)],
         }),
         Response::LocalStatus {
             node: node(1),

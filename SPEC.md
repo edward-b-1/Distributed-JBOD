@@ -1025,6 +1025,16 @@ response reports every shard's condition and whether it was rewritten.
 Rewriting to a different device (18.3 after device loss) waits on the
 drain and re-placement machinery of milestone 4.
 
+18.4.2 [D] **Missing record copies.** Reads require all k+m record copies
+to be present and to agree (9.4.4). Repair is the one operation allowed
+to proceed with fewer: if the copies that exist agree with one another,
+each comes from a device the record lists, and there are at least k of
+them, the record is trusted, the shards are repaired as above, and then
+the record is written to every listed device whose copy was missing. Two
+disagreeing copies, or fewer than k, are refused. Shards are rewritten
+before record copies, so a crash between the two leaves a shard without a
+record, which the scrub reports and a later repair completes.
+
 18.5 [P] Finding the versions that reference a device is a scan of all
 metadata records on all devices, run as a background job.
 

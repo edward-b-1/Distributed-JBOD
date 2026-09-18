@@ -613,49 +613,44 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
         "{cluster:?}"
     );
 
-    // With repair: obj-0 and obj-1 are rebuilt; obj-2 cannot be, because
-    // its record copies are incomplete and repair needs a consistent record.
+    // With repair: all three are rebuilt. obj-2's missing record copy is
+    // rewritten from the three agreeing copies (18.4.2) along with its
+    // shard.
     let (events, end) = run_scrub(&mut client, true).await;
-    let repaired: Vec<&str> = events
+    assert!(end.error.is_none(), "{end:?}");
+    let repaired: Vec<(&str, &djbod_proto::message::RepairReport)> = events
         .iter()
         .filter_map(|e| match e {
-            ScrubEvent::Repaired { key, .. } => Some(key.as_str()),
+            ScrubEvent::Repaired { key, report } => Some((key.as_str(), report)),
             _ => None,
         })
         .collect();
-    assert_eq!(repaired, vec!["obj-0", "obj-1"]);
-    let failed: Vec<&str> = events
+    let keys: Vec<&str> = repaired.iter().map(|(k, _)| *k).collect();
+    assert_eq!(keys, vec!["obj-0", "obj-1", "obj-2"]);
+    let obj2 = repaired
         .iter()
-        .filter_map(|e| match e {
-            ScrubEvent::RepairFailed { key, .. } => Some(key.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(failed, vec!["obj-2"]);
-    assert!(
-        end.error.is_some(),
-        "a failed repair is reported in the end status"
-    );
-    for key in ["obj-0", "obj-1"] {
+        .find(|(k, _)| *k == "obj-2")
+        .expect("obj-2")
+        .1;
+    assert_eq!(obj2.record_copies_rewritten, vec![device3]);
+    assert_eq!(obj2.shards.iter().filter(|s| s.rewritten).count(), 1);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, ScrubEvent::RepairFailed { .. })));
+    for key in ["obj-0", "obj-1", "obj-2"] {
         let mut c = c.client().await;
         c.get_object(key).await.expect("reads after repair");
     }
 
-    // A second scrub shows only obj-2 outstanding.
-    let (events, _) = run_scrub(&mut client, false).await;
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, ScrubEvent::NodeFinding { .. })));
-    let remaining: Vec<&ClusterFinding> = events
-        .iter()
-        .filter_map(|e| match e {
-            ScrubEvent::ClusterFinding(f) => Some(f),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(remaining.len(), 1);
+    // A second scrub is clean.
+    let (events, end) = run_scrub(&mut client, false).await;
+    assert!(end.error.is_none(), "{end:?}");
     assert!(
-        matches!(remaining[0], ClusterFinding::RecordsInconsistent { key, .. } if key == "obj-2")
+        !events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_)
+        )),
+        "{events:?}"
     );
 }
 

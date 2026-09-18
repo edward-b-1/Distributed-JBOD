@@ -681,3 +681,80 @@ async fn repair_of_a_missing_key_and_an_empty_object() {
     assert_eq!(report.shards.len(), 2);
     assert!(report.shards.iter().all(|s| !s.rewritten));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_remain() {
+    let test = start_node(4, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize, 31);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record } => record,
+        other => panic!("{other:?}"),
+    };
+    let record_path = |device: DeviceId| {
+        test.node
+            .device(device)
+            .expect("device")
+            .object_directory(&hash_key(b"k"))
+            .join(djbod_core::layout::record_file_name(&record.version))
+    };
+
+    // Delete one record copy: reads refuse (9.4.4), repair rewrites it.
+    let victim = record.shards[1].device;
+    let before = std::fs::read(record_path(victim)).expect("read");
+    std::fs::remove_file(record_path(victim)).expect("remove");
+    match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::RecordsInconsistent)
+        }
+        other => panic!("expected RecordsInconsistent, got {other:?}"),
+    }
+    let report = repair(&mut client, "k").await;
+    assert_eq!(report.record_copies_rewritten, vec![victim]);
+    assert!(
+        report.shards.iter().all(|s| !s.rewritten),
+        "shards were intact"
+    );
+    assert_eq!(std::fs::read(record_path(victim)).expect("read"), before);
+    client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head after repair");
+
+    // Delete two of four: only two remain, fewer than k = 3; repair refuses.
+    std::fs::remove_file(record_path(record.shards[0].device)).expect("remove");
+    std::fs::remove_file(record_path(record.shards[2].device)).expect("remove");
+    match client
+        .request(Request::RepairObject {
+            key: "k".to_string(),
+        })
+        .await
+    {
+        Err(ClientError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
+            assert!(
+                detail.message.contains("fewer than k"),
+                "{}",
+                detail.message
+            );
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+}

@@ -1238,8 +1238,135 @@ struct RepairSource {
 /// replacing the old file only once the whole object has verified against
 /// the record's checksum. Fail-stop: an unreachable holder or more than m
 /// damaged shards is an error and nothing is changed.
+/// The newest version of `key` as repair needs it: the record copies
+/// that exist must agree and there must be at least k of them, but they
+/// need not be all k+m. Returns the record and the devices whose copy is
+/// missing (SPEC 18.4.2). Reads keep the strict rule (9.4.4); repair is
+/// the one operation allowed to see an incomplete set, because it exists
+/// to complete it.
+async fn repairable_record(
+    node: &Arc<Node>,
+    key: &str,
+) -> Result<(MetadataRecord, Vec<DeviceId>), Failure> {
+    check_key(key)?;
+    let located = lookup(node, hash_key(key.as_bytes())).await?;
+    let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
+    for item in located {
+        by_version
+            .entry(item.record.version)
+            .or_default()
+            .push(item);
+    }
+    let Some((version, copies)) = by_version.into_iter().next_back() else {
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(key.to_string()),
+            ..ErrorDetail::new(ErrorCode::NotFound, format!("no object under key {key:?}"))
+        }));
+    };
+    let first = copies[0].record.clone();
+    if first.key != key {
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(key.to_string()),
+            version: Some(version),
+            ..ErrorDetail::new(
+                ErrorCode::KeyMismatch,
+                format!(
+                    "record under this key hash names key {:?}, not {key:?}",
+                    first.key
+                ),
+            )
+        }));
+    }
+    for copy in &copies {
+        if copy.record != first {
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                version: Some(version),
+                device: Some(copy.device),
+                ..ErrorDetail::new(
+                    ErrorCode::RecordsInconsistent,
+                    "record copies disagree; repair cannot choose between them".to_string(),
+                )
+            }));
+        }
+        if first.shard_on(copy.device).is_none() {
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                version: Some(version),
+                device: Some(copy.device),
+                ..ErrorDetail::new(
+                    ErrorCode::RecordsInconsistent,
+                    "a record copy was found on a device the record does not list".to_string(),
+                )
+            }));
+        }
+    }
+    if copies.len() < first.k as usize {
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(key.to_string()),
+            version: Some(version),
+            ..ErrorDetail::new(
+                ErrorCode::RecordsInconsistent,
+                format!(
+                    "only {} record copies remain of {}; fewer than k = {} cannot be trusted",
+                    copies.len(),
+                    first.shards.len(),
+                    first.k
+                ),
+            )
+        }));
+    }
+    let missing: Vec<DeviceId> = first
+        .shards
+        .iter()
+        .map(|s| s.device)
+        .filter(|d| !copies.iter().any(|c| c.device == *d))
+        .collect();
+    Ok((first, missing))
+}
+
+/// Write the record to every device in `missing` (18.4.2).
+async fn rewrite_record_copies(
+    node: &Arc<Node>,
+    record: &MetadataRecord,
+    missing: &[DeviceId],
+) -> Result<(), Failure> {
+    let document = node.document();
+    for device in missing {
+        let owner = document.device(*device).map(|d| d.node).ok_or_else(|| {
+            Failure::Error(ErrorDetail {
+                device: Some(*device),
+                key: Some(record.key.clone()),
+                version: Some(record.version),
+                ..ErrorDetail::new(
+                    ErrorCode::DeviceUnavailable,
+                    format!("{device} is not in the cluster document"),
+                )
+            })
+        })?;
+        let mut connection = connect_to(node, owner).await?;
+        match connection
+            .request(Request::PutMeta {
+                device: *device,
+                record: record.clone(),
+            })
+            .await
+        {
+            Ok(Response::PutMeta) => {}
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{owner} answered PutMeta with {other:?}"),
+                ))
+            }
+            Err(e) => return Err(remote_failure(owner, e)),
+        }
+    }
+    Ok(())
+}
+
 async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
-    let record = newest_version(node, key).await?;
+    let (record, missing_record_copies) = repairable_record(node, key).await?;
     let scheme = record
         .scheme()
         .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
@@ -1247,6 +1374,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
 
     let mut shards: Vec<ShardRepair> = Vec::with_capacity(scheme.total_shards());
     if record.size == 0 {
+        rewrite_record_copies(node, &record, &missing_record_copies).await?;
         for shard in &record.shards {
             shards.push(ShardRepair {
                 index: shard.index,
@@ -1259,6 +1387,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
             key: key.to_string(),
             version: record.version,
             shards,
+            record_copies_rewritten: missing_record_copies,
         }));
     }
     let geometry = shard_geometry(scheme, record.block_size, record.size).ok_or_else(|| {
@@ -1406,6 +1535,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         .map(|(i, _)| i)
         .collect();
     if damaged.is_empty() {
+        rewrite_record_copies(node, &record, &missing_record_copies).await?;
         return Ok(Response::RepairObject(RepairReport {
             key: key.to_string(),
             version: record.version,
@@ -1418,6 +1548,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                     rewritten: false,
                 })
                 .collect(),
+            record_copies_rewritten: missing_record_copies,
         }));
     }
 
@@ -1520,6 +1651,11 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         }
     }
 
+    // Shards first, record copies second: a crash between the two leaves a
+    // shard without a record, which the scrub reports and a later repair
+    // completes.
+    rewrite_record_copies(node, &record, &missing_record_copies).await?;
+
     let rewritten: Vec<ShardIndex> = writers.iter().map(|w| w.index).collect();
     Ok(Response::RepairObject(RepairReport {
         key: key.to_string(),
@@ -1533,6 +1669,7 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                 rewritten: rewritten.contains(&s.index),
             })
             .collect(),
+        record_copies_rewritten: missing_record_copies,
     }))
 }
 
