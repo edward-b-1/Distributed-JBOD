@@ -7,6 +7,15 @@
 //! encoding parameters the version was written with (6.3), so a recovery
 //! tool needs no cluster configuration and the global values can change
 //! without making old objects unreadable.
+//!
+//! On disk the record carries a `checksum` field beside its other fields
+//! (9.4.5). The checksum is XXH3-64 over the *canonical* form of the record
+//! without that field, not over the file's bytes, so the file may be
+//! pretty-printed and its keys may be in any order. Canonical form: JSON with object keys sorted bytewise, no
+//! whitespace, integers in decimal, strings with JSON's minimal escaping,
+//! optional fields omitted when absent. Modelled on the JSON
+//! Canonicalization Scheme (RFC 8785) for the value types used here, which
+//! exclude floats.
 
 use std::collections::BTreeMap;
 
@@ -15,7 +24,7 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::checksum::BlockChecksum;
+use crate::checksum::{checksum_block, BlockChecksum};
 use crate::erasure::{Scheme, SchemeError, ShardIndex};
 use crate::keyhash::{hash_key, KeyHash};
 use crate::version::VersionId;
@@ -71,6 +80,13 @@ pub struct MetadataRecord {
 pub enum RecordError {
     #[error("not valid JSON or not a metadata record: {0}")]
     Json(String),
+    #[error(
+        "record checksum {stored:?} does not match its contents, which checksum to {computed:?}"
+    )]
+    ChecksumMismatch {
+        stored: BlockChecksum,
+        computed: BlockChecksum,
+    },
     #[error("system field is {0:?}, not {SYSTEM_NAME:?}")]
     WrongSystem(String),
     #[error("unsupported record format version {0}")]
@@ -91,16 +107,106 @@ pub enum RecordError {
     DuplicateDevice(DeviceId),
 }
 
+/// The name of the on-disk field holding the record checksum. It is not
+/// a field of `MetadataRecord`: it describes the file, not the version.
+pub const CHECKSUM_FIELD: &str = "checksum";
+
+/// Write a JSON value in canonical form: keys sorted bytewise, no
+/// whitespace. Numbers and strings are written as serde_json writes them,
+/// which for the integers and strings in a record is the canonical
+/// spelling.
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, key) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).expect("a string always serializes"));
+                out.push(':');
+                write_canonical(&map[*key], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        other => out.push_str(&other.to_string()),
+    }
+}
+
 impl MetadataRecord {
-    /// Serialize as indented JSON, for humans as much as for machines.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string_pretty(self).expect("a metadata record always serializes")
+    /// The canonical form the record checksum covers (9.4.5).
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let value = serde_json::to_value(self).expect("a metadata record always serializes");
+        let mut out = String::new();
+        write_canonical(&value, &mut out);
+        out.into_bytes()
     }
 
-    /// Parse and validate.
+    /// XXH3-64 over the canonical form.
+    pub fn checksum(&self) -> BlockChecksum {
+        checksum_block(&self.canonical_bytes())
+    }
+
+    /// Serialize the on-disk form as indented JSON, for humans as much as
+    /// for machines: the record's fields plus a `checksum` field computed
+    /// here over the rest.
+    pub fn to_json(&self) -> String {
+        // Serialize the struct directly so the file keeps the field order
+        // declared above (going through a JSON value would sort the keys),
+        // then append the checksum as the last field.
+        let mut json =
+            serde_json::to_string_pretty(self).expect("a metadata record always serializes");
+        let closing_brace = json
+            .trim_end()
+            .strip_suffix('}')
+            .expect("a struct serializes to an object")
+            .len();
+        json.truncate(closing_brace);
+        json.push_str(&format!(
+            ",\n  \"{CHECKSUM_FIELD}\": \"{}\"\n}}",
+            self.checksum().to_hex()
+        ));
+        json
+    }
+
+    /// Parse the on-disk form, verify its checksum, and validate.
     pub fn from_json(json: &str) -> Result<MetadataRecord, RecordError> {
-        let record: MetadataRecord =
+        let mut value: serde_json::Value =
             serde_json::from_str(json).map_err(|e| RecordError::Json(e.to_string()))?;
+        let fields = value
+            .as_object_mut()
+            .ok_or_else(|| RecordError::Json("record is not a JSON object".to_string()))?;
+        let stored = match fields.remove(CHECKSUM_FIELD) {
+            Some(serde_json::Value::String(hex)) => {
+                BlockChecksum::from_hex(&hex).ok_or_else(|| {
+                    RecordError::Json(format!("checksum {hex:?} is not 16 hex characters"))
+                })?
+            }
+            Some(_) => return Err(RecordError::Json("checksum is not a string".to_string())),
+            None => {
+                return Err(RecordError::Json(
+                    "record has no checksum field".to_string(),
+                ))
+            }
+        };
+        let record: MetadataRecord =
+            serde_json::from_value(value).map_err(|e| RecordError::Json(e.to_string()))?;
+        let computed = record.checksum();
+        if computed != stored {
+            return Err(RecordError::ChecksumMismatch { stored, computed });
+        }
         record.validate()?;
         Ok(record)
     }
