@@ -412,3 +412,53 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
     let reopened = Node::open(config).expect("reopen with the new device");
     assert_eq!(reopened.devices().len(), 2);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn documents_that_differ_at_the_same_version_stop_proposals_and_sync() {
+    let a = first_node(1, 1, 1).await;
+    let b = joined_node(1, &a).await;
+    // Corrupt the invariant by hand: give b a different document with
+    // the same version number.
+    let mut forged = b.node.document();
+    forged.version += 1;
+    forged.headroom = 0.45;
+    b.node
+        .apply_document(forged.clone())
+        .expect("apply forged to b");
+    let mut other = a.node.document();
+    other.version += 1;
+    other.headroom = 0.05;
+    a.node
+        .apply_document(other.clone())
+        .expect("apply other to a");
+    assert_eq!(a.node.document_version(), b.node.document_version());
+    assert_ne!(a.node.document(), b.node.document());
+
+    let mut next = other.clone();
+    next.version += 1;
+    assert!(matches!(
+        membership::propose(&other, &next).await,
+        Err(membership::MembershipError::Diverged { .. })
+    ));
+    assert!(matches!(
+        membership::sync(a.addr, a.node.cluster_id()).await,
+        Err(membership::MembershipError::Diverged { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_retried_after_a_partial_apply_completes_without_a_new_version() {
+    let a = first_node(1, 1, 1).await;
+    let (_listener, addr) = reserve_port().await;
+    let (config, _dirs, _state) = make_config(1, addr, vec![]);
+    let first = membership::join(&config, a.addr, a.node.cluster_id())
+        .await
+        .expect("join");
+    assert_eq!(first.version, 2);
+    // Joining again with the same configuration proposes nothing.
+    let again = membership::join(&config, a.addr, a.node.cluster_id())
+        .await
+        .expect("join again");
+    assert_eq!(again.version, 2);
+    assert_eq!(a.node.document_version(), 2);
+}

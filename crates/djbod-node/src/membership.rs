@@ -45,6 +45,10 @@ pub enum MembershipError {
     },
     #[error("nodes hold different document versions: {0:?}; run `djbod cluster sync` first")]
     VersionsDiffer(Vec<(NodeId, u64)>),
+    #[error(
+        "{a} and {b} both hold document version {version} but the documents differ; this should be impossible and needs an administrator: compare the two cluster.json files"
+    )]
+    Diverged { version: u64, a: NodeId, b: NodeId },
     #[error("nodes hold version {found}, not the version {expected} the proposal was built from")]
     StaleProposal { expected: u64, found: u64 },
     #[error(
@@ -165,9 +169,13 @@ pub async fn propose(
     next.validate().map_err(NodeError::from)?;
     // Step 1: check.
     let mut versions = Vec::new();
+    let mut documents: Vec<(NodeId, ClusterDocument)> = Vec::new();
     for report in fetch_all(current).await {
         match report.result {
-            Ok(document) => versions.push((report.node, document.version)),
+            Ok(document) => {
+                versions.push((report.node, document.version));
+                documents.push((report.node, document));
+            }
             Err(reason) => {
                 return Err(MembershipError::Unreachable {
                     node: report.node,
@@ -186,6 +194,10 @@ pub async fn propose(
         }
         return Err(MembershipError::VersionsDiffer(versions));
     }
+    // Same version everywhere must mean the same document everywhere
+    // (6.2.6.1). Anything else is a bug or a hand-edited file, and no
+    // automatic step is safe.
+    check_same_content(&documents)?;
     // Step 2: apply in document order.
     let mut applied = Vec::new();
     for (position, entry) in current.nodes.iter().enumerate() {
@@ -205,6 +217,22 @@ pub async fn propose(
                     failed: entry.id,
                     reason,
                 })
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Two nodes holding the same version must hold the same document.
+fn check_same_content(documents: &[(NodeId, ClusterDocument)]) -> Result<(), MembershipError> {
+    for (i, (node_a, doc_a)) in documents.iter().enumerate() {
+        for (node_b, doc_b) in &documents[..i] {
+            if doc_a.version == doc_b.version && doc_a != doc_b {
+                return Err(MembershipError::Diverged {
+                    version: doc_a.version,
+                    a: *node_b,
+                    b: *node_a,
+                });
             }
         }
     }
@@ -265,6 +293,11 @@ pub async fn sync(seed: SocketAddr, cluster_id: Uuid) -> Result<SyncReport, Memb
         highest_version: highest.version,
         ..SyncReport::default()
     };
+    let held: Vec<(NodeId, ClusterDocument)> = reports
+        .iter()
+        .filter_map(|r| r.result.as_ref().ok().map(|d| (r.node, d.clone())))
+        .collect();
+    check_same_content(&held)?;
     for report in reports {
         match report.result {
             Ok(document) if document.version == highest.version => {
@@ -343,6 +376,14 @@ async fn propose_with_retry(
     cluster_id: Uuid,
 ) -> Result<ClusterDocument, MembershipError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        // A retry after a partial apply may find the change already in
+        // the document; then there is nothing to propose.
+        let already = current.node(NodeId(config.node_id)).is_some()
+            && device_ids.iter().all(|d| current.device(*d).is_some());
+        if already {
+            Node::save_document_for(config, current)?;
+            return Ok(current.clone());
+        }
         let next = Node::document_with_this_node(config, current, device_ids);
         match propose(current, &next).await {
             Ok(()) => {
