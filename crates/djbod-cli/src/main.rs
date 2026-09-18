@@ -86,6 +86,15 @@ enum Command {
     },
     /// Rebuild damaged or missing shards of an object from the intact ones.
     Repair { key: String },
+    /// Scrub the whole cluster: every node checks its own disks, then the
+    /// cross-node checks run; with --repair, damaged objects are rebuilt.
+    Scrub {
+        /// Cap on each node's read rate in MiB per second.
+        #[arg(long)]
+        rate_mib: Option<u64>,
+        #[arg(long)]
+        repair: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -357,6 +366,88 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 other => bail!("unexpected response {other:?}"),
             }
         }
+        Command::Scrub { rate_mib, repair } => {
+            use djbod_proto::message::ScrubEvent;
+            let mut conn = connect(&cli).await?;
+            let id = conn
+                .start_scrub(rate_mib.map(|m| m * 1024 * 1024), *repair)
+                .await
+                .map_err(remote)?;
+            let mut findings = 0usize;
+            let mut repairs = 0usize;
+            let end = loop {
+                match conn.next_scrub_event(id).await.map_err(remote)? {
+                    Ok(event) => {
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&event)?);
+                            continue;
+                        }
+                        match &event {
+                            ScrubEvent::NodeFinding {
+                                node,
+                                device,
+                                finding,
+                            } => {
+                                findings += 1;
+                                println!(
+                                    "node {}  device {}\n  {}",
+                                    short(&node.0),
+                                    short(&device.0),
+                                    describe_scrub_finding(finding)
+                                );
+                            }
+                            ScrubEvent::NodeSummary {
+                                node,
+                                device,
+                                summary,
+                            } => {
+                                eprintln!(
+                                    "node {}  device {}: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+                                    short(&node.0),
+                                    short(&device.0),
+                                    summary.records_checked,
+                                    summary.shards_checked,
+                                    summary.blocks_checked,
+                                    human_bytes(summary.bytes_read),
+                                    summary.findings.len()
+                                );
+                            }
+                            ScrubEvent::NodeFailed { node, detail } => {
+                                println!(
+                                    "node {} could not be scrubbed: {}",
+                                    short(&node.0),
+                                    detail.message
+                                );
+                            }
+                            ScrubEvent::ClusterFinding(finding) => {
+                                findings += 1;
+                                println!("cluster check: {finding:?}");
+                            }
+                            ScrubEvent::Repaired { key, report } => {
+                                repairs += 1;
+                                let rewritten =
+                                    report.shards.iter().filter(|s| s.rewritten).count();
+                                println!("repaired {key}: {rewritten} shard(s) rewritten");
+                            }
+                            ScrubEvent::RepairFailed { key, detail } => {
+                                println!("repair of {key} failed: {}", describe_detail(detail));
+                            }
+                        }
+                    }
+                    Err(end) => break end,
+                }
+            };
+            if !cli.json {
+                eprintln!("{findings} finding(s), {repairs} repair(s)");
+            }
+            if let Some(error) = end.error {
+                eprintln!("scrub incomplete: {}", describe_detail(&error));
+                std::process::exit(2);
+            }
+            if findings > 0 && !*repair {
+                std::process::exit(2);
+            }
+        }
         Command::Repair { key } => {
             let mut conn = connect(&cli).await?;
             match conn
@@ -488,6 +579,36 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn short(id: &Uuid) -> String {
+    id.to_string()[..8].to_string()
+}
+
+fn describe_scrub_finding(finding: &djbod_core::scrub::Finding) -> String {
+    use djbod_core::scrub::Finding::*;
+    match finding {
+        RecordCorrupt { path, reason } => format!("record corrupt: {}  {reason}", path.display()),
+        ShardUnreadable { path, reason, .. } => {
+            format!("shard unreadable: {}  {reason}", path.display())
+        }
+        ShardMisplaced { path, reason, .. } => {
+            format!("shard misplaced: {}  {reason}", path.display())
+        }
+        ShardBlocksCorrupt { path, stripes, .. } => {
+            format!("corrupt blocks: {}  stripes {stripes:?}", path.display())
+        }
+        ShardWithoutRecord { path, .. } => format!("shard without record: {}", path.display()),
+        RecordWithoutShard {
+            path, shard_index, ..
+        } => format!("record without shard {shard_index}: {}", path.display()),
+        RecordNotForThisDevice { path, .. } => {
+            format!("record not for this device: {}", path.display())
+        }
+        StaleTemporary { path, age_secs } => {
+            format!("stale temporary: {}  {age_secs}s old", path.display())
+        }
+    }
 }
 
 fn remove_partial(path: &Path) {

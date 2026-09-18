@@ -29,6 +29,7 @@ use djbod_core::checksum::BlockChecksum;
 use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::scrub::{Finding, ScrubSummary};
 use djbod_core::version::VersionId;
 
 use crate::codec::{decode_cbor, encode_cbor, CodecError};
@@ -148,6 +149,15 @@ pub enum Request {
     RepairObject {
         key: String,
     },
+    /// Scrub the whole cluster (SPEC 20.1.2): every node's local scrub
+    /// plus the cross-node checks, optionally repairing. Answered with
+    /// `ScrubStarted`, then a stream of CBOR `ScrubEvent` data frames,
+    /// then end-of-stream.
+    Scrub {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes_per_second: Option<u64>,
+        repair: bool,
+    },
 
     // ---- node to node
     LocalStatus,
@@ -166,6 +176,13 @@ pub enum Request {
         m: u8,
         block_length: u64,
         object_size: u64,
+    },
+    /// Scrub this node's own devices (SPEC 20.1.2). Answered with
+    /// `LocalScrubStarted`, then a stream of CBOR `ScrubItem` data frames,
+    /// then end-of-stream.
+    LocalScrub {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_bytes_per_second: Option<u64>,
     },
     /// Answered with `GetShard`, then a block stream.
     GetShard {
@@ -284,6 +301,8 @@ pub enum Response {
         truncated: bool,
     },
     RepairObject(RepairReport),
+    /// Followed by a stream of `ScrubEvent` frames.
+    ScrubStarted,
 
     // ---- node to node
     LocalStatus {
@@ -305,6 +324,8 @@ pub enum Response {
     GetShard {
         block_count: u64,
     },
+    /// Followed by a stream of `ScrubItem` frames.
+    LocalScrubStarted,
     PutMeta,
     GetMeta {
         record: Option<MetadataRecord>,
@@ -317,6 +338,83 @@ pub enum Response {
         document: ClusterDocument,
     },
     ApplyClusterConfig,
+}
+
+// ------------------------------------------------------------ scrubbing
+
+/// One frame of a `LocalScrub` stream: a finding as it arises, then one
+/// summary when the node's devices are done.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "item", rename_all = "snake_case")]
+pub enum ScrubItem {
+    Finding {
+        device: DeviceId,
+        finding: Finding,
+    },
+    Summary {
+        device: DeviceId,
+        summary: ScrubSummary,
+    },
+}
+
+/// A cross-node check that no single node can make (SPEC 20.1.2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClusterFinding {
+    /// Fewer record copies than the record itself says there are holders,
+    /// or copies that disagree, or a copy on an unlisted device.
+    RecordsInconsistent {
+        key: String,
+        version: Option<VersionId>,
+        detail: String,
+    },
+    /// A holder listed in the record does not have the shard file.
+    ShardMissingOnHolder {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        shard_index: u8,
+    },
+    /// A holder listed in the record could not be asked.
+    HolderUnavailable {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        detail: String,
+    },
+}
+
+/// One frame of a `Scrub` stream, in the order things happen: local
+/// findings and summaries from each node as they arrive, then cross-node
+/// findings, then repairs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum ScrubEvent {
+    NodeFinding {
+        node: NodeId,
+        device: DeviceId,
+        finding: Finding,
+    },
+    NodeSummary {
+        node: NodeId,
+        device: DeviceId,
+        summary: ScrubSummary,
+    },
+    /// A node could not be scrubbed; the scrub continues with the others
+    /// but reports failure at the end.
+    NodeFailed {
+        node: NodeId,
+        detail: ErrorDetail,
+    },
+    ClusterFinding(ClusterFinding),
+    Repaired {
+        key: String,
+        report: RepairReport,
+    },
+    RepairFailed {
+        key: String,
+        detail: ErrorDetail,
+    },
 }
 
 // --------------------------------------------------------------- streams

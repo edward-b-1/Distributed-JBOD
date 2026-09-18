@@ -179,6 +179,8 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
         DeleteObject { .. } => "DeleteObject",
         ListKeys(_) => "ListKeys",
         RepairObject { .. } => "RepairObject",
+        Scrub { .. } => "Scrub",
+        LocalScrub { .. } => "LocalScrub",
         LocalStatus => "LocalStatus",
         LocalLookup { .. } => "LocalLookup",
         LocalList(_) => "LocalList",

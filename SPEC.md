@@ -1133,10 +1133,13 @@ coordinator, and those nodes send to each other. Every response is either
   version with its condition (intact, unreadable, or corrupt blocks by
   stripe) and whether it was rewritten. Section 18.4.1.
 
-`Scrub` (milestone 3)
-: Request: rate limit, whether to repair. Response: the merged findings
-  of every node's `LocalScrub` plus the cross-node checks of 20.1.2, then
-  the repairs performed. Streams findings to the client as they arrive.
+`Scrub`
+: Request: rate limit, whether to repair. Response: `ScrubStarted`, then a
+  stream of CBOR `ScrubEvent` data frames: each node's findings and
+  per-device summaries as they arrive, a `NodeFailed` for any node that
+  could not be scrubbed, then the cross-node findings of 20.1.2, then one
+  `Repaired` or `RepairFailed` per damaged key if repair was asked for; the
+  end-of-stream carries an error if any node failed or any repair failed.
 
 `PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
@@ -1173,11 +1176,13 @@ coordinator, and those nodes send to each other. Every response is either
   Response: for each matching record on any local device, the key, size,
   and version id. Duplicates across devices are the coordinator's problem.
 
-`LocalScrub` (milestone 3)
-: Request: rate limit. Response: a stream of findings from the local
-  scrub engine (20.1.2) over this node's devices as they arise, ending
-  with a summary. The only node-to-node operation whose response streams
-  control messages rather than blocks.
+`LocalScrub`
+: Request: rate limit. Response: `LocalScrubStarted`, then a stream of
+  CBOR `ScrubItem` data frames from the local scrub engine (20.1.2) over
+  this node's devices, each finding as it arises and a summary per device,
+  then end-of-stream. The only node-to-node operation whose stream carries
+  control messages rather than blocks; they travel as checksummed data
+  frames like everything else.
 
 `PutShard`
 : Request: device UUID, key hash, version id, shard index, block count,
@@ -1298,8 +1303,8 @@ delete, not damage. `djbod-node scrub --config node.toml` runs it offline
 over one machine's devices, for a node that is down or a disk under
 examination; it does not repair.
 
-*The cluster-wide scrub*, to be built with milestone 3's fan-out. The
-client command `djbod scrub`, pointed at any node, has the coordinator
+*The cluster-wide scrub*, built. The client command `djbod scrub`,
+pointed at any node, has the coordinator
 send one `LocalScrub` request to every node in the cluster document; each
 node runs the engine over its own devices at the requested rate and
 streams its findings back as they arise, ending with a summary. The
@@ -1313,10 +1318,12 @@ object. Detection therefore moves no data over the network; only repair
 does, and only for damaged objects. Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 
-20.1.2.1 [P] Before repairs can be issued from more than one place, a
-holder must refuse a second `PutShard` for a version and shard index
-already being written on that device, and temporary file names must carry
-a unique suffix, so two writers can never share one temporary file.
+20.1.2.1 [D] A holder refuses a second `PutShard` for a version and shard
+index already being written on that device (`WriteFailed`, "already being
+written"), and temporary file names carry a token unique to the process
+and the call, so two writers can never share one temporary file. Both
+guard repairs issued from more than one place, and the first also guards
+against a coordinator retrying into its own unfinished write.
 
 20.1.3 [D] Since reads report rather than heal, scrubbing is the mechanism
 by which corruption is found before a client encounters it.
@@ -1397,10 +1404,9 @@ layout in section 9 uses fixed-length names and stays well within both.
 
 | # | Question | Where | Recommendation |
 |---|----------|-------|----------------|
-| 21.1 | How the cluster document is changed without a master. | 6.2.6 | All-nodes-acknowledge command. |
-| 21.2 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
-| 21.3 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.4 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
+| 21.1 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
+| 21.2 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
+| 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
 
 ## 22. Deferred items
 
@@ -1672,8 +1678,10 @@ and the coordinator serving `Status`, `PutObject`, `GetObject`,
 fanning node-to-node operations out over loopback). Settled in code: 10.1,
 10.5, 10.6, 10.11, 15.1, 19.1.2, 19.1.5, 20.4.
 
-C.4.3 **Milestone 3 status, 18 September 2026: steps (a) to (c)
-complete.** `djbod_node::membership` implements 6.2.6 (propose in
+C.4.3 **Milestone 3 status, 18 September 2026: complete.** Step (d),
+the cluster-wide scrub with repair and the write-collision guard, is in
+`coordinator::scrub`, `local_ops::local_scrub`, and `djbod scrub`.
+Earlier steps: `djbod_node::membership` implements 6.2.6 (propose in
 document order, sync, content comparison at equal versions), 18.1.1
 (join), 18.1.2 (startup adoption), and 18.1.3 (add-device); `djbod-node
 join|add-device`, `djbod cluster show|sync`. Seven multi-node tests run
