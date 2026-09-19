@@ -964,6 +964,7 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
                 assert_ne!(destination, device);
             }
             Ok(DrainEvent::Skipped { key, detail, .. }) => panic!("{key} skipped: {detail:?}"),
+            Ok(DrainEvent::Deleted { key, .. }) => panic!("{key} reported deleted"),
             Ok(DrainEvent::Estimate { .. }) => {}
             Err(end) => break end,
         }

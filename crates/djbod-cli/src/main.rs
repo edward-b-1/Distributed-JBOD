@@ -1195,14 +1195,19 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     let mut conn = connect(cli).await?;
     let id = conn.start_drain(device, partial).await.map_err(remote)?;
     let mut moved = 0usize;
+    let mut deleted = 0usize;
     let mut skipped: Vec<(String, String)> = Vec::new();
     let end = loop {
         match conn.next_drain_event(id).await.map_err(remote)? {
             Ok(event) => {
                 if cli.json {
                     println!("{}", serde_json::to_string(&event)?);
-                    if let DrainEvent::Skipped { key, detail, .. } = &event {
-                        skipped.push((key.clone(), detail.message.clone()));
+                    match &event {
+                        DrainEvent::Skipped { key, detail, .. } => {
+                            skipped.push((key.clone(), detail.message.clone()));
+                        }
+                        DrainEvent::Deleted { .. } => deleted += 1,
+                        _ => {}
                     }
                     continue;
                 }
@@ -1242,13 +1247,20 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         println!("skipped  {key}  {}", describe_detail(&detail));
                         skipped.push((key, detail.message));
                     }
+                    DrainEvent::Deleted { key, .. } => {
+                        deleted += 1;
+                        println!("deleted  {key}  (removed since the pass began; nothing to move)");
+                    }
                 }
             }
             Err(end) => break end,
         }
     };
     if !cli.json {
-        eprintln!("{moved} moved, {} skipped", skipped.len());
+        eprintln!(
+            "{moved} moved, {} skipped, {deleted} deleted meanwhile",
+            skipped.len()
+        );
     }
     if let Some(error) = &end.error {
         eprintln!(

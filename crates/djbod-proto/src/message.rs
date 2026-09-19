@@ -561,6 +561,10 @@ pub enum DrainEvent {
         version: VersionId,
         detail: ErrorDetail,
     },
+    /// The version was deleted after the pass listed it: no copy of its
+    /// record remains anywhere, so there is nothing to move. Not a
+    /// failure.
+    Deleted { key: String, version: VersionId },
 }
 
 // --------------------------------------------------------------- streams

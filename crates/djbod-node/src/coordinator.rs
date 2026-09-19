@@ -2436,12 +2436,16 @@ async fn drain(
     let mut skipped = 0usize;
     for record in &records {
         let event = match drain_one(node, device, record).await {
-            Ok(moved) => DrainEvent::Moved {
+            Ok(DrainOutcome::Moved(moved)) => DrainEvent::Moved {
                 key: record.key.clone(),
                 version: record.version,
                 shard_index: moved.shard_index,
                 destination: moved.destination,
                 rebuilt: moved.rebuilt,
+            },
+            Ok(DrainOutcome::Deleted) => DrainEvent::Deleted {
+                key: record.key.clone(),
+                version: record.version,
             },
             Err(Failure::Error(detail)) => {
                 skipped += 1;
@@ -2459,6 +2463,9 @@ async fn drain(
             } => tracing::info!(key, %device, %destination, "drain: shard moved"),
             DrainEvent::Skipped { key, detail, .. } => {
                 tracing::warn!(key, %device, reason = %detail.message, "drain: version skipped")
+            }
+            DrainEvent::Deleted { key, .. } => {
+                tracing::info!(key, %device, "drain: version deleted since the pass began")
             }
             DrainEvent::Estimate { .. } => {}
         }
@@ -2525,6 +2532,12 @@ struct DrainedShard {
     rebuilt: bool,
 }
 
+enum DrainOutcome {
+    Moved(DrainedShard),
+    /// No copy of the version's record exists anywhere any more.
+    Deleted,
+}
+
 /// Re-place the shard that `copy`, a record found on `device`, says the
 /// device holds. The version's current record decides: a copy the
 /// current record does not agree with is a stale leftover, reported and
@@ -2533,9 +2546,43 @@ async fn drain_one(
     node: &Arc<Node>,
     device: DeviceId,
     copy: &MetadataRecord,
-) -> Result<DrainedShard, Failure> {
+) -> Result<DrainOutcome, Failure> {
     let located = lookup(node, copy.key_hash).await?;
+    // The pass listed this version some time ago. If no copy of its
+    // record is left anywhere, the object was deleted or replaced in the
+    // meantime (12, 14), the copy here went with it, and there is nothing
+    // to move. Checked before `versions_of`, which would otherwise report
+    // an unrelated inconsistency for a version it cannot see.
+    if !located.iter().any(|c| c.record.version == copy.version) {
+        return Ok(DrainOutcome::Deleted);
+    }
     let versions = versions_of(&copy.key, located)?;
+    let index = shard_to_drain(device, copy, &versions)?;
+    let current = versions
+        .iter()
+        .find(|v| v.version == copy.version)
+        .expect("checked by shard_to_drain");
+    let moved = move_shard_of_record(node, current, index, None).await?;
+    Ok(DrainOutcome::Moved(DrainedShard {
+        shard_index: index.0,
+        destination: moved
+            .record
+            .device_for(index)
+            .expect("the new record lists every index"),
+        rebuilt: moved.rebuilt,
+    }))
+}
+
+/// Which shard of `copy`'s version the current record places on
+/// `device`. Copies exist for the version (the caller checked), so a
+/// current record that does not place a shard here, or no current record
+/// at all, means the copy on the device is a stale leftover of a
+/// re-placement (18.8.1), which is the scrub's to remove.
+fn shard_to_drain(
+    device: DeviceId,
+    copy: &MetadataRecord,
+    versions: &[MetadataRecord],
+) -> Result<ShardIndex, Failure> {
     let stale = || {
         Failure::Error(ErrorDetail {
             device: Some(device),
@@ -2547,21 +2594,11 @@ async fn drain_one(
             )
         })
     };
-    let Some(current) = versions.iter().find(|v| v.version == copy.version) else {
-        return Err(stale());
-    };
-    let Some(index) = current.shard_on(device) else {
-        return Err(stale());
-    };
-    let moved = move_shard_of_record(node, current, index, None).await?;
-    Ok(DrainedShard {
-        shard_index: index.0,
-        destination: moved
-            .record
-            .device_for(index)
-            .expect("the new record lists every index"),
-        rebuilt: moved.rebuilt,
-    })
+    let current = versions
+        .iter()
+        .find(|v| v.version == copy.version)
+        .ok_or_else(stale)?;
+    current.shard_on(device).ok_or_else(stale)
 }
 
 /// Stream shard `index` from `source` to `destination`, verifying every
@@ -3206,4 +3243,85 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
         }
     }
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use djbod_core::record::{ShardLocation, RECORD_FORMAT_VERSION, SYSTEM_NAME};
+    use uuid::Uuid;
+
+    fn device(n: u128) -> DeviceId {
+        DeviceId(Uuid::from_u128(n))
+    }
+
+    fn record(version: u8, revision: u64, devices: [u128; 2]) -> MetadataRecord {
+        let key = "k";
+        MetadataRecord {
+            format_version: RECORD_FORMAT_VERSION,
+            system: SYSTEM_NAME.to_string(),
+            bucket: "default".to_string(),
+            key: key.to_string(),
+            key_hash: hash_key(key.as_bytes()),
+            version: VersionId([version; 16]),
+            created: OffsetDateTime::UNIX_EPOCH,
+            size: 1,
+            object_checksum: BlockChecksum(0),
+            k: 1,
+            m: 1,
+            block_size: 65536,
+            shards: vec![
+                ShardLocation {
+                    index: 0,
+                    device: device(devices[0]),
+                },
+                ShardLocation {
+                    index: 1,
+                    device: device(devices[1]),
+                },
+            ],
+            revision,
+            content_type: None,
+            user_metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_drain_moves_the_shard_the_current_record_places_here() {
+        let copy = record(1, 0, [1, 2]);
+        match shard_to_drain(device(2), &copy, std::slice::from_ref(&copy)) {
+            Ok(index) => assert_eq!(index, ShardIndex(1)),
+            Err(_) => panic!("the current record places shard 1 here"),
+        }
+    }
+
+    #[test]
+    fn a_copy_the_current_record_no_longer_places_here_is_stale() {
+        // The device's copy is revision 0 placing shard 1 here; the
+        // current record (revision 1) moved shard 1 to device 3.
+        let copy = record(1, 0, [1, 2]);
+        let current = record(1, 1, [1, 3]);
+        match shard_to_drain(device(2), &copy, &[current]) {
+            Err(Failure::Error(detail)) => {
+                assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
+                assert!(detail.message.contains("stale copy"), "{}", detail.message);
+                assert_eq!(detail.device, Some(device(2)));
+            }
+            Err(Failure::Close(_)) => panic!("expected an error, not a close"),
+            Ok(index) => panic!("expected stale, got shard {index}"),
+        }
+    }
+
+    #[test]
+    fn a_version_absent_from_the_current_versions_is_stale_too() {
+        // Copies of the version exist (the caller checked) but none is
+        // current: for example a replaced version whose deletion did not
+        // reach this device.
+        let copy = record(1, 0, [1, 2]);
+        let newer = record(2, 0, [1, 2]);
+        assert!(matches!(
+            shard_to_drain(device(2), &copy, &[newer]),
+            Err(Failure::Error(ref d)) if d.message.contains("stale copy")
+        ));
+    }
 }
