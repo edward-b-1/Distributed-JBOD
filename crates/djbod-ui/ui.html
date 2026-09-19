@@ -548,7 +548,7 @@ async function verify(key, button) {
             box.replaceChildren(el('p', { class: 'bad', style: 'margin:0 0 10px' },
               `damaged (${when}, after ${human(e.bytes)} of ${human(size)}): ${err.code}: ${err.message}`,
               el('br'),
-              el('span', { class: 'hint', text: describeError(err).replace(/\n/g, '   ') + '   Repair rebuilds it from the other shards.' })));
+              el('span', { class: 'hint', text: describeError(err).replace(/\n/g, '   ') })));
           }
           break;
         }
