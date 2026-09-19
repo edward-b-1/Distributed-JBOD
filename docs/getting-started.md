@@ -306,6 +306,19 @@ target/release/djbod cluster show                 # LABEL column
 target/release/djbod cluster drain --node-id nas1
 ```
 
+**Moving a node.** The cluster document records where each node is
+reached. To change it while the node is still answering at its old
+address, tell the cluster:
+
+```sh
+target/release/djbod cluster set-address nas1 10.0.0.7:5263
+```
+
+If the node has already moved, edit `listen` or `advertise` in its
+configuration and start it: it proposes the change itself and refuses to
+start if the other nodes cannot be reached. A node created on loopback
+for a trial is moved to the LAN the same way before a second node joins.
+
 **Moving a shard.** Any shard can be moved to another device while the
 cluster is running, which is the building block of draining a disk:
 

@@ -1478,3 +1478,192 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
     }
     assert_eq!(walked, expected);
 }
+
+/// The document as saved in a node's state directory.
+fn saved_document(config: &NodeConfig) -> ClusterDocument {
+    serde_json::from_str(&std::fs::read_to_string(Node::document_path_for(config)).expect("read"))
+        .expect("parse")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nodes_address_can_be_changed_through_another_node() {
+    let a = first_node(1, 1, 1).await;
+    let mut b = joined_node(1, &a).await;
+    let cluster = a.node.cluster_id();
+    let body = xorshift64_bytes(BLOCK as usize, 9);
+    let mut client = a.client().await;
+    client
+        .put_object("k", &body, 100_000, None)
+        .await
+        .expect("put");
+
+    // b also listens on a new port; the change then points everyone there.
+    let (new_listener, new_addr) = reserve_port().await;
+    let new_server = tokio::spawn(server::serve(b.node.clone(), new_listener));
+    let (document, changed) = membership::set_node_addresses(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        b.node.id(),
+        vec![new_addr.to_string()],
+    )
+    .await
+    .expect("set address");
+    assert!(changed);
+    assert_eq!(
+        document.node(b.node.id()).unwrap().addresses,
+        vec![new_addr.to_string()]
+    );
+    assert_eq!(a.node.document_version(), document.version);
+    assert_eq!(b.node.document_version(), document.version);
+    assert_eq!(
+        saved_document(&b.config)
+            .node(b.node.id())
+            .unwrap()
+            .addresses,
+        vec![new_addr.to_string()],
+        "b's own saved document has the new address"
+    );
+    let fetched = membership::fetch_document(&Connector::plain(), a.addr, cluster)
+        .await
+        .expect("fetch");
+    assert_eq!(
+        fetched.node(b.node.id()).unwrap().addresses,
+        vec![new_addr.to_string()]
+    );
+
+    // With the old listener gone, a reaches b only at the new address.
+    b.stop();
+    let mut client = a.client().await;
+    let (_, got) = client.get_object("k").await.expect("get via new address");
+    assert_eq!(got, body);
+    client
+        .put_object("k2", &body, 100_000, None)
+        .await
+        .expect("put via new address");
+
+    // Setting the same list again changes nothing.
+    let (_, changed) = membership::set_node_addresses(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        b.node.id(),
+        vec![new_addr.to_string()],
+    )
+    .await
+    .expect("same address");
+    assert!(!changed);
+
+    // Refusals: not an address, an empty list, another node's address.
+    for bad in [
+        vec!["nowhere".to_string()],
+        vec![],
+        vec![a.addr.to_string()],
+    ] {
+        let result = membership::set_node_addresses(
+            &Connector::plain(),
+            a.addr,
+            cluster,
+            b.node.id(),
+            bad.clone(),
+        )
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(membership::MembershipError::Node(
+                    djbod_node::node::NodeError::InvalidDocument(_)
+                ))
+            ),
+            "{bad:?}: {result:?}"
+        );
+    }
+    assert_eq!(
+        a.node.document_version(),
+        document.version,
+        "refusals change nothing"
+    );
+    new_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarting_node_adopts_its_configured_address() {
+    let mut a = first_node(1, 1, 1).await;
+    let mut b = joined_node(1, &a).await;
+    let body = xorshift64_bytes(BLOCK as usize, 10);
+    let mut client = a.client().await;
+    client
+        .put_object("k", &body, 100_000, None)
+        .await
+        .expect("put");
+    let before = a.node.document_version();
+
+    // b comes back on another port: startup adoption tells the cluster.
+    b.stop();
+    let (listener, new_addr) = reserve_port().await;
+    let mut config = b.config.clone();
+    config.listen = new_addr;
+    let adopted = membership::adopt_from_peers(&config).await.expect("adopt");
+    assert_eq!(adopted.version, before + 1);
+    assert_eq!(
+        adopted.node(b.node.id()).unwrap().addresses,
+        vec![new_addr.to_string()]
+    );
+    assert_eq!(a.node.document_version(), before + 1, "a holds the change");
+    assert_eq!(saved_document(&config).version, before + 1);
+    // Nothing more to do on a second start.
+    let again = membership::adopt_from_peers(&config)
+        .await
+        .expect("adopt again");
+    assert_eq!(again.version, before + 1);
+
+    let node = Arc::new(Node::open(config.clone()).expect("reopen"));
+    b.server = Some(tokio::spawn(server::serve(node.clone(), listener)));
+    let mut client = a.client().await;
+    let (_, got) = client.get_object("k").await.expect("get via new address");
+    assert_eq!(got, body);
+
+    // Moving again while a is down is refused: nobody could be told.
+    b.stop();
+    a.stop();
+    let (_listener, third) = reserve_port().await;
+    config.listen = third;
+    let result = membership::adopt_from_peers(&config).await;
+    assert!(
+        matches!(
+            result,
+            Err(membership::MembershipError::AddressChangeFailed { .. })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(
+        saved_document(&config).version,
+        before + 1,
+        "nothing was saved"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lone_node_adopts_its_configured_address_by_itself() {
+    let mut a = first_node(1, 1, 0).await;
+    let body = xorshift64_bytes(BLOCK as usize, 11);
+    let mut client = a.client().await;
+    client
+        .put_object("k", &body, 100_000, None)
+        .await
+        .expect("put");
+    a.stop();
+
+    let (listener, new_addr) = reserve_port().await;
+    let mut config = a.config.clone();
+    config.listen = new_addr;
+    let adopted = membership::adopt_from_peers(&config).await.expect("adopt");
+    assert_eq!(adopted.version, 2);
+    assert_eq!(adopted.nodes[0].addresses, vec![new_addr.to_string()]);
+    let node = Arc::new(Node::open(config.clone()).expect("reopen"));
+    a.server = Some(tokio::spawn(server::serve(node.clone(), listener)));
+    let hello = Connection::client_hello(node.cluster_id());
+    let mut client = Connection::connect(new_addr, hello).await.expect("connect");
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+}
