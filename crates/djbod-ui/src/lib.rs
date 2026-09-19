@@ -18,6 +18,7 @@
 //! | `GET  /objects?prefix&start_after&limit` | `ListKeys`                      |
 //! | `GET  /objects/{key}`                | `HeadObject`                        |
 //! | `PUT  /objects/{key}`                | `PutObject`, body streamed through  |
+//! | `GET  /upload-check?size=N`          | `Status` and the document: would a write of N bytes fit? |
 //! | `DELETE /objects/{key}`              | `DeleteObject`                      |
 //! | `GET  /download/{key}`               | `GetObject`, body streamed through  |
 //! | `POST /repair/{key}`                 | `RepairObject`                      |
@@ -56,6 +57,7 @@ use uuid::Uuid;
 
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
+use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_node::membership::{self, MembershipError};
@@ -84,6 +86,7 @@ pub fn router(target: Target) -> Router {
         .route("/cluster/scheme", post(cluster_scheme))
         .route("/cluster/limits", post(cluster_limits))
         .route("/objects", get(list_objects))
+        .route("/upload-check", get(upload_check))
         .route(
             "/objects/{*key}",
             get(head_object).put(put_object).delete(delete_object),
@@ -369,10 +372,84 @@ async fn put_object(
         .map(str::to_string);
     let mut conn = connect(&target).await?;
     let mut source = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
-    let version = conn
+    let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
-        .await?;
+        .await;
+    let version = match result {
+        Ok(version) => version,
+        Err(e) => {
+            // The node has refused, but the browser may still be sending
+            // the body. A response on a connection whose request body was
+            // never read makes the browser report a network failure and
+            // drop the response, so the reason would be lost. Read and
+            // discard the rest first; the refusal is then delivered.
+            let _ = tokio::io::copy(&mut source, &mut tokio::io::sink()).await;
+            return Err(e.into());
+        }
+    };
     Ok(Json(json!({ "key": key, "version": version.to_text() })))
+}
+
+#[derive(Deserialize)]
+struct UploadCheckParams {
+    size: u64,
+}
+
+/// Whether a write of `size` bytes would find room, judged as the
+/// coordinator judges it (SPEC 10.4): k+m active devices each with at
+/// least one shard file's worth of free space within headroom, which is
+/// what `Status` reports. The page asks before starting an upload so a
+/// file that plainly will not fit is refused before its bytes are sent;
+/// the node remains the authority when the upload runs. Devices that
+/// share one filesystem report the same free space several times, so
+/// the answer is optimistic there.
+async fn upload_check(
+    State(target): State<Arc<Target>>,
+    Query(params): Query<UploadCheckParams>,
+) -> ApiResult {
+    let mut conn = connect(&target).await?;
+    let document = match conn.request(Request::GetClusterConfig).await? {
+        Reply::GetClusterConfig { document } => document,
+        other => return Err(ApiError::unexpected(other)),
+    };
+    let devices = match conn.request(Request::Status).await? {
+        Reply::Status { devices, .. } => devices,
+        other => return Err(ApiError::unexpected(other)),
+    };
+    let internal =
+        |message: String| ApiError::Remote(ErrorDetail::new(ErrorCode::Internal, message));
+    let scheme = Scheme::new(document.k, document.m)
+        .map_err(|e| internal(format!("the cluster document's scheme is invalid: {e}")))?;
+    let shard_bytes = if params.size == 0 {
+        0
+    } else {
+        djbod_core::shardfile::shard_file_length(scheme, document.block_size, params.size)
+            .ok_or_else(|| internal("could not compute the shard file length".to_string()))?
+    };
+    let required = scheme.total_shards();
+    let mut active_free: Vec<u64> = devices
+        .iter()
+        .filter(|d| d.state == DeviceState::Active)
+        .map(|d| d.free_bytes)
+        .collect();
+    active_free.sort_unstable_by(|a, b| b.cmp(a));
+    let with_room = active_free
+        .iter()
+        .filter(|free| **free >= shard_bytes)
+        .count();
+    Ok(Json(json!({
+        "size": params.size,
+        "fits": with_room >= required && params.size <= document.max_object_bytes,
+        "too_large": params.size > document.max_object_bytes,
+        "max_object_bytes": document.max_object_bytes,
+        "shard_bytes": shard_bytes,
+        "required_devices": required,
+        "active_devices": active_free.len(),
+        "devices_with_room": with_room,
+        // Free space on the device that would receive the last shard:
+        // the k+m-th emptiest active device, or 0 if there are fewer.
+        "room_bytes": active_free.get(required.saturating_sub(1)).copied().unwrap_or(0),
+    })))
 }
 
 async fn delete_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {

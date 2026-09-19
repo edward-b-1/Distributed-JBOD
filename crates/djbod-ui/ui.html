@@ -242,6 +242,7 @@ function human(bytes) {
   return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
 }
 function short(id) { return String(id).slice(0, 8); }
+function ordinal(n) { const r = n % 100; if (r >= 11 && r <= 13) return 'th'; return ['th', 'st', 'nd', 'rd'][n % 10] || 'th'; }
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -542,6 +543,20 @@ $('upload-go').addEventListener('click', async () => {
   if (!key) return toast('give the object a key', '', true);
   $('upload-go').disabled = true;
   try {
+    // Ask first whether it can fit, so a file that plainly will not is
+    // refused before its bytes are sent. The node still decides.
+    const check = await api('/upload-check?size=' + file.size);
+    if (check.too_large) {
+      toast(`${file.name} is ${human(file.size)}; the cluster's maximum object size is ${human(check.max_object_bytes)}`, 'change it under Settings if that is intended', true);
+      return;
+    }
+    if (!check.fits) {
+      toast(`no room for ${file.name} (${human(file.size)})`,
+        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${check.active_devices} active device(s) have that much` +
+        (check.active_devices >= check.required_devices ? `, and the ${check.required_devices}${ordinal(check.required_devices)} emptiest has ${human(check.room_bytes)}` : '') +
+        '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
+      return;
+    }
     const headers = {};
     if (file.type) headers['content-type'] = file.type;
     const response = await fetch('/api/objects/' + encodeKey(key), { method: 'PUT', headers, body: file });
