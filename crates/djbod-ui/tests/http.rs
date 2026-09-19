@@ -1148,3 +1148,25 @@ async fn requests_from_another_site_or_host_are_refused() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_icon_is_served_for_the_tab_and_the_header() {
+    let test = start_node(4, 3, 1).await;
+    for path in ["/icon.png", "/icon-dark.png"] {
+        let (status, headers, body) = call(
+            &test,
+            Request::get(path).body(Body::empty()).expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert!(body.starts_with(b"\x89PNG"), "{path} is not a PNG");
+    }
+    let (_, _, page) = call(
+        &test,
+        Request::get("/").body(Body::empty()).expect("request"),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&page);
+    assert!(text.contains(r#"<link rel="icon" type="image/png" sizes="256x256" href="/icon.png">"#));
+}
