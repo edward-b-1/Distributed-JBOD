@@ -26,6 +26,7 @@
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
+//! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
@@ -98,6 +99,7 @@ pub fn router(target: Target) -> Router {
         .route("/move-shard/{*key}", post(move_shard))
         .route("/scrub", post(scrub))
         .route("/devices/{id}/state", post(set_device_state))
+        .route("/devices/{id}/label", post(set_device_label))
         .route("/devices/{id}/drain", post(drain))
         .route("/devices/{id}/remove", post(remove_device))
         .route("/nodes/{id}/remove", post(remove_node))
@@ -832,6 +834,41 @@ async fn set_device_state(
     Ok(Json(json!({
         "device": device,
         "state": body.state,
+        "document_version": document.version,
+        "changed": changed,
+    })))
+}
+
+#[derive(Deserialize)]
+struct LabelBody {
+    /// The new label, or null to clear it.
+    label: Option<String>,
+}
+
+/// Give a device a name shown beside its UUID, or clear it (SPEC
+/// 6.2.5.1). The document validates the label: 1 to 128 bytes, no
+/// whitespace, unique, not shaped like a UUID.
+async fn set_device_label(
+    State(target): State<Arc<Target>>,
+    Path(id): Path<String>,
+    Json(body): Json<LabelBody>,
+) -> ApiResult {
+    let device = DeviceId(parse_id(&id, "device")?);
+    let label = body
+        .label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
+    let (document, changed) = membership::set_device_label(
+        &target.connector,
+        target.node,
+        target.cluster,
+        device,
+        label.clone(),
+    )
+    .await?;
+    Ok(Json(json!({
+        "device": device,
+        "label": label,
         "document_version": document.version,
         "changed": changed,
     })))
