@@ -62,6 +62,11 @@ target/release/djbod status
 For the web interface, `target/release/djbod-ui` with the same two
 variables set, then open http://127.0.0.1:5264/.
 
+[docs/deployment.md](docs/deployment.md) covers running it for real:
+systemd units for a node per machine, a Docker image configured entirely
+by environment variables, and a Docker Compose stack of three nodes and
+the web UI for trying it on one computer.
+
 [docs/getting-started.md](docs/getting-started.md) continues from here:
 breaking things on purpose and repairing them, naming, draining, and
 removing disks, adding a second machine, changing the scheme, recovering

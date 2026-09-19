@@ -1,0 +1,7 @@
+/target
+/target-rust-analyzer
+/state
+/test-data
+*.jpg
+*.txt
+.git
