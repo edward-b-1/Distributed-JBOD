@@ -1186,7 +1186,9 @@ inspected before the next is run:
   every version it has a shard of, so the scan is local to one node; a
   copy on the device that the version's current record does not agree
   with is a stale leftover (18.8.1), reported and left for `scrub
-  --repair`.
+  --repair`; a version of which no record copy remains anywhere was
+  deleted or replaced after the pass listed it, and is reported as such
+  and not counted as a failure.
 - As built, `remove-device` leaves the device in the document in state
   `removed`, so that a later attempt to add the same disk is recognised
   (6.2.6.3), and the administrator takes it out of the node's
