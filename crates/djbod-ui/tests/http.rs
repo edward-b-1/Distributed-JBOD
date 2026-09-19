@@ -837,3 +837,101 @@ async fn device_labels_are_set_shown_and_cleared() {
         .iter()
         .all(|d| d.get("label").is_none()));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_the_node_stopped_is_remembered_until_something_succeeds() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 2 * 64 * 1024 + 5, 13);
+    put_object(&test, "f/one", &body, None).await;
+    // The same router instance throughout, since the memory is per server.
+    let router = app(&test);
+    let get = |path: &str| {
+        let router = router.clone();
+        let path = path.to_string();
+        async move {
+            let response = router
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await;
+            (status, body)
+        }
+    };
+    let failures = || {
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::get("/api/read-failures")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            json["failures"].as_array().unwrap().clone()
+        }
+    };
+
+    let (status, collected) = get("/api/download/f/one").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(collected.is_ok());
+    assert!(failures().await.is_empty());
+
+    for dir in &test.dirs {
+        for entry in walkdir(dir.path()) {
+            if entry.to_string_lossy().ends_with(".0.shard") {
+                let mut bytes = std::fs::read(&entry).unwrap();
+                bytes[4096 + 10] ^= 0xff;
+                std::fs::write(&entry, bytes).unwrap();
+            }
+        }
+    }
+
+    let (status, collected) = get("/api/download/f/one").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(collected.is_err(), "the damaged download must be cut short");
+    let listed = failures().await;
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["key"], "f/one");
+    assert_eq!(listed[0]["operation"], "download");
+    assert_eq!(listed[0]["error"]["code"], "block_checksum_mismatch");
+    assert_eq!(listed[0]["error"]["shard_index"], 0);
+    assert!(listed[0]["at"].as_u64().unwrap() > 1_700_000_000);
+
+    // A verify that fails refreshes the note with its own operation.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/api/verify/f/one")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = response.into_body().collect().await.unwrap();
+    let listed = failures().await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["operation"], "verify");
+
+    // A successful repair clears it.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::post("/api/repair/f/one")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(failures().await.is_empty());
+
+    // A clean download after the repair leaves nothing behind either.
+    let (status, collected) = get("/api/download/f/one").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(collected.unwrap().to_bytes().as_ref(), body.as_slice());
+    assert!(failures().await.is_empty());
+}

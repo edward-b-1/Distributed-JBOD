@@ -167,7 +167,26 @@ and removed from there and from the Maintenance tab, where scrubs and drains sho
 happen. The Objects tab lists keys by prefix and shows a record, its
 shard placement, and verify, repair, move-shard, download, upload, and
 delete. Verify reads the object through the node without saving it, so
-it names any damage a download would trip over.
+it names any damage a download would trip over. A download the node
+stopped for damage shows the browser's own failure message only, but the
+UI server remembers the node's reason for as long as it runs, so the
+object panel shows it until a repair, verify, or download of that object
+succeeds.
+
+That note is best effort, and it is worth knowing how it works. A link
+download runs outside the page, so after Download is clicked the page
+asks the server for up to a minute whether the node stopped that read,
+often at first and then every two seconds. The node stops a read the
+moment it meets a damaged block, so damage early in an object shows up
+within a second; damage late in a large object is not met until the
+download reaches it, and a download slower than a minute is not met at
+all while the page is still asking. The note then appears on the next
+refresh of the page, which happens every thirty seconds, or when the
+object is opened again, and it is never shown for a read made with the
+`djbod` client or through another UI server. Verify has none of these
+limits, since the page watches it from start to finish. The durable
+answer is for the store to remember what it found; see
+`docs/proposals/damage-marks.md`.
 An upload is checked against the devices' free space before its bytes
 are sent, and a write the node refuses is reported with the node's
 reason.
