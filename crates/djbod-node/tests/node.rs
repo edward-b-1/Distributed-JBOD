@@ -63,6 +63,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
         // Temporary directories all live on one filesystem.
         allow_shared_filesystem: true,
         tls: None,
@@ -912,6 +913,7 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
         devices: vec![a.path().to_path_buf(), b.path().to_path_buf()],
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
         allow_shared_filesystem: false,
         tls: None,
     };

@@ -23,6 +23,7 @@
 //! `--device` (repeatable)/`DJBOD_DEVICES` (comma-separated),
 //! `--bootstrap-peer`/`DJBOD_BOOTSTRAP_PEERS`,
 //! `--temporary-max-age-secs`/`DJBOD_TEMPORARY_MAX_AGE_SECS`,
+//! `--stream-idle-timeout-secs`/`DJBOD_STREAM_IDLE_TIMEOUT_SECS`,
 //! `--allow-shared-filesystem`/`DJBOD_ALLOW_SHARED_FILESYSTEM`, and
 //! `--tls-cert`, `--tls-key`, `--tls-ca`/`DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`,
 //! `DJBOD_TLS_CA`. The file itself is `--config`/`DJBOD_CONFIG` and may be
@@ -46,6 +47,10 @@ pub const DEFAULT_PORT: u16 = 5263;
 /// Temporary files older than this are deleted at startup (SPEC 10.11).
 pub const DEFAULT_TEMPORARY_MAX_AGE_SECS: u64 = 3600;
 
+/// A body or shard stream that delivers no frame for this long is
+/// abandoned by its receiver (SPEC 10.12).
+pub const DEFAULT_STREAM_IDLE_TIMEOUT_SECS: u64 = 120;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub node_id: Uuid,
@@ -61,6 +66,10 @@ pub struct NodeConfig {
     pub bootstrap_peers: Vec<String>,
     #[serde(default = "default_temporary_max_age_secs")]
     pub temporary_max_age_secs: u64,
+    /// Seconds a receiver waits for the next frame of a body or shard
+    /// stream before abandoning the write (SPEC 10.12).
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
     /// Permit two configured devices on one filesystem. This defeats the
     /// redundancy guarantee (SPEC 5.3) and exists only so that a node can
     /// be tried, or tested, with several directories on one disk. The
@@ -79,6 +88,10 @@ fn default_listen() -> SocketAddr {
 
 fn default_temporary_max_age_secs() -> u64 {
     DEFAULT_TEMPORARY_MAX_AGE_SECS
+}
+
+fn default_stream_idle_timeout_secs() -> u64 {
+    DEFAULT_STREAM_IDLE_TIMEOUT_SECS
 }
 
 #[derive(Debug, Error)]
@@ -195,6 +208,7 @@ devices = ["/mnt/a", "/mnt/a"]
             devices: vec![PathBuf::from("/mnt/a")],
             bootstrap_peers: vec!["10.0.0.2:5263".to_string()],
             temporary_max_age_secs: 60,
+            stream_idle_timeout_secs: 120,
             allow_shared_filesystem: false,
             tls: None,
         };

@@ -12,7 +12,7 @@ use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node, NodeError};
 use djbod_node::server;
 use djbod_node::transport::{Connector, TlsError, TlsMaterial, TlsPaths};
-use djbod_proto::message::{ErrorCode, Request, Response};
+use djbod_proto::message::{DataFrame, ErrorCode, Message, Request, Response, StreamEnd};
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -113,6 +113,7 @@ fn make_config(
         devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
         bootstrap_peers: bootstrap,
         temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
         allow_shared_filesystem: true,
         tls,
     };
@@ -469,4 +470,319 @@ fn a_client_connector_comes_from_three_optional_settings() {
             Err(TlsError::IncompleteClientIdentity)
         ));
     }
+}
+
+/// The last frame of a conversation must reach the peer even when the
+/// socket would not take it at the moment it was written. On TLS, rustls
+/// accepts the plaintext into its own buffer, returns success, and sends
+/// nothing until the next write or a flush. A sender that then only reads
+/// (a coordinator waiting for PutShardDone) would wait forever, and so
+/// would its peer. `write_message` flushes. The socket is stood in for by
+/// a gate the test closes before the last frame and opens afterwards:
+/// without the flush the frame never arrives, because nothing polls the
+/// TLS stream again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_last_frame_of_a_tls_stream_is_flushed() {
+    use djbod_core::checksum::checksum_block;
+    use djbod_node::transport::{accept, Accepted};
+    use djbod_node::wire::{read_message, write_message};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+    use std::task::{Context, Poll, Waker};
+    use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf};
+    use tokio::net::TcpStream;
+
+    /// A TCP stream whose writes can be held back, as a full socket
+    /// buffer would hold them.
+    struct Gate {
+        open: AtomicBool,
+        waker: Mutex<Option<Waker>>,
+    }
+    impl Gate {
+        fn set(&self, open: bool) {
+            self.open.store(open, Ordering::SeqCst);
+            if open {
+                if let Some(waker) = self.waker.lock().expect("lock").take() {
+                    waker.wake();
+                }
+            }
+        }
+    }
+    struct Gated {
+        inner: TcpStream,
+        gate: Arc<Gate>,
+    }
+    impl Gated {
+        fn held(&self, cx: &mut Context<'_>) -> bool {
+            if self.gate.open.load(Ordering::SeqCst) {
+                return false;
+            }
+            *self.gate.waker.lock().expect("lock") = Some(cx.waker().clone());
+            true
+        }
+    }
+    impl AsyncRead for Gated {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for Gated {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.held(cx) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.held(cx) {
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    let mut authority = Authority::new();
+    let material = Arc::new(TlsMaterial::load(&authority.issue("127.0.0.1")).expect("load"));
+    let client_paths = authority.issue("client");
+    let (listener, addr) = reserve_port().await;
+
+    // The receiving side: a real node-style TLS accept, reading frames
+    // until the end of the stream.
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.expect("accept");
+        let stream = match accept(tcp, Some(&material), Transport::TlsOptional)
+            .await
+            .expect("tls accept")
+        {
+            Accepted::Stream(stream) => stream,
+            Accepted::PlainRefused(_) => panic!("plain?"),
+        };
+        let (read_half, _write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+        let mut frames = 0u64;
+        loop {
+            match read_message(&mut reader).await.expect("read") {
+                Message::Data { .. } => frames += 1,
+                Message::EndOfStream { .. } => return frames,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    });
+
+    // The sending side: the same rustls client configuration a node or
+    // client builds, over the gated socket.
+    let read_pem = |path: &std::path::Path| -> Vec<rustls::pki_types::CertificateDer<'static>> {
+        let file = std::fs::File::open(path).expect("open");
+        rustls_pemfile::certs(&mut std::io::BufReader::new(file))
+            .collect::<Result<_, _>>()
+            .expect("pem")
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in read_pem(&client_paths.ca) {
+        roots.add(cert).expect("root");
+    }
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(
+        std::fs::File::open(&client_paths.key).expect("open"),
+    ))
+    .expect("pem")
+    .expect("key");
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(read_pem(&client_paths.cert), key)
+        .expect("client config");
+    let gate = Arc::new(Gate {
+        open: AtomicBool::new(true),
+        waker: Mutex::new(None),
+    });
+    let tcp = TcpStream::connect(addr).await.expect("connect");
+    let gated = Gated {
+        inner: tcp,
+        gate: gate.clone(),
+    };
+    let name = rustls::pki_types::ServerName::IpAddress(rustls::pki_types::IpAddr::from(addr.ip()));
+    let mut tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, gated)
+        .await
+        .expect("tls connect");
+
+    // Blocks go through with the gate open.
+    let block = vec![0x5au8; 64 * 1024];
+    for sequence in 0..4u64 {
+        write_message(
+            &mut tls,
+            &Message::Data {
+                id: 1,
+                data: DataFrame {
+                    sequence,
+                    checksum: checksum_block(&block),
+                    bytes: block.clone(),
+                },
+            },
+        )
+        .await
+        .expect("write block");
+    }
+    // The socket "fills" just before the last frame. The write of the
+    // EndOfStream is spawned because, with the flush, it must wait for
+    // the socket; without the flush it returns at once with the frame
+    // still in rustls' buffer.
+    gate.set(false);
+    let sender = tokio::spawn(async move {
+        write_message(
+            &mut tls,
+            &Message::EndOfStream {
+                id: 1,
+                end: StreamEnd::ok(),
+            },
+        )
+        .await
+        .expect("write end");
+        // Keep the stream alive, only waiting, as a coordinator waiting
+        // for PutShardDone would.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(tls);
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    gate.set(true);
+    let frames = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("the EndOfStream frame must arrive once the socket takes writes again")
+        .expect("server task");
+    assert_eq!(frames, 4);
+    sender.abort();
+}
+
+/// Many writes of varying sizes through a TLS cluster, none may hang.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sustained_writes_over_tls_all_complete() {
+    let mut authority = Authority::new();
+    let a = first_node(2, 1, Some(authority.issue("127.0.0.1"))).await;
+    let b = joined_node(&a, Some(authority.issue("127.0.0.1"))).await;
+    let c = joined_node(&b, Some(authority.issue("127.0.0.1"))).await;
+    let cluster = a.node.cluster_id();
+    let tls = tls_connector(&authority.issue("admin"));
+    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+        .await
+        .expect("set transport");
+    let mut client = a.client(&tls).await.expect("tls client");
+    let mut x: u64 = 7;
+    for i in 0..40u32 {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        let size = 1024 + (x % (3 * 1024 * 1024)) as usize;
+        let body = vec![(i as u8).wrapping_mul(31); size];
+        let key = format!("sustained/{i:03}");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.put_object(&key, &body, 100_000, None),
+        )
+        .await
+        {
+            Ok(result) => {
+                result.expect("put");
+            }
+            Err(_) => panic!("put {i} of {size} bytes hung"),
+        }
+    }
+    for i in [0u32, 17, 39] {
+        let (_, got) = client
+            .get_object(&format!("sustained/{i:03}"))
+            .await
+            .expect("get");
+        assert_eq!(got[0], (i as u8).wrapping_mul(31));
+    }
+    drop((b, c));
+}
+
+/// A client that starts an upload and then goes silent must not hold
+/// shard writes open forever: the coordinator gives up after the idle
+/// timeout, aborts the holders, and no temporary file remains.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_silent_upload_is_abandoned_after_the_idle_timeout() {
+    let (listener, addr) = reserve_port().await;
+    let (base, _dirs, _state) = make_config(addr, vec![], None);
+    // 2+1 needs three devices; make_config gives one.
+    let extra: Vec<tempfile::TempDir> = (0..2).map(|_| tempfile::tempdir().expect("dir")).collect();
+    let mut devices = base.devices.clone();
+    devices.extend(extra.iter().map(|d| d.path().to_path_buf()));
+    let config = NodeConfig {
+        devices,
+        stream_idle_timeout_secs: 1,
+        ..base
+    };
+    let node = Arc::new(
+        Node::init_cluster(
+            config,
+            ClusterParameters {
+                k: 2,
+                m: 1,
+                block_size: BLOCK,
+                headroom: 0.0,
+                ..ClusterParameters::default()
+            },
+        )
+        .expect("init cluster"),
+    );
+    let server = tokio::spawn(server::serve(node.clone(), listener));
+    let mut client = Connection::connect(addr, Connection::client_hello(node.cluster_id()))
+        .await
+        .expect("connect");
+    let id = client
+        .send_request(Request::PutObject {
+            key: "silent".to_string(),
+            size: 4 * BLOCK,
+            content_type: None,
+            user_metadata: Default::default(),
+        })
+        .await
+        .expect("send request");
+    // Send nothing more. Within a few seconds the coordinator abandons the
+    // write and tells us, or closes the connection.
+    let outcome =
+        tokio::time::timeout(std::time::Duration::from_secs(10), client.read_response(id))
+            .await
+            .expect("the coordinator must give up");
+    match outcome {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert!(detail.message.contains("no frame arrived"), "{detail:?}")
+        }
+        Err(_) => {}
+        Ok(other) => panic!("a silent upload must not succeed: {other:?}"),
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for device in node.devices() {
+        let mut pending = vec![device.root().to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    assert!(
+                        path.extension().is_none_or(|e| e != "tmp"),
+                        "temporary left behind: {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    server.abort();
+    drop(extra);
 }

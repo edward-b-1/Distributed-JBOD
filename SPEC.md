@@ -878,6 +878,21 @@ its header from creation (9.3.2), so the log can name the key hash, version,
 and shard index it belonged to. The scrubber, when it exists, does the same
 during its walk.
 
+10.12 [D] **Streams are flushed and abandoned streams time out.** Every
+frame is flushed to the socket when written: over TLS the library may
+accept a frame into its own buffer while the socket would block and send
+nothing until the next write, and the last frame of a conversation (an
+`EndOfStream` after many blocks) has no next write, so without the flush
+both sides waited on each other. The receiving side of a body or shard
+stream, the coordinator reading a client's body and a holder reading a
+coordinator's blocks, waits at most `stream_idle_timeout_secs` (default
+120) for the next frame and then abandons the write: the holder drops its
+temporary file, the coordinator aborts every holder and reports
+`WriteFailed`. A sender that has legitimately paused longer than that is
+told so and can retry; a sender that died no longer leaves temporaries
+and connections behind. The timeout is per frame, not per stream, so a
+slow client is fine as long as it keeps sending.
+
 ## 11. Read path (GET)
 
 11.1 [D] The client sends a key to a coordinator.
@@ -1090,6 +1105,7 @@ to the client:
 - A write fails on any device and no replacement is found.
 - Nodes disagree on the cluster document version.
 - A key exceeds the sanity limit, or an object exceeds the maximum size.
+- A body or shard stream delivers no frame for the idle timeout (10.12).
 
 16.2 [D] Errors carry enough detail for an administrator to act: the
 condition, the node and device UUIDs involved, and for data errors the

@@ -94,6 +94,10 @@ struct ConfigArgs {
     /// Temporary files older than this are deleted at startup.
     #[arg(long, env = "DJBOD_TEMPORARY_MAX_AGE_SECS")]
     temporary_max_age_secs: Option<u64>,
+    /// Seconds to wait for the next frame of an upload before abandoning
+    /// it.
+    #[arg(long, env = "DJBOD_STREAM_IDLE_TIMEOUT_SECS")]
+    stream_idle_timeout_secs: Option<u64>,
     /// Permit two devices on one filesystem (tests and experiments only).
     #[arg(long, env = "DJBOD_ALLOW_SHARED_FILESYSTEM")]
     allow_shared_filesystem: bool,
@@ -124,6 +128,7 @@ impl ConfigArgs {
                     devices: Vec::new(),
                     bootstrap_peers: Vec::new(),
                     temporary_max_age_secs: djbod_node::config::DEFAULT_TEMPORARY_MAX_AGE_SECS,
+                    stream_idle_timeout_secs: djbod_node::config::DEFAULT_STREAM_IDLE_TIMEOUT_SECS,
                     allow_shared_filesystem: false,
                     tls: None,
                 }
@@ -149,6 +154,9 @@ impl ConfigArgs {
         }
         if let Some(secs) = self.temporary_max_age_secs {
             config.temporary_max_age_secs = secs;
+        }
+        if let Some(secs) = self.stream_idle_timeout_secs {
+            config.stream_idle_timeout_secs = secs;
         }
         if self.allow_shared_filesystem {
             config.allow_shared_filesystem = true;

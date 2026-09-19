@@ -49,6 +49,7 @@ async fn start_node_with_tls(device_count: usize, k: u8, m: u8, tls: Option<TlsP
         devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
         allow_shared_filesystem: true,
         tls,
     };
