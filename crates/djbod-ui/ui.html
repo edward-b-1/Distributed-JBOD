@@ -443,7 +443,7 @@ function renderBanners() {
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
   if (location.protocol === 'http:' && !local) {
     warnings.push({ id: 'page-plain', level: 'critical',
-      text: `This page is served over http from ${location.host}. Configure TLS encryption with a reverse proxy in front of `,
+      text: `This page is served using http from ${location.host}. Configure TLS encryption with a reverse proxy in front of `,
       code: 'djbod-ui', tail: '.' });
   }
   let dismissed = [];
