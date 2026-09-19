@@ -224,6 +224,7 @@ impl Node {
                     id: d.id(),
                     node: node_id,
                     state: DeviceState::Active,
+                    label: None,
                 })
                 .collect(),
         };
@@ -479,6 +480,7 @@ impl Node {
                     id: *device,
                     node: node_id,
                     state: DeviceState::Active,
+                    label: None,
                 });
             }
         }

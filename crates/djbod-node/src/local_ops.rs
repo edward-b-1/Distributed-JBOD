@@ -301,6 +301,7 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
             device: id,
             node: node.id(),
             state,
+            label: document.device(id).and_then(|d| d.label.clone()),
             total_bytes: space.total_bytes,
             free_bytes: space.free_bytes,
         });

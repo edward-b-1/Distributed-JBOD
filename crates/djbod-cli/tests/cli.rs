@@ -660,3 +660,59 @@ async fn the_client_speaks_tls_with_flags_or_environment() {
     let (ok, _, err) = djbod(&test, &["head", "k"]);
     assert!(ok, "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn devices_can_be_labelled_and_named_by_label() {
+    // Five devices at 3+1, so one can drain while four stay active.
+    let test = start_node(5, 3, 1).await;
+    let device = test.node.devices()[1].id().0.to_string();
+    let other = test.node.devices()[2].id().0.to_string();
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("is now labelled nas1-bay1"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    assert!(ok);
+    assert!(out.contains("nothing changed"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("LABEL"), "{out}");
+    assert!(out.contains("nas1-bay1"), "{out}");
+
+    // A duplicate, a label with whitespace, and one that looks like a
+    // UUID are refused by the document validator.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "nas1-bay1"]);
+    assert!(!ok);
+    assert!(err.contains("used by more than one device"), "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "bay 2"]);
+    assert!(!ok);
+    assert!(err.contains("whitespace"), "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, &device]);
+    assert!(!ok);
+    assert!(err.contains("looks like a UUID"), "{err}");
+
+    // Every command that takes a device takes the label instead.
+    let (ok, out, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "draining"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&device), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "drain", "nas1-bay1"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "active"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-state", "no-such-label", "active"]);
+    assert!(!ok);
+    assert!(
+        err.contains("no device is named \"no-such-label\""),
+        "{err}"
+    );
+
+    // Relabel by the current label, then clear.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", "nas1-bay1", "nas1-bay9"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["cluster", "set-label", "nas1-bay9", "--clear"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("label cleared"), "{out}");
+    let (ok, out, _) = djbod(&test, &["--json", "cluster-config"]);
+    assert!(ok);
+    assert!(!out.contains("\"label\""), "{out}");
+}
