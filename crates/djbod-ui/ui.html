@@ -507,12 +507,34 @@ function renderDetail(record) {
       ...Object.entries(record.user_metadata || {}).flatMap(([k, v]) => [el('dt', { text: 'meta ' + k }), el('dd', { text: v })])),
     el('div', { class: 'actions', style: 'margin:10px 0' },
       el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download' }),
+      el('button', { text: 'Verify', title: 'read the whole object through the node without saving it: every block is checked, and any damage is named', onclick: (e) => verify(record.key, e.target) }),
       el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
       el('button', { class: 'danger', text: 'Delete', onclick: () => remove(record.key) })),
+    el('div', { id: 'verify-result' }),
     el('table', {}, el('thead', {}, el('tr', {}, el('th', { class: 'num', text: '#' }), el('th', { text: 'Device' }), el('th', { text: 'Node' }), el('th', { text: 'State' }))), el('tbody', {}, ...shardRows)),
     el('div', { class: 'row' }, el('label', {}, 'Move ', shardSelect), el('label', {}, 'to ', targetSelect),
       el('button', { text: 'Move shard', onclick: () => moveShard(record.key, Number($('move-index').value), $('move-to').value || null) })),
     el('details', {}, el('summary', { text: 'record as JSON' }), el('pre', { text: JSON.stringify(record, null, 2) })));
+}
+async function verify(key, button) {
+  const box = $('verify-result');
+  button.disabled = true;
+  box.replaceChildren(el('p', { class: 'hint', text: `verifying ${key}: reading every block through the node…` }));
+  try {
+    const r = await post('/verify/' + encodeKey(key));
+    if (state.selectedKey !== key) return;
+    const when = new Date().toLocaleTimeString();
+    if (r.verified) {
+      box.replaceChildren(el('p', { class: 'ok', style: 'margin:0 0 10px', text: `verified at ${when}: ${human(r.size)} read and every block checked; version ${r.version}` }));
+    } else {
+      const e = r.error;
+      box.replaceChildren(el('p', { class: 'bad', style: 'margin:0 0 10px' },
+        `damaged (${when}): ${e.code}: ${e.message}`,
+        el('br'),
+        el('span', { class: 'hint', text: describeError(e).replace(/\n/g, '   ') + '   Repair rebuilds it from the other shards.' })));
+    }
+  } catch (e) { box.replaceChildren(); fail('verify', e); }
+  finally { button.disabled = false; }
 }
 async function repair(key) {
   try {

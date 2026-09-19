@@ -674,3 +674,45 @@ async fn a_refusal_during_upload_is_delivered_after_the_body() {
     let json: serde_json::Value = serde_json::from_str(body.trim()).expect("json body");
     assert_eq!(json["error"]["code"], "object_too_large", "{json}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verify_names_the_damage_a_download_would_meet() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 2 * 64 * 1024 + 7, 11);
+    put_object(&test, "v/file", &body, None).await;
+
+    let (status, json) = post_json(&test, "/api/verify/v/file", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["verified"], true);
+    assert_eq!(json["size"], body.len());
+
+    // Damage shard 0, a data shard, inside its data.
+    let mut damaged = None;
+    for dir in &test.dirs {
+        for entry in walkdir(dir.path()) {
+            if entry.to_string_lossy().ends_with(".0.shard") {
+                let mut bytes = std::fs::read(&entry).unwrap();
+                bytes[4096 + 10] ^= 0xff;
+                std::fs::write(&entry, bytes).unwrap();
+                damaged = Some(entry);
+            }
+        }
+    }
+    assert!(damaged.is_some());
+
+    let (status, json) = post_json(&test, "/api/verify/v/file", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["verified"], false);
+    assert_eq!(json["error"]["code"], "block_checksum_mismatch");
+    assert_eq!(json["error"]["shard_index"], 0);
+    assert_eq!(json["error"]["stripe"], 0);
+    assert!(json["error"]["device"].is_string());
+
+    let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let (_, json) = post_json(&test, "/api/verify/v/file", serde_json::json!({})).await;
+    assert_eq!(json["verified"], true, "{json}");
+
+    let (status, json) = post_json(&test, "/api/verify/v/missing", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+}

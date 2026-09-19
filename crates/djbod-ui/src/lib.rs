@@ -22,6 +22,7 @@
 //! | `DELETE /objects/{key}`              | `DeleteObject`                      |
 //! | `GET  /download/{key}`               | `GetObject`, body streamed through  |
 //! | `POST /repair/{key}`                 | `RepairObject`                      |
+//! | `POST /verify/{key}`                 | `GetObject`, body read and discarded: intact or the node's error |
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
@@ -93,6 +94,7 @@ pub fn router(target: Target) -> Router {
         )
         .route("/download/{*key}", get(download_object))
         .route("/repair/{*key}", post(repair_object))
+        .route("/verify/{*key}", post(verify_object))
         .route("/move-shard/{*key}", post(move_shard))
         .route("/scrub", post(scrub))
         .route("/devices/{id}/state", post(set_device_state))
@@ -559,6 +561,36 @@ async fn download_object(
             .unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     Ok(response)
+}
+
+/// Read the object through, as a download would, without keeping it: the
+/// node checks every block against its checksum and the whole object at
+/// the end (SPEC 11.7), so this answers whether a download would succeed
+/// and, when it would not, exactly what is damaged. A damaged object is a
+/// result, not a failure of the request, so it comes back as 200 with
+/// `verified: false` and the node's error detail; only not finding the
+/// object or the node is an error.
+async fn verify_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
+    let mut conn = connect(&target).await?;
+    let mut sink = tokio::io::sink();
+    match conn.get_object_to_writer(&key, &mut sink).await {
+        Ok(record) => Ok(Json(json!({
+            "key": key,
+            "verified": true,
+            "version": record.version.to_text(),
+            "size": record.size,
+        }))),
+        Err(ClientError::StreamFailed(detail)) | Err(ClientError::Remote(detail))
+            if detail.code != ErrorCode::NotFound =>
+        {
+            Ok(Json(json!({
+                "key": key,
+                "verified": false,
+                "error": detail,
+            })))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 async fn repair_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
