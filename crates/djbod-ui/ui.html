@@ -35,6 +35,11 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+  /* The page is a column that fills the window; the frame takes what the
+     header (and any banners) leave, so the rail reaches the bottom on a
+     short page without the page ever being taller than the window. */
+  body { min-height: 100vh; display: flex; flex-direction: column; }
+  body > * { flex: none; }
   a { color: var(--accent); }
   header {
     display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
@@ -47,7 +52,7 @@
      where it means something, a live count; the selected one sits on a
      tinted background. On a narrow screen the rail becomes a row above
      the content. */
-  .frame { display: grid; grid-template-columns: 184px minmax(0, 1fr); min-height: calc(100vh - 56px); }
+  .frame { display: grid; grid-template-columns: 184px minmax(0, 1fr); flex: 1 1 auto; }
   aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 8px; }
   aside.rail nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
   .rail button {
@@ -62,7 +67,7 @@
   .rail .count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
   .rail button[aria-selected="true"] .count { color: var(--text-2); }
   @media (max-width: 760px) {
-    .frame { grid-template-columns: 1fr; min-height: 0; }
+    .frame { grid-template-columns: 1fr; }
     aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; }
     aside.rail nav { position: static; flex-direction: row; }
     .rail button { width: auto; }
