@@ -50,7 +50,9 @@
   }
   nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   main { padding: 16px; max-width: 1200px; margin: 0 auto; }
-  section[hidden] { display: none; }
+  /* Author display rules (flex on .row, grid on sections) would otherwise
+     beat the browser's own `[hidden] { display: none }`. */
+  [hidden] { display: none !important; }
   h2 { font-size: 15px; margin: 22px 0 8px; font-weight: 600; }
   h2:first-child { margin-top: 0; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
