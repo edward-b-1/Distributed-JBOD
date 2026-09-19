@@ -820,6 +820,38 @@ async fn device_labels_are_set_shown_and_cleared() {
     .await;
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
 
+    // Wherever a device is named in a path, its label works too.
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/nas1-bay0/state",
+        serde_json::json!({ "state": "draining" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["device"], devices[0]);
+    assert_eq!(json["changed"], true);
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/nas1-bay0/state",
+        serde_json::json!({ "state": "active" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/no-such-label/state",
+        serde_json::json!({ "state": "draining" }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no-such-label"),
+        "{json}"
+    );
+
     // Null, or an empty string, clears it.
     let (status, json) = post_json(
         &test,
