@@ -88,6 +88,7 @@ pub fn our_hello(node: &Node) -> Hello {
         node_id: Some(node.id()),
         cluster_id: node.cluster_id(),
         document_version: node.document_version(),
+        build: Some(crate::BUILD.to_string()),
     }
 }
 
@@ -168,6 +169,29 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
                 return ConnectionEnd::ProtocolViolation(format!(
                     "expected a Request between operations, got {other:?}"
                 ))
+            }
+            Err(WireError::UndecodableRequest { id, reason }) => {
+                // Most likely a field this build does not know, from a
+                // newer peer (SPEC 6.2.6.4): say so on the request's id, so
+                // the proposer learns which node to upgrade, then close,
+                // since what the request expected next is unknown.
+                let message = format!(
+                    "this node (build {}) cannot decode the request: {reason}. A field it does not know means the peer is newer; upgrade this node",
+                    crate::BUILD
+                );
+                let detail = ErrorDetail {
+                    node: Some(node.id()),
+                    ..ErrorDetail::new(ErrorCode::ProtocolViolation, message.clone())
+                };
+                let _ = write_message(
+                    &mut writer,
+                    &Message::Response {
+                        id,
+                        response: Response::Error(detail),
+                    },
+                )
+                .await;
+                return ConnectionEnd::ProtocolViolation(message);
             }
             Err(e) => return e.into(),
         };

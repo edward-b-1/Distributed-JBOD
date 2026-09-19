@@ -33,7 +33,7 @@ use djbod_node::transport::Connector;
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
 
 #[derive(Parser)]
-#[command(name = "djbod", about = "Distributed-JBOD client", version)]
+#[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_node::BUILD)]
 struct Cli {
     /// Address of any node in the cluster.
     #[arg(long, env = "DJBOD_NODE", global = true)]
@@ -752,6 +752,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     "label": r.label,
                                     "address": r.address,
                                     "addresses": document.node(r.node).map(|n| &n.addresses),
+                                    "build": r.build,
                                     "version": r.result.as_ref().ok().map(|d| d.version),
                                     "error": r.result.as_ref().err(),
                                 })
@@ -763,8 +764,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("document  version {} as held by {node}", document.version);
                         println!();
                         println!(
-                            "{:<36}  {:<16}  {:<21}  VERSION",
-                            "NODE", "LABEL", "ADDRESS"
+                            "{:<36}  {:<16}  {:<21}  {:<18}  VERSION",
+                            "NODE", "LABEL", "ADDRESS", "BUILD"
                         );
                         for r in &reports {
                             let version = match &r.result {
@@ -776,11 +777,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 .node(r.node)
                                 .map(|n| n.addresses.join(", "))
                                 .unwrap_or_else(|| r.address.clone());
+                            // A reachable node that sent no build predates
+                            // builds in Hello: an older build (SPEC 6.2.6.4).
+                            let build = match (&r.build, &r.result) {
+                                (Some(build), _) => build.as_str(),
+                                (None, Ok(_)) => "older, unreported",
+                                (None, Err(_)) => "-",
+                            };
                             println!(
-                                "{:<36}  {:<16}  {:<21}  {version}",
+                                "{:<36}  {:<16}  {:<21}  {:<18}  {version}",
                                 r.node.0,
                                 r.label.as_deref().unwrap_or("-"),
-                                addresses
+                                addresses,
+                                build
                             );
                         }
                     }

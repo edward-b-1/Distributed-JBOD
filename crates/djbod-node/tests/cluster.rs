@@ -10,12 +10,15 @@ use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
-use djbod_node::node::{ClusterParameters, Node};
+use djbod_node::node::{ClusterParameters, Node, NodeError};
 use djbod_node::server;
 use djbod_node::transport::Connector;
+use djbod_node::wire;
+use djbod_proto::frame::{Frame, MessageType};
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{DrainEvent, ErrorCode, Request, Response, ShardCondition};
-use tokio::net::TcpListener;
+use djbod_proto::message::{DrainEvent, ErrorCode, Message, Request, Response, ShardCondition};
+use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -711,6 +714,7 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: a.node.cluster_id(),
         document_version: a.node.document_version(),
+        build: None,
     };
     let mut first = Connection::connect(a.addr, hello()).await.expect("connect");
     let id1 = first.send_request(request.clone()).await.expect("send");
@@ -1667,4 +1671,89 @@ async fn a_lone_node_adopts_its_configured_address_by_itself() {
     let mut client = Connection::connect(new_addr, hello).await.expect("connect");
     let (_, got) = client.get_object("k").await.expect("get");
     assert_eq!(got, body);
+}
+
+/// SPEC 6.2.6.4: a document carrying a field this build does not know is
+/// refused, on the wire with an error naming the field and this node's
+/// build, and in this node's own file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
+    let mut a = first_node(1, 1, 0).await;
+    let before = a.node.document_version();
+    let mut next = a.node.document();
+    next.version += 1;
+
+    // The request as a newer build would send it: the document with one
+    // more field. Externally tagged: {"ApplyClusterConfig": {"document": {..}}}.
+    let request = Request::ApplyClusterConfig { document: next };
+    let mut value = ciborium::Value::serialized(&request).expect("to cbor value");
+    let document = value.as_map_mut().expect("request map")[0]
+        .1
+        .as_map_mut()
+        .expect("variant map")[0]
+        .1
+        .as_map_mut()
+        .expect("document map");
+    document.push((
+        ciborium::Value::Text("colour".to_string()),
+        ciborium::Value::Text("blue".to_string()),
+    ));
+    let payload = djbod_proto::codec::encode_cbor(&value).expect("encode");
+
+    let mut stream = TcpStream::connect(a.addr).await.expect("connect");
+    let hello = Message::Hello(Connection::client_hello(a.node.cluster_id()));
+    wire::write_message(&mut stream, &hello)
+        .await
+        .expect("hello");
+    match wire::read_message(&mut stream).await.expect("peer hello") {
+        Message::Hello(peer) => assert_eq!(peer.build.as_deref(), Some(djbod_node::BUILD)),
+        other => panic!("expected Hello, got {other:?}"),
+    }
+    stream
+        .write_all(&Frame::new(MessageType::Request, 7, payload).encode())
+        .await
+        .expect("send");
+    match wire::read_message(&mut stream).await.expect("response") {
+        Message::Response {
+            id: 7,
+            response: Response::Error(detail),
+        } => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation);
+            assert!(
+                detail.message.contains("unknown field `colour`"),
+                "{}",
+                detail.message
+            );
+            assert!(
+                detail.message.contains(djbod_node::BUILD),
+                "{}",
+                detail.message
+            );
+            assert_eq!(detail.node, Some(a.node.id()));
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            wire::read_message(&mut stream).await,
+            Err(wire::WireError::Closed)
+        ),
+        "the connection is closed after an undecodable request"
+    );
+    assert_eq!(a.node.document_version(), before, "nothing was applied");
+
+    // The same field in this node's own copy, as a newer build would have
+    // written it: refused with the same reason instead of read without it.
+    a.stop();
+    let path = Node::document_path_for(&a.config);
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    json["nodes"][0]["colour"] = "blue".into();
+    std::fs::write(&path, serde_json::to_string(&json).expect("to json")).expect("write");
+    match Node::load_document_for(&a.config) {
+        Err(NodeError::BadDocument { reason, .. }) => {
+            assert!(reason.contains("unknown field `colour`"), "{reason}")
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
 }

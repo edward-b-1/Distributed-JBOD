@@ -485,6 +485,12 @@ works again when it is back. If a document change ever reaches some nodes
 and not others, `djbod cluster show` shows the versions disagreeing and
 `djbod cluster sync` brings every reachable node up to the highest.
 
+`cluster show` also prints each node's build (the `BUILD` column, the
+same string as `djbod-node --version`). When upgrading, upgrade every
+node before making a change that uses something the older build lacks: a
+node refuses a document it cannot represent rather than silently dropping
+part of it, and the error names the node and the field (SPEC.md 6.2.6.4).
+
 To give an existing node another device, list the new path in its
 configuration, run `djbod-node add-device --config <file> --path <the
 path>`, and restart the node.

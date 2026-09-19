@@ -34,6 +34,10 @@ pub struct Hello {
     pub cluster_id: Uuid,
     /// The cluster document version this peer holds; 0 for clients.
     pub document_version: u64,
+    /// The peer's software build, version and commit (19.1.5). Absent
+    /// from builds before it, so `cluster show` can name an older node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

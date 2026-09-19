@@ -14,7 +14,7 @@ use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 
 #[derive(Parser)]
-#[command(name = "djbod-node", about = "Distributed-JBOD node")]
+#[command(name = "djbod-node", about = "Distributed-JBOD node", version = djbod_node::BUILD)]
 struct Cli {
     /// Log output format (SPEC 20.4.3).
     #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]

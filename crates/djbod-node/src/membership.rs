@@ -19,6 +19,7 @@ use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
+use djbod_proto::handshake::Hello;
 use djbod_proto::message::{ErrorCode, ErrorDetail, RecordCursor, Request, Response};
 
 use crate::client::{ClientError, Connection};
@@ -33,6 +34,9 @@ pub struct NodeDocument {
     /// The node's label in the document that was asked, if any.
     pub label: Option<String>,
     pub address: String,
+    /// The node's software build from its `Hello`; `None` when it was
+    /// unreachable or built before builds were sent (19.1.5).
+    pub build: Option<String>,
     pub result: Result<ClusterDocument, String>,
 }
 
@@ -174,6 +178,18 @@ pub async fn fetch_document(
     address: SocketAddr,
     cluster_id: Uuid,
 ) -> Result<ClusterDocument, MembershipError> {
+    fetch_document_and_hello(connector, address, cluster_id)
+        .await
+        .map(|(document, _)| document)
+}
+
+/// `fetch_document`, also returning the node's `Hello`, which names its
+/// build.
+async fn fetch_document_and_hello(
+    connector: &Connector,
+    address: SocketAddr,
+    cluster_id: Uuid,
+) -> Result<(ClusterDocument, Hello), MembershipError> {
     let mut connection =
         Connection::connect_with(connector, address, Connection::client_hello(cluster_id))
             .await
@@ -200,7 +216,9 @@ pub async fn fetch_document(
                 },
             })?;
     match connection.request(Request::GetClusterConfig).await {
-        Ok(Response::GetClusterConfig { document }) => Ok(document),
+        Ok(Response::GetClusterConfig { document }) => {
+            Ok((document, connection.peer_hello().clone()))
+        }
         Ok(other) => Err(MembershipError::UnexpectedResponse {
             address,
             response: format!("{other:?}"),
@@ -226,16 +244,20 @@ async fn fetch_all_except(
     let mut reports = Vec::with_capacity(document.nodes.len());
     for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
         let address_text = entry.addresses.first().cloned().unwrap_or_default();
-        let result = match first_address(document, entry.id) {
-            Ok(address) => fetch_document(connector, address, document.cluster_id)
-                .await
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(e.to_string()),
+        let (build, result) = match first_address(document, entry.id) {
+            Ok(address) => {
+                match fetch_document_and_hello(connector, address, document.cluster_id).await {
+                    Ok((theirs, hello)) => (hello.build, Ok(theirs)),
+                    Err(e) => (None, Err(e.to_string())),
+                }
+            }
+            Err(e) => (None, Err(e.to_string())),
         };
         reports.push(NodeDocument {
             node: entry.id,
             label: entry.label.clone(),
             address: address_text,
+            build,
             result,
         });
     }

@@ -737,6 +737,12 @@ async fn nodes_can_be_labelled_and_named_by_label() {
     let (ok, out, _) = djbod(&test, &["cluster", "show"]);
     assert!(ok);
     assert!(out.contains("nas1"), "{out}");
+    // Each node's build, for telling an older node apart (SPEC 6.2.6.4).
+    assert!(out.contains("BUILD"), "{out}");
+    assert!(out.contains(djbod_node::BUILD), "{out}");
+    let (ok, out, _) = djbod(&test, &["--version"]);
+    assert!(ok);
+    assert!(out.contains(djbod_node::BUILD), "{out}");
 
     // A device may carry the same label as a node: separate namespaces.
     let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "nas1"]);

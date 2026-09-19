@@ -222,6 +222,7 @@ fn hello_round_trips_for_nodes_and_clients() {
         node_id: Some(node(1)),
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 7,
+        build: None,
     };
     round_trip(Message::Hello(hello.clone()));
     let client = Hello {
@@ -242,6 +243,7 @@ fn hello_checks_catch_wrong_cluster_wrong_version_and_stale_nodes() {
         node_id: Some(node(1)),
         cluster_id: ours,
         document_version: 7,
+        build: None,
     };
     assert_eq!(good.check_against(ours, 7), Ok(()));
 
@@ -615,6 +617,7 @@ fn request_ids_are_carried_and_handshake_frames_have_none() {
         node_id: None,
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 0,
+        build: None,
     });
     assert_eq!(hello.request_id(), None);
 }
