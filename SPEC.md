@@ -1192,11 +1192,15 @@ inspected before the next is run:
   are `membership::scan_references` (18.5). Removing the last node is
   refused.
 - **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
-  change membership only. They scan every record in the cluster (18.5)
-  and refuse if any still lists the device, or any of the node's devices;
-  otherwise they propose a document marking the device `removed`, or
-  dropping the node and its devices, with the node's own acknowledgement
-  like any other change. A live node is therefore removed by `set-state`,
+  change membership only. They refuse an `active` device, or a node with
+  any `active` device, before looking at any record: only a `draining`
+  device receives no new shards, so only then can the scan that follows
+  not be invalidated by a write landing between the scan and the
+  proposal. They then scan every record in the cluster (18.5) and refuse
+  if any still lists the device, or any of the node's devices; otherwise
+  they propose a document marking the device `removed`, or dropping the
+  node and its devices, with the node's own acknowledgement like any
+  other change. A live node is therefore removed by `set-state`,
   `drain`, `remove-node`, each of which can be checked with `status` and
   `scrub` in between. A dead node is the one case that skips the scan:
   6.2.6.3.

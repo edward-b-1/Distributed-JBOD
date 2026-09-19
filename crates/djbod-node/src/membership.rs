@@ -104,6 +104,17 @@ pub enum MembershipError {
         versions: usize,
         examples: Vec<String>,
     },
+    #[error(
+        "{0} is active; a device is removed only once it is draining and drained (`djbod cluster set-state`, `djbod cluster drain`), so that no write can land on it between the reference scan and the removal"
+    )]
+    DeviceActive(DeviceId),
+    #[error(
+        "{node} still has active device(s) {devices:?}; set each draining and drain it first (`djbod cluster set-state`, `djbod cluster drain`)"
+    )]
+    NodeHasActiveDevices {
+        node: NodeId,
+        devices: Vec<DeviceId>,
+    },
     #[error("{node} at {address} answered; a live node is removed with set-state, drain, and remove-node, not --force")]
     NodeIsAlive { node: NodeId, address: String },
     #[error("cannot remove the only node of the cluster")]
@@ -723,6 +734,12 @@ pub async fn remove_device(
         if entry.state == DeviceState::Removed {
             return Ok((current, false));
         }
+        // Only a draining device can be removed: no write can place a
+        // shard on it, so the scan below cannot be invalidated between the
+        // scan and the proposal.
+        if entry.state == DeviceState::Active {
+            return Err(MembershipError::DeviceActive(device));
+        }
         let references = scan_references(&current, &[device], None).await?;
         if !references.is_empty() {
             return Err(still_referenced(format!("{device}"), &references));
@@ -766,6 +783,20 @@ pub async fn remove_node(
             .filter(|d| d.node == node)
             .map(|d| d.id)
             .collect();
+        // As for a device: every device of the node must be draining or
+        // removed before the scan means anything.
+        let active: Vec<DeviceId> = current
+            .devices
+            .iter()
+            .filter(|d| d.node == node && d.state == DeviceState::Active)
+            .map(|d| d.id)
+            .collect();
+        if !active.is_empty() {
+            return Err(MembershipError::NodeHasActiveDevices {
+                node,
+                devices: active,
+            });
+        }
         let references = scan_references(&current, &devices, None).await?;
         if !references.is_empty() {
             return Err(still_referenced(format!("{node}"), &references));
