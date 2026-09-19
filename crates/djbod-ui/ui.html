@@ -491,9 +491,13 @@ async function select(key) {
 
 /// A link download runs outside the page, so after Download is clicked
 /// the page asks the server for a while whether the node stopped that
-/// read, and redraws the panel when it did. The server remembers only
-/// reads it relayed, in memory, until a read, verify, or repair of the
-/// key succeeds.
+/// read, and redraws the panel and list when it did. Best effort: the
+/// node stops a read only when it reaches the damaged block, so damage
+/// late in a large or slow download is not seen within the minute this
+/// watches, and shows up on the next periodic refresh instead. The
+/// server remembers only reads it relayed, in memory, until a read,
+/// verify, or repair of the key succeeds. See docs/getting-started.md
+/// and docs/proposals/damage-marks.md.
 async function refreshFailures() {
   try {
     const r = await api('/read-failures');

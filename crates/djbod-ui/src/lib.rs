@@ -77,7 +77,9 @@ pub const PAGE: &str = include_str!("../ui.html");
 /// or repair of the key succeeds or the key is deleted. This is a
 /// stopgap for a store that forgets what it found (see
 /// docs/proposals/damage-marks.md): it lives in one process, dies with
-/// it, and knows only about reads that went through it.
+/// it, knows only about reads that went through it, and is found by the
+/// page by asking, which for a slow download may be after the page has
+/// stopped asking (see `watchForReadFailure` in ui.html).
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadFailure {
     pub key: String,
