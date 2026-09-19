@@ -18,7 +18,7 @@ use anyhow::Context;
 use clap::Parser;
 use uuid::Uuid;
 
-use djbod_node::transport::{ClientTlsPaths, Connector};
+use djbod_node::transport::Connector;
 use djbod_ui::{router, Target};
 
 #[derive(Parser)]
@@ -49,24 +49,15 @@ struct Cli {
     tls_key: Option<PathBuf>,
 }
 
-/// How the UI connects to the node (SPEC 19.1.6.2), exactly as the
-/// `djbod` client decides it: TLS when a CA is given, with a certificate
-/// when one is given too, plain otherwise.
+/// How the UI connects to the node (SPEC 19.1.6.2), decided by the
+/// transport module exactly as the `djbod` client decides it.
 fn connector(cli: &Cli) -> anyhow::Result<Connector> {
-    match &cli.tls_ca {
-        None => Ok(Connector::plain()),
-        Some(ca) => {
-            let identity = match (&cli.tls_cert, &cli.tls_key) {
-                (Some(cert), Some(key)) => Some((cert.clone(), key.clone())),
-                _ => None,
-            };
-            Connector::from_client_paths(&ClientTlsPaths {
-                ca: ca.clone(),
-                identity,
-            })
-            .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-    }
+    Connector::from_client_options(
+        cli.tls_ca.as_deref(),
+        cli.tls_cert.as_deref(),
+        cli.tls_key.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[tokio::main]
