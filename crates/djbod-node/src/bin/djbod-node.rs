@@ -58,12 +58,113 @@ impl TlsArgs {
     }
 }
 
+/// The node's settings from three sources (SPEC 20.6): an argument wins
+/// over an environment variable, which wins over the configuration file.
+/// The file may be omitted when `node_id`, `state_dir`, and at least one
+/// device come from the other two.
+#[derive(clap::Args)]
+struct ConfigArgs {
+    /// The node configuration file (TOML).
+    #[arg(long, env = "DJBOD_CONFIG")]
+    config: Option<PathBuf>,
+    /// This node's UUID.
+    #[arg(long, env = "DJBOD_NODE_ID")]
+    node_id: Option<uuid::Uuid>,
+    /// Address to listen on.
+    #[arg(long, env = "DJBOD_LISTEN")]
+    listen: Option<std::net::SocketAddr>,
+    /// Address other nodes use to reach this one, when `listen` is a
+    /// wildcard.
+    #[arg(long, env = "DJBOD_ADVERTISE")]
+    advertise: Option<std::net::SocketAddr>,
+    /// Directory holding this node's copy of the cluster document.
+    #[arg(long, env = "DJBOD_STATE_DIR")]
+    state_dir: Option<PathBuf>,
+    /// A device path; repeat for several. Replaces the file's list.
+    #[arg(long = "device", env = "DJBOD_DEVICES", value_delimiter = ',')]
+    devices: Vec<PathBuf>,
+    /// A peer to consult at startup; repeat for several. Replaces the
+    /// file's list.
+    #[arg(
+        long = "bootstrap-peer",
+        env = "DJBOD_BOOTSTRAP_PEERS",
+        value_delimiter = ','
+    )]
+    bootstrap_peers: Vec<String>,
+    /// Temporary files older than this are deleted at startup.
+    #[arg(long, env = "DJBOD_TEMPORARY_MAX_AGE_SECS")]
+    temporary_max_age_secs: Option<u64>,
+    /// Permit two devices on one filesystem (tests and experiments only).
+    #[arg(long, env = "DJBOD_ALLOW_SHARED_FILESYSTEM")]
+    allow_shared_filesystem: bool,
+    #[command(flatten)]
+    tls: TlsArgs,
+}
+
+impl ConfigArgs {
+    fn resolve(&self) -> anyhow::Result<NodeConfig> {
+        let mut config = match &self.config {
+            Some(path) => NodeConfig::read(path).context("loading node configuration")?,
+            None => {
+                let node_id = self
+                    .node_id
+                    .context("no configuration file: --node-id or DJBOD_NODE_ID is required")?;
+                let state_dir = self
+                    .state_dir
+                    .clone()
+                    .context("no configuration file: --state-dir or DJBOD_STATE_DIR is required")?;
+                if self.devices.is_empty() {
+                    anyhow::bail!("no configuration file: --device or DJBOD_DEVICES is required");
+                }
+                NodeConfig {
+                    node_id,
+                    listen: NodeConfig::default_listen(),
+                    advertise: None,
+                    state_dir,
+                    devices: Vec::new(),
+                    bootstrap_peers: Vec::new(),
+                    temporary_max_age_secs: djbod_node::config::DEFAULT_TEMPORARY_MAX_AGE_SECS,
+                    allow_shared_filesystem: false,
+                    tls: None,
+                }
+            }
+        };
+        if let Some(node_id) = self.node_id {
+            config.node_id = node_id;
+        }
+        if let Some(listen) = self.listen {
+            config.listen = listen;
+        }
+        if let Some(advertise) = self.advertise {
+            config.advertise = Some(advertise);
+        }
+        if let Some(state_dir) = &self.state_dir {
+            config.state_dir = state_dir.clone();
+        }
+        if !self.devices.is_empty() {
+            config.devices = self.devices.clone();
+        }
+        if !self.bootstrap_peers.is_empty() {
+            config.bootstrap_peers = self.bootstrap_peers.clone();
+        }
+        if let Some(secs) = self.temporary_max_age_secs {
+            config.temporary_max_age_secs = secs;
+        }
+        if self.allow_shared_filesystem {
+            config.allow_shared_filesystem = true;
+        }
+        self.tls.apply(&mut config);
+        config.validate().context("node configuration")?;
+        Ok(config)
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create a new cluster consisting of this node and its devices.
     InitCluster {
-        #[arg(long)]
-        config: PathBuf,
+        #[command(flatten)]
+        config: ConfigArgs,
         /// Data shards per stripe.
         #[arg(long, default_value_t = 3)]
         k: u8,
@@ -94,8 +195,8 @@ enum Command {
     /// Join an existing cluster: fetch its document from a peer,
     /// initialise this node's devices, and add this node to the document.
     Join {
-        #[arg(long)]
-        config: PathBuf,
+        #[command(flatten)]
+        config: ConfigArgs,
         /// Address of any node already in the cluster.
         #[arg(long)]
         peer: std::net::SocketAddr,
@@ -106,14 +207,12 @@ enum Command {
         /// add them as new. Destroys their data.
         #[arg(long)]
         wipe_removed_device: bool,
-        #[command(flatten)]
-        tls: TlsArgs,
     },
     /// Initialise a device path listed in the configuration but not yet
     /// in the cluster document, and add it. Restart the node afterwards.
     AddDevice {
-        #[arg(long)]
-        config: PathBuf,
+        #[command(flatten)]
+        config: ConfigArgs,
         /// The device path(s) to add; must appear in the configuration.
         #[arg(long, required = true)]
         path: Vec<PathBuf>,
@@ -124,27 +223,22 @@ enum Command {
         /// add it as new. Destroys its data.
         #[arg(long)]
         wipe_removed_device: bool,
-        #[command(flatten)]
-        tls: TlsArgs,
     },
     /// Run the node.
     Run {
-        #[arg(long)]
-        config: PathBuf,
         #[command(flatten)]
-        tls: TlsArgs,
+        config: ConfigArgs,
     },
     /// Offline check of this machine's devices: verify every record and
     /// shard block against its checksum and report what is wrong. Reads
     /// the disks directly and needs no running node. The cluster-wide
     /// scrub, which sweeps every node and can repair, is the client's
     /// `djbod scrub` (milestone 3).
+    /// Pass `--device` to limit the scrub to some of the configured
+    /// devices.
     Scrub {
-        #[arg(long)]
-        config: PathBuf,
-        /// Only this device path (may be repeated). Default: all.
-        #[arg(long)]
-        device: Vec<PathBuf>,
+        #[command(flatten)]
+        config: ConfigArgs,
         /// Cap on read rate in MiB per second. Default: unlimited.
         #[arg(long)]
         rate_mib: Option<u64>,
@@ -209,7 +303,7 @@ async fn main() -> anyhow::Result<()> {
             max_user_metadata_bytes,
             wipe_removed_device,
         } => {
-            let config = NodeConfig::load(&config).context("loading node configuration")?;
+            let config = config.resolve()?;
             if wipe_removed_device {
                 for path in &config.devices {
                     if djbod_core::device::Device::open(path, None).is_ok() {
@@ -247,10 +341,8 @@ async fn main() -> anyhow::Result<()> {
             peer,
             cluster,
             wipe_removed_device,
-            tls,
         } => {
-            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
-            tls.apply(&mut config);
+            let config = config.resolve()?;
             let document =
                 djbod_node::membership::join(&config, peer, cluster, wipe_removed_device)
                     .await
@@ -275,10 +367,8 @@ async fn main() -> anyhow::Result<()> {
             path,
             peer,
             wipe_removed_device,
-            tls,
         } => {
-            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
-            tls.apply(&mut config);
+            let config = config.resolve()?;
             for p in &path {
                 if !config.devices.contains(p) {
                     anyhow::bail!(
@@ -306,13 +396,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Scrub {
             config,
-            device,
             rate_mib,
             json,
-        } => scrub(&config, &device, rate_mib, json).await,
-        Command::Run { config, tls } => {
-            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
-            tls.apply(&mut config);
+        } => scrub(&config.resolve()?, rate_mib, json).await,
+        Command::Run { config } => {
+            let config = config.resolve()?;
             let listen = config.listen;
             djbod_node::membership::adopt_from_peers(&config)
                 .await
@@ -348,16 +436,10 @@ async fn main() -> anyhow::Result<()> {
 
 /// The `scrub` subcommand: the local scrub engine run offline over this
 /// machine's devices.
-async fn scrub(
-    config_path: &std::path::Path,
-    only: &[PathBuf],
-    rate_mib: Option<u64>,
-    json: bool,
-) -> anyhow::Result<()> {
+async fn scrub(config: &NodeConfig, rate_mib: Option<u64>, json: bool) -> anyhow::Result<()> {
     use djbod_core::device::Device;
     use djbod_core::scrub::{scrub_device, Finding, ScrubOptions};
 
-    let config = NodeConfig::load(config_path).context("loading node configuration")?;
     let document_path = config
         .state_dir
         .join(djbod_node::node::CLUSTER_DOCUMENT_FILE);
@@ -371,14 +453,7 @@ async fn scrub(
         max_bytes_per_second: rate_mib.map(|m| m * 1024 * 1024),
         temporary_max_age: std::time::Duration::from_secs(config.temporary_max_age_secs),
     };
-    let selected: Vec<&PathBuf> = config
-        .devices
-        .iter()
-        .filter(|p| only.is_empty() || only.contains(p))
-        .collect();
-    if selected.is_empty() {
-        anyhow::bail!("no configured device matches --device");
-    }
+    let selected: Vec<&PathBuf> = config.devices.iter().collect();
 
     let mut all_findings: Vec<Finding> = Vec::new();
     let mut totals = (0u64, 0u64, 0u64, 0u64);
