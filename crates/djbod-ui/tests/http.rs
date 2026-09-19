@@ -13,7 +13,7 @@ use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_node::transport::Connector;
-use djbod_ui::{router, Target};
+use djbod_ui::{router, router_for_hosts, Target};
 use tokio::net::TcpListener;
 
 struct TestNode {
@@ -649,7 +649,7 @@ async fn a_refusal_during_upload_is_delivered_after_the_body() {
     socket
         .write_all(
             format!(
-                "PUT /api/objects/too/big HTTP/1.1\r\nHost: djbod\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+                "PUT /api/objects/too/big HTTP/1.1\r\nHost: {http}\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
             )
             .as_bytes(),
         )
@@ -934,4 +934,149 @@ async fn a_read_the_node_stopped_is_remembered_until_something_succeeds() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(collected.unwrap().to_bytes().as_ref(), body.as_slice());
     assert!(failures().await.is_empty());
+}
+
+/// A browser made to send a request from another site says so in
+/// `Sec-Fetch-Site`, or in `Origin`; the server refuses such a request
+/// when it would change anything, and refuses any request for a host name
+/// it was not told it answers to.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_from_another_site_or_host_are_refused() {
+    let test = start_node(4, 3, 1).await;
+    let send = |method: &str, path: &str, headers: Vec<(&str, &str)>| {
+        let router = app(&test);
+        let mut request = Request::builder().method(method).uri(path);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        async move {
+            let response = router
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            (status, json)
+        }
+    };
+
+    // The page's own requests, and a non-browser client, pass.
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("host", "127.0.0.1:5264"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![("sec-fetch-site", "none"), ("host", "192.168.1.10:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![("host", "localhost:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![("host", "[::1]:5264"), ("origin", "http://[::1]:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send("POST", "/api/cluster/sync", vec![]).await;
+    assert_eq!(status, StatusCode::OK, "no Host at all is not a browser");
+
+    // A form or script on another site.
+    let (status, json) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![("sec-fetch-site", "cross-site"), ("host", "127.0.0.1:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+    assert_eq!(json["error"]["code"], "cross_site");
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![("sec-fetch-site", "same-site"), ("host", "127.0.0.1:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        "POST",
+        "/api/cluster/sync",
+        vec![
+            ("host", "127.0.0.1:5264"),
+            ("origin", "http://evil.example"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "an old browser says only Origin"
+    );
+    let (status, _) = send(
+        "DELETE",
+        "/api/objects/x",
+        vec![("sec-fetch-site", "cross-site"), ("host", "127.0.0.1:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Reads from another site are allowed through; the browser's own
+    // same-origin policy keeps their bodies from the other page.
+    let (status, _) = send(
+        "GET",
+        "/api/status",
+        vec![("sec-fetch-site", "cross-site"), ("host", "127.0.0.1:5264")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A DNS name pointed here by someone else looks same-origin to the
+    // browser, so the Host check is what stops it.
+    let (status, json) = send(
+        "GET",
+        "/api/status",
+        vec![
+            ("sec-fetch-site", "same-origin"),
+            ("host", "evil.example:5264"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
+    assert_eq!(json["error"]["code"], "unknown_host");
+    let (status, _) = send("GET", "/", vec![("host", "evil.example")]).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "the page itself too");
+
+    // A name the operator declared is fine.
+    let named = router_for_hosts(
+        Target {
+            node: test.addr,
+            cluster: test.node.cluster_id(),
+            connector: Connector::plain(),
+        },
+        vec!["Nas.Example".to_string()],
+    );
+    let response = named
+        .oneshot(
+            Request::get("/api/status")
+                .header("host", "nas.example:5264")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
