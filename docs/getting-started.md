@@ -405,6 +405,20 @@ with `openssl`, point the processes at the files, and switch the
 cluster's transport (SPEC.md 19.1.6). djbod generates no keys and signs
 nothing; the files are yours.
 
+The commands below are what `scripts/djbod-pki.sh` runs; use the script
+if you would rather not type them:
+
+```sh
+scripts/djbod-pki.sh --dir ~/djbod-pki init-ca
+scripts/djbod-pki.sh --dir ~/djbod-pki node nas1 10.0.0.1
+scripts/djbod-pki.sh --dir ~/djbod-pki client admin
+scripts/djbod-pki.sh --dir ~/djbod-pki list
+```
+
+It refuses to overwrite a file, insists on IP addresses for nodes, makes
+every key readable only by you, and prints the configuration lines to
+paste. The rest of this section explains what it does.
+
 **Create the authority.** Once per cluster, on any machine, kept offline
 afterwards:
 
