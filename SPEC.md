@@ -229,7 +229,8 @@ Configuration has three layers.
 
 6.1.1 [D] Node UUID, listen addresses, the list of device paths, one or
 more bootstrap peer addresses, and a state directory holding the node's
-copy of the cluster document. Optionally an advertise address: the
+copy of the cluster document and its damage ledger (20.7). Optionally an
+advertise address: the
 address other nodes use to reach this one, recorded in the cluster
 document in place of the listen address, for nodes that listen on a
 wildcard or container-internal address. The file is TOML. The default listen port is
@@ -887,6 +888,9 @@ read.
 11.4 [D] If any block fails its checksum, or any holder is unreachable, the
 request fails with an error identifying the device UUID, key, version,
 shard index, and stripe number. No reconstruction is attempted in v1.
+After the failure is decided, the coordinator tells the holder of a shard
+whose block failed to mark it (20.7.2); an unreachable holder is not
+damaged and gets no mark.
 
 11.5 [D] Reads stream. The coordinator holds a bounded number of stripes in
 memory at once.
@@ -899,7 +903,8 @@ checksum and, after the last stripe, compares it with the record's
 `object_checksum` (8.3.6). A mismatch is an error (16.1). Because the
 body has by then been streamed to the client, the error is delivered as
 the stream's terminating status (19.1.2), and the client must treat the
-body as invalid.
+body as invalid. A match proves every shard the read touched intact, and
+the coordinator clears any mark it saw on them at lookup time (20.7.3).
 
 ## 12. Placement summary
 
@@ -941,7 +946,8 @@ delete the shard file and metadata record, and reports success only when
 all have confirmed. Any unreachable holder fails the delete.
 
 14.2 [P] Holders delete the metadata record first, then the shard file,
-then remove the key directory if empty. A partially deleted version, one
+then remove the key directory if empty, and drop any damage marks they
+hold for the version (20.7.3). A partially deleted version, one
 where some holders still have a record, is reported by lookup as
 inconsistent (16.1) and the delete can be retried.
 
@@ -1082,6 +1088,9 @@ to the client:
 - A write fails on any device and no replacement is found.
 - Nodes disagree on the cluster document version.
 - A key exceeds the sanity limit, or an object exceeds the maximum size.
+
+A damage mark (20.7) is never an error condition and changes none of the
+above: marks record what these checks found, they do not replace them.
 
 16.2 [D] Errors carry enough detail for an administrator to act: the
 condition, the node and device UUIDs involved, and for data errors the
@@ -1254,7 +1263,10 @@ between waiting and the forced removal of 6.2.6.3.
 
 18.4 [D] **Repair after corruption.** The corrupt shard block is identified
 by the checksum. The shard file is reconstructed from k valid shards and
-rewritten on the same or another device.
+rewritten on the same or another device. Repair marks every shard it
+finds damaged and clears the mark on every shard it rewrites, relocates,
+or reads through clean (20.7.2, 20.7.3); the same applies to the rebuild
+path of a re-placement (18.8.2), whose source was found damaged.
 
 18.4.1 [D] **`RepairObject`**, the administrative operation implementing
 18.3 and 18.4 for one key, served by any node like the other client
@@ -1449,8 +1461,9 @@ coordinator, and those nodes send to each other. Every response is either
   lookup, block fetch, and checksum verification.
 
 `HeadObject`
-: Request: key. Response: the metadata record, no body. Implemented by
-  broadcast lookup.
+: Request: key. Response: the metadata record, no body, and the damage
+  marks (20.7) any holder reported for its shards, absent when none.
+  Implemented by broadcast lookup.
 
 `DeleteObject`
 : Request: key. Response: none. Section 14.
@@ -1482,6 +1495,13 @@ coordinator, and those nodes send to each other. Every response is either
   device; the end-of-stream carries an error if the estimate stopped the
   pass or any version was skipped. Section 18.2.1.
 
+`ListDamage`
+: Request: optional key prefix, optional cursor, optional limit. Fans
+  `LocalDamage` out to every node and merges. Response: every damage mark
+  in the cluster (20.7) under the prefix, sorted by key, version, and
+  shard index, paged like `ListKeys` (15.2.2). `djbod damage list` and
+  `djbod damage repair`, which runs `RepairObject` over every key listed.
+
 `Scrub`
 : Request: rate limit, whether to repair. Response: `ScrubStarted`, then a
   stream of CBOR `ScrubEvent` data frames: each node's findings and
@@ -1512,8 +1532,10 @@ coordinator, and those nodes send to each other. Every response is either
 **Node to node**
 
 `LocalStatus`
-: Request: none. Response: node UUID, document version, and for each
-  local device: UUID, state, total bytes, free bytes (5.5).
+: Request: none. Response: node UUID, document version, whether TLS
+  material is loaded (19.1.6.4), and for each local device: UUID, label,
+  state, total bytes, free bytes (5.5), and the number of damage marks on
+  it (20.7), absent when zero.
 
 `LocalLookup`
 : Request: key hash, optional cursor (the last version and device of the
@@ -1521,7 +1543,9 @@ coordinator, and those nodes send to each other. Every response is either
   any local device after the cursor, each tagged with the device UUID it
   was read from, sorted by version then device, in pages of at most 8 MiB
   of encoded records with a flag saying more follow (15.2.2). Empty list
-  if none.
+  if none. Each copy carries the damage marks (20.7) the node holds for
+  that version's shards on that device, absent when none, so the
+  coordinator learns of marks in the lookup it already makes.
 
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.
@@ -1544,6 +1568,25 @@ coordinator, and those nodes send to each other. Every response is either
   then end-of-stream. The only node-to-node operation whose stream carries
   control messages rather than blocks; they travel as checksummed data
   frames like everything else.
+
+`MarkDamage`
+: Request: device UUID, key hash, version id, shard index, kind, affected
+  stripes, detail, and the node id of the sender (20.7.2). The holder
+  records or updates the mark in its ledger. Response: none. Sent after
+  the sender's own operation has completed or failed; a failure to send
+  or to record is logged and changes nothing else.
+
+`ClearDamage`
+: Request: device UUID, key hash, version id, shard index. The holder
+  drops the mark if it has one (20.7.3). Response: none. Clearing what is
+  not marked is `OK`.
+
+`LocalDamage`
+: Request: optional key prefix, optional cursor (the last key, version,
+  and shard index of the previous page). Response: this node's damage
+  marks after the cursor, sorted by key, version, and shard index, in
+  pages of at most 8 MiB of encoded marks with a flag saying more follow
+  (15.2.2).
 
 `PutShard`
 : Request: device UUID, key hash, version id, shard index, block count,
@@ -1578,7 +1621,8 @@ coordinator, and those nodes send to each other. Every response is either
 
 `DeleteVersion`
 : Request: device UUID, key hash, version id. The node deletes the record,
-  then the shard file, then the directory if empty (14.2). Response: none.
+  then the shard file, then the directory if empty (14.2), and drops its
+  damage marks for the version (20.7.3). Response: none.
   Deleting something already absent is `OK`.
 
 `AbortShard`
@@ -1744,7 +1788,10 @@ are immutable once renamed and temporaries carry a suffix it is safe
 while the node runs, and a file that vanishes mid-scrub is a concurrent
 delete, not damage. `djbod-node scrub --config node.toml` runs it offline
 over one machine's devices, for a node that is down or a disk under
-examination; it does not repair.
+examination; it does not repair. Both the node's local scrub and the
+offline one write every shard finding into the node's damage ledger and
+clear the marks of shards they verify clean (20.7.2, 20.7.3), and record
+the scrub's time and summary there (20.7.6).
 
 *The cluster-wide scrub*, built. The client command `djbod scrub`,
 pointed at any node, has the coordinator
@@ -1757,9 +1804,12 @@ and agree and that every listed holder has its shard file (the scan of
 18.5, which catches a device that lost both record and shard for a
 version). With `--repair` it runs `RepairObject` once for each damaged
 key from the merged set, so repairs are never issued concurrently for one
-object. Detection therefore moves no data over the network; only repair
-does, and only for damaged objects. Scheduling is left to cron or a
-systemd timer; a built-in schedule is a later addition.
+object. A `ShardMissingOnHolder` finding is a shard finding about one
+device, so the coordinator sends the holder a `MarkDamage` for it
+(20.7.2); the object-level findings stay in the report. Detection
+therefore moves no data over the network; only repair does, and only for
+damaged objects. Scheduling is left to cron or a systemd timer; a
+built-in schedule is a later addition.
 
 20.1.2.1 [D] A holder refuses a second `PutShard` for a version and shard
 index already being written on that device (`WriteFailed`, "already being
@@ -1771,24 +1821,16 @@ against a coordinator retrying into its own unfinished write.
 20.1.3 [D] Since reads report rather than heal, scrubbing is the mechanism
 by which corruption is found before a client encounters it.
 
-20.1.4 [O] **Scrub history.** Today a scrub's findings exist only in the
-stream sent to the client that asked for it; once that client exits,
-nothing in the cluster records that a scrub ran, when, or what it found.
-An administrator cannot ask "when was this cluster last scrubbed, and was
-it clean?", which is the first question after any incident, and a cron
-job's output is wherever cron put it. Wanted: the time and result of the
-last scrub, and possibly the full history. Deferred (22); open points to
-settle when it is taken up: where the record lives (a small history file
-in each node's state directory for its own local scrubs, since the
-node-local scrub has no coordinator and the state directory is the only
-place a node owns; the coordinator's cross-node findings, which belong to
-no one node, would need a home too, perhaps as a record written by the
-client to a reserved key, or as a document field for the last completion
-time only); how much to keep (the last result, the last N, or everything
-with a size cap); and how it is shown (`djbod status`, a `djbod scrub
---history` listing, the web UI's overview). The offline `djbod-node scrub`
-should record its results the same way, since a machine that scrubs while
-its node is down is still a machine that has been scrubbed.
+20.1.4 [O] **Scrub history.** A scrub's findings used to exist only in
+the stream sent to the client that asked for it. The damage ledger (20.7)
+settles the per-node half: each node records the time and summary of its
+last local scrub, online or offline, beside its marks (20.7.6), so
+`status` can say when each node's disks were last checked and what was
+found. Still open is the cluster-wide half: when the cross-node checks
+last ran and what they found belongs to no one node. Candidates are a
+record written by the client to a reserved key, or a field in the
+cluster document for the last completion time only. Deferred (22) until
+a real cluster shows which is wanted.
 
 ### 20.2 Recovery tool
 
@@ -1901,6 +1943,98 @@ document. A private key is its own file, with owner-only permissions, and
 the configuration or argument names its path. The same applies to any
 future credential.
 
+### 20.7 Damage marks
+
+Adopted from `docs/proposals/damage-marks.md` (19 September 2026), which
+keeps the alternatives considered.
+
+20.7.1 [P] **Why.** Every check in this system is fail-stop (11.4, 16.1)
+and forgets what it found: the next reader trips over the same block,
+`head` and `status` show a damaged object as they show an intact one,
+two scrubs a week apart find the same block twice, and repair has to be
+told what to repair. A **damage mark** is a note that a shard file on a
+device was found damaged, kept until something checks the shard again
+and finds it intact or rewrites it. Marks are hints: no operation may
+trust one for correctness. Reads still verify every block, repair still
+verifies everything it reads, and a false or stale mark can neither lose
+data nor serve wrong data. Marking never makes a failing operation fail
+worse: if a mark cannot be written, the operation's own outcome is
+unchanged and the failure to mark is logged. Marks need no agreement
+between nodes, so they never touch the cluster document procedure
+(6.2.6).
+
+20.7.2 [P] **The ledger and who writes it.** Each node keeps
+`<state_dir>/damage.json`, one entry per damaged shard file on its own
+devices, keyed by device, key hash, version, and shard index, so a
+repeated detection updates an entry rather than adding one. An entry
+carries the kind (the shard findings of the local scrub, 20.1.2, plus
+`block_checksum_mismatch` from the read path), the affected stripes, a
+detail string, the key for the operator's convenience (the record is
+authoritative), first and last seen, a count, the operation that saw it,
+and the node id of the coordinator that reported it, so a mark that keeps
+coming from one coordinator and never from others points at that
+coordinator's network path rather than at the disk. The file is written
+like the cluster document: temporary name, fsync, rename (9.4.3). It is
+bounded by the number of damaged shards; a node refuses to grow it past a
+configured limit (default 100 000 entries) and logs instead. The holder
+of the shard writes marks about its own devices and nobody else, by two
+routes: its own scrub, online or offline, which reads its disks directly;
+and a `MarkDamage` message (19.1.3) from a coordinator that verified the
+holder's blocks during a read, a repair, a re-placement, or the cross-node
+scrub pass, sent after the coordinator's own outcome is decided and
+ignored if it fails. Two processes may hold the ledger: the node and the
+offline `djbod-node scrub`. Each takes an advisory lock on the file for
+the read-modify-write, so neither loses the other's changes. A repeated
+detection that changes only the count and the last-seen time is coalesced
+and not rewritten more than once a minute, so a client retrying a damaged
+read in a loop does not turn into a stream of writes on the state disk.
+
+20.7.3 [P] **Who clears a mark.** Only a check that proved the shard
+intact, or a rewrite: repair rewrites or relocates the shard (18.3, 18.4)
+and clears the old holder's mark; the local scrub verifies the shard file
+clean and clears it; `DeleteVersion` drops the marks of the version
+(14.2); and a read whose whole-object check passes (11.7) clears the marks
+on the shards it read. For that last case the coordinator sends
+`ClearDamage` only for shards it saw marked in the lookup it made before
+reading (20.7.4), so a successful read of an unmarked object, the normal
+case, costs no extra message. Nothing clears a mark merely because time
+has passed. Note that a read touches only the k data shards of the
+systematic code, so a parity shard's mark is cleared only by scrub or
+repair.
+
+20.7.4 [P] **Who reads a mark.** Every `LocatedRecord` in a `LocalLookup`
+carries the marks for that version's shards on that device, so the
+coordinator has them in hand for every `HeadObject` at no extra round
+trip, and `djbod head` and the web UI's object panel show them.
+`LocalStatus` carries a per-device count, so `Status`, `djbod status`,
+and the device table show it. `ListDamage`, paged like `ListKeys`, fans
+`LocalDamage` out to every node and merges, for `djbod damage list` and
+a Damage page; `djbod damage repair` runs `RepairObject` over every key
+listed, which is the collector the repair path lacked. All new fields are
+absent when empty, so old and new nodes interoperate during an upgrade.
+
+20.7.5 [P] **What a mark changes: nothing.** Reads, repair, and scrub
+behave exactly as before; marks are shown, not used. Two later uses shape
+the design and are deferred (22): inline reconstruction on read (16.5)
+would consult marks to choose which k shards to read, still verifying
+what it gets, so a stale mark costs at most a reconstruction; and the
+scrub could revisit marked shards first.
+
+20.7.6 [P] **Per-device counters and the last scrub.** Beside the marks,
+the ledger keeps for each device the number of marks ever set and ever
+cleared and the time of the last mark, so that a disk that keeps
+corrupting the same shard and being repaired shows up as such after the
+marks are gone; and the time and summary of the last local scrub, online
+or offline (20.1.4). No per-mark history is kept.
+
+20.7.7 [P] **Not covered.** Damage to record copies and cluster-level
+findings (`RecordCorrupt`, `RecordsInconsistent`, `StaleCopy`,
+`HolderUnavailable`) are about the object, not a shard file on a device;
+they stay in the scrub report for now and could join the ledger later
+under their own kinds. `djbod-recover` (20.2) does not read the ledger,
+which lives in a state directory and not on the disks; a copy at the
+device root is possible later if recovery needs it.
+
 ## 21. Open questions
 
 | # | Question | Where | Recommendation |
@@ -1917,13 +2051,16 @@ future credential.
 - Failure domain hierarchy and configurable independence level (7).
 - Coordinator coding limit and refusal (6.1.3, 17.3, 17.4, 17.5).
 - Randomised or round-robin placement for load spreading (10.5).
-- Inline reconstruction on read (16.5).
+- Inline reconstruction on read (16.5), choosing which k shards to read
+  by consulting the damage marks (20.7.5).
 - A built-in scrub schedule inside the node; today `djbod-node scrub` is
-  run by cron or a systemd timer (20.1.2).
-- **Scrub history** (20.1.4): the time and result of the last scrub, and
-  possibly every scrub, kept somewhere the cluster owns and shown by
-  `status` and the web UI, so that "when was this last scrubbed, and was
-  it clean?" has an answer without reading cron's output.
+  run by cron or a systemd timer (20.1.2). With marks, the scrub could
+  revisit marked shards first (20.7.5).
+- **Cluster-wide scrub history** (20.1.4): when the cross-node checks
+  last ran and what they found; the per-node half is in the damage ledger
+  (20.7.6).
+- Damage marks for record-level and cluster-level findings, and a copy of
+  the ledger at the device root for `djbod-recover` (20.7.7).
 - Rebalance (18.7).
 - Non-systematic encoding option (8.1.6).
 - Optional parity verification on read, for deployments that want it.
@@ -2156,6 +2293,14 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
 6. **Administration web UI** (20.3.1). One page and a JSON API in a
    separate binary, each call one native operation or membership
    procedure; connects to the cluster as the client does, including TLS.
+7. **Damage marks** (20.7). In order: (a) the ledger, `MarkDamage` and
+   `ClearDamage`, marking from the read path and the local scrub, clearing
+   from repair, scrub, delete, and a clean read; (b) marks in
+   `LocalLookup`, `HeadObject`, `LocalStatus`, and `Status`, and their
+   display in `djbod head`, `djbod status`, and the UI; (c) `LocalDamage`
+   and `ListDamage` with `djbod damage list` and `djbod damage repair`;
+   (d) the per-device counters and the last-scrub record, with the UI's
+   in-memory note of read failures removed.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
