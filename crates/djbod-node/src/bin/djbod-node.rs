@@ -173,6 +173,10 @@ enum Command {
     InitCluster {
         #[command(flatten)]
         config: ConfigArgs,
+        /// A name for the cluster, shown beside its id: 1 to 128
+        /// characters, no whitespace. `djbod cluster set-name` changes it.
+        #[arg(long, env = "DJBOD_CLUSTER_NAME")]
+        name: Option<String>,
         /// Data shards per stripe.
         #[arg(long, default_value_t = 3)]
         k: u8,
@@ -304,6 +308,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::InitCluster {
             config,
+            name,
             k,
             m,
             block_size,
@@ -329,6 +334,7 @@ async fn main() -> anyhow::Result<()> {
             let node = Node::init_cluster(
                 config,
                 ClusterParameters {
+                    name,
                     k,
                     m,
                     block_size,
@@ -422,6 +428,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(
                 node = %node.id().0,
                 cluster = %node.cluster_id(),
+                cluster_name = node.document().name.as_deref().unwrap_or("-"),
                 document_version = node.document_version(),
                 %listen,
                 devices = node.devices().len(),

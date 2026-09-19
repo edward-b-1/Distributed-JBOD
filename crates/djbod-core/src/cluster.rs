@@ -161,6 +161,10 @@ pub struct ClusterDocument {
     /// Monotonically increasing; every change is a new version (6.2.1).
     pub version: u64,
     pub cluster_id: Uuid,
+    /// An administrator-chosen name shown beside the id (SPEC 6.2.5.3);
+    /// the id stays the identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub k: u8,
     pub m: u8,
     /// Shard block size B, in bytes.
@@ -308,6 +312,9 @@ impl ClusterDocument {
                 labels.push(label);
             }
         }
+        if let Some(name) = &self.name {
+            validate_label(name)?;
+        }
         let mut node_labels: Vec<&str> = Vec::new();
         for node in &self.nodes {
             if let Some(label) = &node.label {
@@ -321,6 +328,14 @@ impl ClusterDocument {
             }
         }
         Ok(())
+    }
+
+    /// The cluster for people: `name (id)`, or the id alone when unnamed.
+    pub fn title(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name} ({})", self.cluster_id),
+            None => self.cluster_id.to_string(),
+        }
     }
 
     pub fn scheme(&self) -> Result<Scheme, SchemeError> {
@@ -392,6 +407,7 @@ mod tests {
         ClusterDocument {
             version: 1,
             cluster_id: Uuid::from_u128(0xC1),
+            name: None,
             k: 3,
             m: 1,
             block_size: 1 << 20,
@@ -452,6 +468,23 @@ mod tests {
         json["nodes"][0]["label"] = "nas1".into();
         let document: ClusterDocument = serde_json::from_value(json).expect("read");
         assert_eq!(document.nodes[0].label.as_deref(), Some("nas1"));
+    }
+
+    #[test]
+    fn a_cluster_name_follows_the_label_rules_and_shows_beside_the_id() {
+        let mut document = sample();
+        assert_eq!(document.title(), document.cluster_id.to_string());
+        document.name = Some("home-nas".to_string());
+        document.validate().expect("a usable name");
+        assert_eq!(
+            document.title(),
+            format!("home-nas ({})", document.cluster_id)
+        );
+        document.name = Some("has space".to_string());
+        assert!(matches!(
+            document.validate(),
+            Err(ClusterDocumentError::BadLabel { .. })
+        ));
     }
 
     #[test]

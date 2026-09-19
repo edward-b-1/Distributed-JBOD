@@ -1,8 +1,9 @@
 # Proposal: a human-readable cluster name
 
-Status: proposal for discussion, 19 September 2026. Nothing here is in
-SPEC.md yet; section 7 lists what would change there if it is adopted.
-Nothing is implemented.
+Status: adopted and implemented, 19 September 2026, as SPEC 6.2.5.3 with
+option (a) of section 5: the name is shown beside the id and `--cluster`
+keeps taking the id. Kept for the reasoning and for the deferred options;
+section 9's questions stand.
 
 ## 1. The problem
 

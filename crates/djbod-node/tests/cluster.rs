@@ -715,6 +715,7 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
         cluster_id: a.node.cluster_id(),
         document_version: a.node.document_version(),
         build: None,
+        cluster_name: None,
     };
     let mut first = Connection::connect(a.addr, hello()).await.expect("connect");
     let id1 = first.send_request(request.clone()).await.expect("send");
@@ -1756,4 +1757,107 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
         }
         other => panic!("expected refusal, got {other:?}"),
     }
+}
+
+/// SPEC 6.2.5.3: the cluster's name is set at creation or later, shown
+/// beside the id, carried in Hello and Status, and follows the label rules.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cluster_can_be_named_at_creation_or_later() {
+    // At creation.
+    let (_listener, addr) = reserve_port().await;
+    let (config, _dirs, _state) = make_config(1, addr, vec![]);
+    let named = Node::init_cluster(
+        config,
+        ClusterParameters {
+            name: Some("trial".to_string()),
+            k: 1,
+            m: 0,
+            block_size: BLOCK,
+            headroom: 0.0,
+            ..ClusterParameters::default()
+        },
+    )
+    .expect("init named cluster");
+    assert_eq!(named.document().name.as_deref(), Some("trial"));
+    assert_eq!(
+        named.document().title(),
+        format!("trial ({})", named.cluster_id())
+    );
+
+    // Later, as a document change every node holds.
+    let a = first_node(1, 1, 1).await;
+    let b = joined_node(1, &a).await;
+    let cluster = a.node.cluster_id();
+    let (document, changed) = membership::set_cluster_name(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        Some("home-nas".to_string()),
+    )
+    .await
+    .expect("set name");
+    assert!(changed);
+    assert_eq!(document.name.as_deref(), Some("home-nas"));
+    assert_eq!(a.node.document().name.as_deref(), Some("home-nas"));
+    assert_eq!(b.node.document().name.as_deref(), Some("home-nas"));
+
+    // Hello and Status carry it.
+    let mut client = a.client().await;
+    assert_eq!(
+        client.peer_hello().cluster_name.as_deref(),
+        Some("home-nas")
+    );
+    match client.request(Request::Status).await.expect("status") {
+        Response::Status { cluster_name, .. } => {
+            assert_eq!(cluster_name.as_deref(), Some("home-nas"))
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+
+    // A client for another cluster is told which cluster this is.
+    let stranger = Connection::client_hello(Uuid::new_v4());
+    match Connection::connect(a.addr, stranger).await {
+        Err(ClientError::Remote(detail)) => assert!(
+            detail
+                .message
+                .contains(&format!("this node serves cluster home-nas ({cluster})")),
+            "{}",
+            detail.message
+        ),
+        other => panic!("expected refusal, got {other:?}"),
+    }
+
+    // The label rules apply; the same name changes nothing; clearing works.
+    let result = membership::set_cluster_name(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        Some("has space".to_string()),
+    )
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(membership::MembershipError::Node(
+                NodeError::InvalidDocument(_)
+            ))
+        ),
+        "{result:?}"
+    );
+    let (_, changed) = membership::set_cluster_name(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        Some("home-nas".to_string()),
+    )
+    .await
+    .expect("same name");
+    assert!(!changed);
+    let (document, changed) =
+        membership::set_cluster_name(&Connector::plain(), a.addr, cluster, None)
+            .await
+            .expect("clear");
+    assert!(changed);
+    assert_eq!(document.name, None);
+    assert_eq!(document.title(), cluster.to_string());
 }

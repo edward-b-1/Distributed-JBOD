@@ -74,6 +74,7 @@ fn sample_document() -> ClusterDocument {
     ClusterDocument {
         version: 7,
         cluster_id: Uuid::from_u128(0xC1),
+        name: None,
         k: 3,
         m: 1,
         block_size: 1 << 20,
@@ -223,6 +224,7 @@ fn hello_round_trips_for_nodes_and_clients() {
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 7,
         build: None,
+        cluster_name: None,
     };
     round_trip(Message::Hello(hello.clone()));
     let client = Hello {
@@ -244,6 +246,7 @@ fn hello_checks_catch_wrong_cluster_wrong_version_and_stale_nodes() {
         cluster_id: ours,
         document_version: 7,
         build: None,
+        cluster_name: None,
     };
     assert_eq!(good.check_against(ours, 7), Ok(()));
 
@@ -453,6 +456,7 @@ fn every_response_round_trips() {
         Response::Error(ErrorDetail::new(ErrorCode::NotFound, "no such key")),
         Response::Status {
             cluster_id: Uuid::from_u128(0xC1),
+            cluster_name: None,
             document_version: 7,
             transport: djbod_core::cluster::Transport::Plain,
             coordinator: node(1),
@@ -618,6 +622,7 @@ fn request_ids_are_carried_and_handshake_frames_have_none() {
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 0,
         build: None,
+        cluster_name: None,
     });
     assert_eq!(hello.request_id(), None);
 }

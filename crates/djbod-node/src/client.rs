@@ -119,6 +119,7 @@ impl Connection {
             cluster_id,
             document_version: 0,
             build: Some(crate::BUILD.to_string()),
+            cluster_name: None,
         }
     }
 
