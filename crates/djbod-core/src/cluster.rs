@@ -55,6 +55,9 @@ pub struct NodeEntry {
     pub id: NodeId,
     /// `host:port` strings the node listens on.
     pub addresses: Vec<String>,
+    /// An administrator-chosen name shown beside the UUID (SPEC 6.2.5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// How connections are made and accepted (SPEC 19.1.6.4).
@@ -250,7 +253,10 @@ impl ClusterDocument {
                 });
             }
         }
-        // Labels, once every device is known to be listed once.
+        // Labels, once every device is known to be listed once. Device
+        // labels and node labels are separate namespaces: a command that
+        // takes a device resolves among devices, one that takes a node
+        // among nodes.
         let mut labels: Vec<&str> = Vec::new();
         for device in &self.devices {
             if let Some(label) = &device.label {
@@ -263,6 +269,18 @@ impl ClusterDocument {
                 labels.push(label);
             }
         }
+        let mut node_labels: Vec<&str> = Vec::new();
+        for node in &self.nodes {
+            if let Some(label) = &node.label {
+                validate_label(label)?;
+                if node_labels.contains(&label.as_str()) {
+                    return Err(ClusterDocumentError::DuplicateLabel {
+                        label: label.clone(),
+                    });
+                }
+                node_labels.push(label);
+            }
+        }
         Ok(())
     }
 
@@ -272,6 +290,29 @@ impl ClusterDocument {
 
     pub fn node(&self, id: NodeId) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The node with this label, if any (node labels are unique).
+    pub fn node_by_label(&self, label: &str) -> Option<&NodeEntry> {
+        self.nodes
+            .iter()
+            .find(|n| n.label.as_deref() == Some(label))
+    }
+
+    /// The node named by a UUID or by a label.
+    pub fn node_by_name(&self, name: &str) -> Option<&NodeEntry> {
+        match Uuid::parse_str(name) {
+            Ok(uuid) => self.node(NodeId(uuid)),
+            Err(_) => self.node_by_label(name),
+        }
+    }
+
+    /// A node's label if it has one, else its UUID, for messages.
+    pub fn node_name(&self, id: NodeId) -> String {
+        match self.node(id).and_then(|n| n.label.as_deref()) {
+            Some(label) => label.to_string(),
+            None => id.0.to_string(),
+        }
     }
 
     /// The device with this label, if any (labels are unique).
@@ -325,10 +366,12 @@ mod tests {
                 NodeEntry {
                     id: node_a,
                     addresses: vec!["10.0.0.1:7000".to_string()],
+                    label: Some("nas1".to_string()),
                 },
                 NodeEntry {
                     id: node_b,
                     addresses: vec!["10.0.0.2:7000".to_string()],
+                    label: None,
                 },
             ],
             devices: vec![
@@ -469,6 +512,42 @@ mod tests {
     }
 
     #[test]
+    fn node_labels_follow_the_same_rules_in_their_own_namespace() {
+        let doc = sample();
+        assert_eq!(
+            doc.node_by_label("nas1").map(|n| n.id),
+            Some(NodeId(Uuid::from_u128(0xA)))
+        );
+        assert_eq!(
+            doc.node_by_name(&Uuid::from_u128(0xB).to_string())
+                .map(|n| n.id),
+            Some(NodeId(Uuid::from_u128(0xB)))
+        );
+        assert_eq!(doc.node_name(NodeId(Uuid::from_u128(0xA))), "nas1");
+        assert_eq!(
+            doc.node_name(NodeId(Uuid::from_u128(0xB))),
+            Uuid::from_u128(0xB).to_string()
+        );
+        // A node and a device may share a label: different namespaces.
+        let mut doc = sample();
+        doc.nodes[1].label = Some("nas1-bay0".to_string());
+        doc.validate().expect("node and device labels are separate");
+        // Two nodes may not.
+        let mut doc = sample();
+        doc.nodes[1].label = Some("nas1".to_string());
+        assert!(matches!(
+            doc.validate(),
+            Err(ClusterDocumentError::DuplicateLabel { .. })
+        ));
+        let mut doc = sample();
+        doc.nodes[1].label = Some("has space".to_string());
+        assert!(matches!(
+            doc.validate(),
+            Err(ClusterDocumentError::BadLabel { .. })
+        ));
+    }
+
+    #[test]
     fn labels_are_optional_unique_and_checked() {
         let doc = sample();
         doc.validate().expect("valid");
@@ -493,8 +572,8 @@ mod tests {
         let json = serde_json::to_string(&doc).expect("serializes");
         assert_eq!(
             json.matches("\"label\"").count(),
-            1,
-            "absent labels are omitted"
+            2,
+            "one device and one node are labelled; absent labels are omitted"
         );
 
         let mut doc = sample();

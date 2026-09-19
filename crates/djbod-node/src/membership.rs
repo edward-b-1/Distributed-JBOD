@@ -30,6 +30,8 @@ use crate::transport::{Connector, TlsMaterial};
 #[derive(Debug)]
 pub struct NodeDocument {
     pub node: NodeId,
+    /// The node's label in the document that was asked, if any.
+    pub label: Option<String>,
     pub address: String,
     pub result: Result<ClusterDocument, String>,
 }
@@ -93,6 +95,8 @@ pub enum MembershipError {
     UnknownDevice(DeviceId),
     #[error("no device is named {0:?}, as a UUID or a label")]
     UnknownDeviceName(String),
+    #[error("no node is named {0:?}, as a UUID or a label")]
+    UnknownNodeName(String),
     #[error("{0} is not in the cluster document")]
     UnknownNode(NodeId),
     #[error(
@@ -222,6 +226,7 @@ async fn fetch_all_except(
         };
         reports.push(NodeDocument {
             node: entry.id,
+            label: entry.label.clone(),
             address: address_text,
             result,
         });
@@ -710,6 +715,54 @@ pub async fn resolve_device(
         .device_by_name(name)
         .map(|d| d.id)
         .ok_or_else(|| MembershipError::UnknownDeviceName(name.to_string()))
+}
+
+/// The node a UUID or label names, in the current document.
+pub async fn resolve_node(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    name: &str,
+) -> Result<NodeId, MembershipError> {
+    let document = fetch_document(connector, peer, cluster_id).await?;
+    document
+        .node_by_name(name)
+        .map(|n| n.id)
+        .ok_or_else(|| MembershipError::UnknownNodeName(name.to_string()))
+}
+
+/// Set or clear a node's label (SPEC 6.2.5.1). Returns the document and
+/// whether anything changed.
+pub async fn set_node_label(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    node: NodeId,
+    label: Option<String>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(connector, peer, cluster_id).await?;
+        let Some(entry) = current.node(node) else {
+            return Err(MembershipError::UnknownNode(node));
+        };
+        if entry.label == label {
+            return Ok((current, false));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        for candidate in next.nodes.iter_mut() {
+            if candidate.id == node {
+                candidate.label = label.clone();
+            }
+        }
+        match propose(connector, &current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Set or clear a device's label (SPEC 6.2.5.1). Returns the document and

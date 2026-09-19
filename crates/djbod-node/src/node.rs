@@ -217,6 +217,7 @@ impl Node {
             nodes: vec![NodeEntry {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],
+                label: None,
             }],
             devices: devices
                 .iter()
@@ -472,6 +473,7 @@ impl Node {
             next.nodes.push(NodeEntry {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],
+                label: None,
             });
         }
         for device in devices {

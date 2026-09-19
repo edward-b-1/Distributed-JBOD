@@ -716,3 +716,50 @@ async fn devices_can_be_labelled_and_named_by_label() {
     assert!(ok);
     assert!(!out.contains("\"label\""), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nodes_can_be_labelled_and_named_by_label() {
+    let test = start_node(5, 3, 1).await;
+    let node_id = test.node.id().0.to_string();
+    let device = test.node.devices()[0].id().0.to_string();
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("is now labelled nas1"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "set-node-label", "nas1", "nas1"]);
+    assert!(ok);
+    assert!(out.contains("nothing changed"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("NODE LABEL"), "{out}");
+    assert!(out.contains("nas1"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "show"]);
+    assert!(ok);
+    assert!(out.contains("nas1"), "{out}");
+
+    // A device may carry the same label as a node: separate namespaces.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "nas1"]);
+    assert!(ok, "{err}");
+    // A second node could not, but there is only one; a bad label is
+    // refused the same way as for devices.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", "nas1", "has space"]);
+    assert!(!ok);
+    assert!(err.contains("whitespace"), "{err}");
+
+    // Commands that take a node take the label: drain --node-id finds no
+    // draining devices, and remove-node is refused as the only node,
+    // which shows the name resolved.
+    let (ok, out, err) = djbod(&test, &["cluster", "drain", "--node-id", "nas1"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("has no draining devices"), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-node", "nas1"]);
+    assert!(!ok);
+    assert!(err.contains("only node"), "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-node", "no-such-node"]);
+    assert!(!ok);
+    assert!(err.contains("no node is named \"no-such-node\""), "{err}");
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-node-label", "nas1", "--clear"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("label cleared"), "{out}");
+}

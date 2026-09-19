@@ -418,6 +418,7 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
         M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
         M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::UnknownNodeName(_) => (StatusCode::NOT_FOUND, "unknown_node_name"),
         M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
         M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
         M::Superseded { .. } => (StatusCode::CONFLICT, "superseded"),
