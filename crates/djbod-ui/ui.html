@@ -505,17 +505,21 @@ let failurePoll = 0;
 function watchForReadFailure(key) {
   const since = Math.floor(Date.now() / 1000) - 1;
   const token = ++failurePoll;
-  let tries = 0;
+  const started = performance.now();
+  // Damage early in the object stops the read within milliseconds, so
+  // look often at first; damage late in a large object takes as long
+  // as the download, so keep looking, less often, for a minute.
   const tick = async () => {
-    if (token !== failurePoll || state.selectedKey !== key || tries++ >= 30) return;
+    const elapsed = performance.now() - started;
+    if (token !== failurePoll || state.selectedKey !== key || elapsed > 60000) return;
     try {
       const r = await api('/read-failures');
       const found = r.failures.find((f) => f.key === key && f.at >= since);
       if (found) { select(key); return; }
     } catch (_) { return; }
-    setTimeout(tick, 2000);
+    setTimeout(tick, elapsed < 10000 ? 400 : 2000);
   };
-  setTimeout(tick, 1500);
+  setTimeout(tick, 200);
 }
 function describeFailure(f) {
   const when = new Date(f.at * 1000).toLocaleTimeString();
