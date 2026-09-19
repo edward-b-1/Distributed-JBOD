@@ -1,0 +1,577 @@
+//! The web UI's API against a real node started in-process.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use axum::body::{Body, Bytes};
+use axum::http::{header, Request, StatusCode};
+use http_body_util::BodyExt;
+use tower::ServiceExt;
+use uuid::Uuid;
+
+use djbod_node::config::NodeConfig;
+use djbod_node::node::{ClusterParameters, Node};
+use djbod_node::server;
+use djbod_node::transport::Connector;
+use djbod_ui::{router, Target};
+use tokio::net::TcpListener;
+
+struct TestNode {
+    node: Arc<Node>,
+    addr: SocketAddr,
+    dirs: Vec<tempfile::TempDir>,
+    _state: tempfile::TempDir,
+}
+
+async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
+    let dirs: Vec<tempfile::TempDir> = (0..device_count)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let state = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let config = NodeConfig {
+        node_id: Uuid::new_v4(),
+        listen: addr,
+        advertise: None,
+        state_dir: state.path().to_path_buf(),
+        devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
+        bootstrap_peers: vec![],
+        temporary_max_age_secs: 3600,
+        allow_shared_filesystem: true,
+        tls: None,
+    };
+    let parameters = ClusterParameters {
+        k,
+        m,
+        block_size: 64 * 1024,
+        headroom: 0.0,
+        ..ClusterParameters::default()
+    };
+    let node = Arc::new(Node::init_cluster(config, parameters).expect("init cluster"));
+    tokio::spawn(server::serve(node.clone(), listener));
+    TestNode {
+        node,
+        addr,
+        dirs,
+        _state: state,
+    }
+}
+
+fn app(test: &TestNode) -> axum::Router {
+    router(Target {
+        node: test.addr,
+        cluster: test.node.cluster_id(),
+        connector: Connector::plain(),
+    })
+}
+
+fn pattern_bytes(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut out = Vec::with_capacity(len);
+    for _ in 0..len {
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        out.push((x.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 56) as u8);
+    }
+    out
+}
+
+/// Send one request and return the status, headers, and whole body.
+async fn call(
+    test: &TestNode,
+    request: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
+    let response = app(test).oneshot(request).await.expect("response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (status, headers, body)
+}
+
+async fn get_json(test: &TestNode, path: &str) -> (StatusCode, serde_json::Value) {
+    let (status, _, body) = call(
+        test,
+        Request::get(path).body(Body::empty()).expect("request"),
+    )
+    .await;
+    (status, serde_json::from_slice(&body).expect("json body"))
+}
+
+async fn post_json(
+    test: &TestNode,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (status, _, body) = call(
+        test,
+        Request::post(path)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request"),
+    )
+    .await;
+    (status, serde_json::from_slice(&body).expect("json body"))
+}
+
+async fn put_object(
+    test: &TestNode,
+    key: &str,
+    body: &[u8],
+    content_type: Option<&str>,
+) -> (StatusCode, serde_json::Value) {
+    let mut request =
+        Request::put(format!("/api/objects/{key}")).header(header::CONTENT_LENGTH, body.len());
+    if let Some(ct) = content_type {
+        request = request.header(header::CONTENT_TYPE, ct);
+    }
+    let (status, _, out) = call(
+        test,
+        request.body(Body::from(body.to_vec())).expect("request"),
+    )
+    .await;
+    (status, serde_json::from_slice(&out).expect("json body"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn serves_the_page() {
+    let test = start_node(4, 3, 1).await;
+    let (status, headers, body) = call(
+        &test,
+        Request::get("/").body(Body::empty()).expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(headers[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("<title>Distributed-JBOD</title>"), "{text}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_and_cluster_describe_the_node() {
+    let test = start_node(4, 3, 1).await;
+    let (status, json) = get_json(&test, "/api/status").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["cluster_id"], test.node.cluster_id().to_string());
+    assert_eq!(json["devices"].as_array().unwrap().len(), 4);
+    assert_eq!(json["devices"][0]["state"], "active");
+
+    let (status, json) = get_json(&test, "/api/cluster").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["document"]["k"], 3);
+    assert_eq!(json["document"]["m"], 1);
+    let nodes = json["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0]["version"], json["document"]["version"]);
+    assert!(nodes[0]["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn object_round_trip_through_http() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 3 * 64 * 1024 + 4321, 1);
+    // A key with a slash and a space, to check the path is decoded.
+    let key = "photos/2026/my cat.jpg";
+    let encoded = "photos/2026/my%20cat.jpg";
+
+    let (status, json) = put_object(&test, encoded, &body, Some("image/jpeg")).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["key"], key);
+    let version = json["version"].as_str().unwrap().to_string();
+
+    let (status, record) = get_json(&test, &format!("/api/objects/{encoded}")).await;
+    assert_eq!(status, StatusCode::OK, "{record}");
+    assert_eq!(record["key"], key);
+    assert_eq!(record["version"], version);
+    assert_eq!(record["size"], body.len());
+    assert_eq!(record["content_type"], "image/jpeg");
+    assert_eq!(record["shards"].as_array().unwrap().len(), 4);
+
+    let (status, headers, fetched) = call(
+        &test,
+        Request::get(format!("/api/download/{encoded}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(headers[header::CONTENT_LENGTH], body.len().to_string());
+    assert_eq!(
+        headers[header::CONTENT_DISPOSITION],
+        "attachment; filename=\"my_cat.jpg\""
+    );
+    assert_eq!(headers["x-djbod-version"], version);
+    assert_eq!(fetched.as_ref(), body.as_slice());
+
+    let (status, json) = get_json(&test, "/api/objects?prefix=photos/").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["keys"].as_array().unwrap().len(), 1);
+    assert_eq!(json["keys"][0]["key"], key);
+    assert_eq!(json["truncated"], false);
+    let (_, json) = get_json(&test, "/api/objects?prefix=other/").await;
+    assert_eq!(json["keys"].as_array().unwrap().len(), 0);
+
+    let (status, report) = post_json(
+        &test,
+        &format!("/api/repair/{encoded}"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["key"], key);
+    assert!(report["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["condition"] == "intact" && s["rewritten"] == false));
+
+    let (status, _, out) = call(
+        &test,
+        Request::delete(format!("/api/objects/{encoded}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&out));
+
+    let (status, json) = get_json(&test, &format!("/api/objects/{encoded}")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(json["error"]["code"], "not_found");
+    assert_eq!(json["error"]["key"], key);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rebuilds_a_shard_damaged_on_disk() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 2 * 64 * 1024 + 99, 7);
+    let (status, json) = put_object(&test, "a/b", &body, None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+
+    // Flip a byte inside shard 0, a data shard: a plain read touches
+    // only the k data shards, so damage to the parity shard would go
+    // unnoticed by the download and the test would prove nothing.
+    let mut damaged = None;
+    for dir in &test.dirs {
+        for entry in walkdir(dir.path()) {
+            if entry.to_string_lossy().ends_with(".0.shard") {
+                let mut bytes = std::fs::read(&entry).unwrap();
+                bytes[4096 + 10] ^= 0xff;
+                std::fs::write(&entry, bytes).unwrap();
+                damaged = Some(entry);
+                break;
+            }
+        }
+        if damaged.is_some() {
+            break;
+        }
+    }
+    assert!(damaged.is_some(), "no shard file written");
+
+    // The headers go out before the damage is met, so the response
+    // carries the full length but its body is cut short with an error
+    // rather than delivering wrong bytes.
+    let response = app(&test)
+        .oneshot(
+            Request::get("/api/download/a/b")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_LENGTH],
+        body.len().to_string()
+    );
+    let outcome = response.into_body().collect().await;
+    match outcome {
+        Err(e) => assert!(e.to_string().contains("BlockChecksumMismatch"), "{e}"),
+        Ok(collected) => assert!(
+            collected.to_bytes().len() < body.len(),
+            "a damaged read must not deliver the whole body"
+        ),
+    }
+
+    let (status, report) = post_json(&test, "/api/repair/a/b", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let rewritten = report["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["rewritten"] == true)
+        .count();
+    assert_eq!(rewritten, 1, "{report}");
+
+    let (status, _, fetched) = call(
+        &test,
+        Request::get("/api/download/a/b")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched.as_ref(), body.as_slice());
+}
+
+fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drain_and_scrub_stream_events_as_json_lines() {
+    let test = start_node(5, 3, 1).await;
+    let body = pattern_bytes(3 * 64 * 1024, 3);
+    let (status, json) = put_object(&test, "x/one", &body, None).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (_, record) = get_json(&test, "/api/objects/x/one").await;
+    let device = record["shards"][0]["device"].as_str().unwrap().to_string();
+
+    // Removing is refused through the state endpoint; draining is not.
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/state"),
+        serde_json::json!({ "state": "removed" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/state"),
+        serde_json::json!({ "state": "draining" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let draining: Vec<&serde_json::Value> = status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["state"] == "draining")
+        .collect();
+    assert_eq!(draining.len(), 1);
+    assert_eq!(draining[0]["device"], device);
+
+    let (status, headers, out) = call(
+        &test,
+        Request::post(format!("/api/devices/{device}/drain"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/x-ndjson");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    assert_eq!(lines[0]["event"], "estimate", "{lines:?}");
+    assert_eq!(lines[0]["versions"], 1);
+    assert_eq!(lines[1]["event"], "moved", "{lines:?}");
+    assert_eq!(lines[1]["key"], "x/one");
+    assert_eq!(lines.last().unwrap()["event"], "end", "{lines:?}");
+    assert!(lines.last().unwrap()["error"].is_null(), "{lines:?}");
+
+    let (_, record) = get_json(&test, "/api/objects/x/one").await;
+    assert!(record["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["device"] != device));
+
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+
+    let (status, headers, out) = call(
+        &test,
+        Request::post("/api/scrub")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"repair": false}"#))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/x-ndjson");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    // The removed device is still open on the node until its path leaves
+    // the node's configuration, so the node still scrubs it.
+    let summaries = lines
+        .iter()
+        .filter(|l| l["event"] == "node_summary")
+        .count();
+    assert_eq!(summaries, 5, "one per device the node has open: {lines:?}");
+    assert!(
+        lines
+            .iter()
+            .all(|l| l["event"] != "node_finding" && l["event"] != "cluster_finding"),
+        "{lines:?}"
+    );
+    assert_eq!(lines.last().unwrap()["event"], "end");
+    assert!(lines.last().unwrap()["error"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_shard_scheme_and_limits() {
+    let test = start_node(5, 3, 1).await;
+    let body = pattern_bytes(1000, 5);
+    put_object(&test, "m/k", &body, None).await;
+    let (_, record) = get_json(&test, "/api/objects/m/k").await;
+    let held: Vec<String> = record["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["device"].as_str().unwrap().to_string())
+        .collect();
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let spare = status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["device"].as_str().unwrap().to_string())
+        .find(|d| !held.contains(d))
+        .expect("a fifth device");
+
+    let (status, json) = post_json(
+        &test,
+        "/api/move-shard/m/k",
+        serde_json::json!({ "shard_index": 2, "to": spare }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["source"], held[2]);
+    assert_eq!(json["rebuilt"], false);
+    assert_eq!(json["record"]["revision"], 1);
+    assert_eq!(json["record"]["shards"][2]["device"], spare);
+
+    let (status, json) = post_json(
+        &test,
+        "/api/cluster/scheme",
+        serde_json::json!({ "k": 2, "m": 2 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    assert_eq!(json["k"], 2);
+    let (status, json) = post_json(
+        &test,
+        "/api/cluster/scheme",
+        serde_json::json!({ "k": 4, "m": 2 }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "fewer active devices than k+m: {json}"
+    );
+    assert_eq!(json["error"]["code"], "membership");
+
+    let (status, json) = post_json(
+        &test,
+        "/api/cluster/limits",
+        serde_json::json!({ "max_object_bytes": 4096 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["max_object_bytes"], 4096);
+    let (status, json) = put_object(&test, "too/big", &pattern_bytes(5000, 9), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["code"], "object_too_large");
+    let (status, json) = post_json(&test, "/api/cluster/limits", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    let (status, json) = post_json(&test, "/api/cluster/sync", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["already_current"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bad_requests_are_reported_as_such() {
+    let test = start_node(4, 3, 1).await;
+    let (status, _, out) = call(
+        &test,
+        Request::put("/api/objects/no/length")
+            .body(Body::from("abc"))
+            .expect("request"),
+    )
+    .await;
+    let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["code"], "bad_request");
+
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/not-a-uuid/remove",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    let (status, json) =
+        post_json(&test, "/api/nodes/not-a-uuid/remove", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+
+    // The only node cannot be removed.
+    let (_, cluster) = get_json(&test, "/api/cluster").await;
+    let node = cluster["document"]["nodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/nodes/{node}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["error"]["code"], "membership");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_node_that_is_down_is_reported_not_crashed() {
+    let target = Target {
+        node: "127.0.0.1:1".parse().unwrap(),
+        cluster: Uuid::new_v4(),
+        connector: Connector::plain(),
+    };
+    let response = router(target)
+        .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"]["code"], "node_unreachable");
+}

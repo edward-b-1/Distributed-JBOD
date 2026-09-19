@@ -1799,10 +1799,16 @@ each stripe it had to reconstruct.
 
 ### 20.3 Administration
 
-20.3.1 [X] A web UI for administration (cluster status, device states,
-drain and repair, errors) is required eventually and deferred. Every
+20.3.1 [D] A web UI for administration (cluster status, device states,
+drain and repair, errors) is the `djbod-ui` binary (C.4.7). Every
 administrative action it performs must also be available as a command-line
-operation over the native protocol.
+operation over the native protocol, and it is: the UI is a translation of
+HTTP calls onto the same native operations and membership procedures the
+`djbod` client uses, holds no state of its own, and can run beside it.
+Its HTTP side has no authentication, so it binds to localhost by
+default; towards the cluster it uses the client's TLS settings (19.1.6.2). Forced node removal (6.2.6.3), which needs a typed
+confirmation, and re-encode (18.9), a long client-driven migration, stay
+on the command line.
 
 ### 20.4 Logging
 
@@ -1911,7 +1917,6 @@ future credential.
   optimisation: one fewer hop per block.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
-- Administration web UI (20.3).
 - Users and permissions: who may read or write which keys, once clients
   are authenticated. Distinct from authentication and may be dropped.
 - S3 translation layer (19.2). Separate stream of work.
@@ -2073,6 +2078,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
 | `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
+| `djbod-ui` | The administration web UI of 20.3: an HTTP server serving one embedded page and a JSON API under `/api`, each call of which is one native-protocol operation or one membership procedure sent to a node as the `djbod` client would send it. |
 
 C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.
 Findings so far on `reed-solomon-erasure` 6.0.0 from the library tests:
@@ -2123,6 +2129,9 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    sources rule of 20.6 applied to the existing settings; (d) the
    getting-started walkthrough for issuing a CA and certificates with
    `openssl`.
+6. **Administration web UI** (20.3.1). One page and a JSON API in a
+   separate binary, each call one native operation or membership
+   procedure; connects to the cluster as the client does, including TLS.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
@@ -2208,6 +2217,20 @@ node setting as argument, environment variable, or file (20.6), the file
 optional. (d) the guide's `openssl` walkthrough, verified end to end
 against the real binaries. Certificate rotation is by files and restarts
 (19.1.6.6); nothing in the protocol changed.
+
+C.4.7 **Milestone 6 status, 19 September 2026: the administration web
+UI (20.3.1) is built.** The `djbod-ui` crate serves one page and a JSON
+API with `axum` on a local HTTP port; `Status`, `ListKeys`, `HeadObject`,
+`DeleteObject`, `RepairObject`, `MoveShard`, and the membership
+procedures (`set_device_state`, `remove_device`, `remove_node`, `sync`,
+`set_scheme`, `set_limits`) are one call each; `PutObject` and
+`GetObject` stream the body through in both directions without holding
+it; `Scrub` and `Drain` are relayed as newline-delimited JSON events so
+the page shows progress as it happens. Node errors are returned with
+every field of 16.2. It connects to the node as the `djbod` client does,
+taking the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings
+(19.1.6.2). Tested against a node started in-process, including a
+damaged shard read through the UI and repaired from it.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
