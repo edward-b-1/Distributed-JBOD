@@ -431,6 +431,11 @@ async fn download_object(
                         (conn, expected_sequence + 1, false),
                     ))
                 }
+                // A clean end means the coordinator has already checked
+                // the delivered length and the whole-object checksum
+                // against the record (SPEC 11.7) and would have ended with
+                // ObjectChecksumMismatch otherwise; each chunk was checked
+                // above. This is what `djbod get` relies on too.
                 StreamItem::End(end) => match end.error {
                     None => None,
                     Some(detail) => Some((
