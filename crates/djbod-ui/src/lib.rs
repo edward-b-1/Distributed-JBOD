@@ -32,6 +32,7 @@
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
+//! | `POST /nodes/{id}/label`             | `djbod cluster set-node-label`      |
 //!
 //! Errors are JSON: `{"error": {"code", "message", ...}}`, where the
 //! fields are those of the node's `ErrorDetail` (SPEC 16.2) when the
@@ -207,6 +208,7 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
         .route("/devices/{id}/drain", post(drain))
         .route("/devices/{id}/remove", post(remove_device))
         .route("/nodes/{id}/remove", post(remove_node))
+        .route("/nodes/{id}/label", post(set_node_label))
         // Object bodies are as large as the cluster allows, not as large
         // as axum's default two megabytes.
         .layer(DefaultBodyLimit::disable());
@@ -1237,6 +1239,35 @@ async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> A
         membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
     Ok(Json(json!({
         "device": device,
+        "document_version": document.version,
+        "changed": changed,
+    })))
+}
+
+/// Give a node a name shown beside its UUID, or clear it (SPEC 6.2.5.1);
+/// the document validates it as it does a device label.
+async fn set_node_label(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(body): Json<LabelBody>,
+) -> ApiResult {
+    let target = &app.target;
+    let node = NodeId(parse_id(&id, "node")?);
+    let label = body
+        .label
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty());
+    let (document, changed) = membership::set_node_label(
+        &target.connector,
+        target.node,
+        target.cluster,
+        node,
+        label.clone(),
+    )
+    .await?;
+    Ok(Json(json!({
+        "node": node,
+        "label": label,
         "document_version": document.version,
         "changed": changed,
     })))
