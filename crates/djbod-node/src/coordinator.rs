@@ -563,21 +563,36 @@ async fn delete_version_everywhere(
 /// keys after the cursor, and the coordinator holds at most one page per
 /// node rather than every key in the cluster.
 ///
-/// One page from each node is enough to cut the merged page: a node's
-/// page is cut by the same limit and the same byte bound as the merged
-/// page, and every key a node left out is greater than every key it
-/// returned, so it comes after everything that precedes it in the merged
-/// order too and cannot belong to the merged page. Duplicates (one
+/// One page from each node is enough, provided the merged page stops at
+/// the last key of any node that had more. Every key such a node left
+/// out is greater than the last key it returned, so nothing beyond that
+/// key can be reported yet: a key from another node placed after it
+/// would become the cursor and the left-out keys, being smaller, would
+/// never be asked for again. Under the count limit alone the cut could
+/// not pass that key anyway, but the byte bound can: a node's page may
+/// stop before a long key while the merged page still has room for a
+/// short key from elsewhere that sorts after it. Duplicates (one
 /// version's record on k+m devices) collapse to the newest version per
 /// key, which can make a page shorter than the bound; that is why the
 /// truncation flag also says whether any node had more.
 async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
     let mut newest: BTreeMap<String, KeyEntry> = BTreeMap::new();
     let mut any_node_truncated = false;
+    // The smallest "last key" among the nodes that had more: the merged
+    // page may not go beyond it.
+    let mut horizon: Option<String> = None;
     for (target, response) in broadcast(node, Request::LocalList(query.clone())).await? {
         match response {
             Response::LocalList { entries, truncated } => {
                 any_node_truncated |= truncated;
+                if truncated {
+                    if let Some(last) = entries.last() {
+                        let closer = horizon.as_ref().is_none_or(|h| last.key < *h);
+                        if closer {
+                            horizon = Some(last.key.clone());
+                        }
+                    }
+                }
                 for item in entries {
                     match newest.get(&item.key) {
                         Some(existing) if existing.version >= item.version => {}
@@ -595,7 +610,10 @@ async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failu
             }
         }
     }
-    let keys: Vec<KeyEntry> = newest.into_values().collect();
+    let mut keys: Vec<KeyEntry> = newest.into_values().collect();
+    if let Some(horizon) = &horizon {
+        keys.retain(|e| e.key <= *horizon);
+    }
     let (keys, cut) = crate::local_ops::page_of_keys(keys, query.limit);
     Ok(Response::ListKeys {
         keys,

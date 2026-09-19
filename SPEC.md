@@ -946,9 +946,11 @@ exists on k+m devices), sorts, and returns.
 by walking its objects tree, which is in key-hash order (9.3), so
 answering "the keys after X" means reading every record and sorting.
 The coordinator sends the client's cursor and limit to every node, takes
-one page from each, merges, and cuts the merged page, so it holds at most
-one page per node; but each node still reads every record to produce its
-page. Two consequences, both accepted for the first version:
+one page from each, merges, and cuts the merged page no further than the
+last key of any node that had more (a key that node left out is greater
+than that, and a shorter key from another node sorting after it must not
+become the cursor and hide it), so it holds at most one page per node;
+but each node still reads every record to produce its page. Two consequences, both accepted for the first version:
 
 - **Cost.** A walk of N keys in P pages reads every record P times on
   disk, though it moves each key over the network only once.
