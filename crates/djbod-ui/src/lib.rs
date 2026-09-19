@@ -11,7 +11,7 @@
 //! | method and path                      | native operation                    |
 //! |--------------------------------------|-------------------------------------|
 //! | `GET  /status`                       | `Status`                            |
-//! | `GET  /cluster`                      | document plus every node's version  |
+//! | `GET  /cluster`                      | document plus every node's version and build |
 //! | `POST /cluster/sync`                 | `djbod cluster sync`                |
 //! | `POST /cluster/scheme`               | `djbod cluster set-scheme`          |
 //! | `POST /cluster/limits`               | `djbod cluster set-limits`          |
@@ -519,6 +519,8 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             // is TLS, which follows from how it was started.
             "transport": transport,
             "ui_to_node_tls": conn.is_tls(),
+            // This server's own build, shown in the page header.
+            "ui_build": djbod_node::BUILD,
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),
@@ -538,6 +540,9 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
             json!({
                 "node": r.node,
                 "address": r.address,
+                // From the node's Hello; null for a node that was unreachable
+                // or runs a build from before builds were sent (SPEC 6.2.6.4).
+                "build": r.build,
                 "version": r.result.as_ref().ok().map(|d| d.version),
                 "error": r.result.as_ref().err(),
             })

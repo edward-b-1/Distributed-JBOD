@@ -176,6 +176,7 @@
   <span class="meta">document version <code id="h-version">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
+  <span class="meta">ui build <code id="h-build">…</code></span>
   <span class="meta" id="h-refreshed"></span>
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
@@ -195,7 +196,7 @@
   <div class="tiles" id="tiles"></div>
   <h2>Nodes</h2>
   <table>
-    <thead><tr><th>Node</th><th>Address</th><th>Document version</th><th class="num">Devices</th><th></th></tr></thead>
+    <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
   </table>
   <div class="row">
@@ -468,6 +469,7 @@ async function refresh() {
   try {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
+    $('h-build').textContent = status.ui_build || '?';
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
     renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
@@ -490,7 +492,7 @@ function renderHeader() {
 // the node is shown in the header instead, since a tls cluster refuses a
 // plain one outright.
 function renderBanners() {
-  const { status } = state;
+  const { status, cluster } = state;
   const warnings = [];
   const transport = status.transport || 'plain';
   if (transport === 'plain') {
@@ -501,6 +503,14 @@ function renderBanners() {
     warnings.push({ id: 'transport-optional', level: '',
       text: 'The cluster transport is set to tls-optional. Nodes use TLS with each other, but clients may still connect without a certificate. Finish with ',
       code: 'djbod cluster set-transport tls' });
+  }
+  // Nodes on different builds (SPEC 6.2.6.4): a change using something an
+  // older build lacks is refused by that node, so say which before it is.
+  const builds = nodeBuilds(cluster);
+  if (builds.size > 1) {
+    warnings.push({ id: 'mixed-builds', level: '',
+      text: `Nodes run ${builds.size} different builds (${[...builds].join(', ')}). Upgrade every node before changing the cluster document; a node refuses a document it cannot represent. Each node's build is in the Nodes table and in `,
+      code: 'djbod cluster show' });
   }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
   if (location.protocol === 'http:' && !local) {
@@ -518,6 +528,15 @@ function renderBanners() {
         renderBanners();
       } }))));
 }
+// The build a node reported, or a name for a reachable node that did not,
+// which predates builds in Hello (SPEC 19.1.5).
+function nodeBuild(n) {
+  return n.build || 'older, unreported';
+}
+// The distinct builds among the reachable nodes.
+function nodeBuilds(cluster) {
+  return new Set(cluster.nodes.filter((n) => !n.error).map(nodeBuild));
+}
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
 }
@@ -531,7 +550,7 @@ function renderOverview() {
   const unreachable = cluster.nodes.filter((n) => n.error).length;
   const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
   const tiles = [
-    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : 'all answering'],
+    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering'],
     ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed`],
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
@@ -550,9 +569,11 @@ function renderOverview() {
 
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
     const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
+    const mixed = nodeBuilds(cluster).size > 1;
     const version = n.error
       ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
-      : el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` });
+      : el('span', {}, el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` }),
+          el('div', { class: 'hint' + (mixed ? ' bad' : ''), text: nodeBuild(n), title: 'the software build this node runs; djbod-node --version prints it' }));
     return el('tr', {}, el('td', {}, nodeCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
       el('td', { class: 'num', text: deviceCount }),
       el('td', {}, el('div', { class: 'actions' },
