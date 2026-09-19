@@ -1418,3 +1418,150 @@ async fn size_limits_come_from_the_cluster_document() {
     let (_, got) = client.get_object("short").await.expect("get");
     assert_eq!(got, vec![7u8; 1000]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversized_metadata_is_refused_before_any_body_is_stored() {
+    use djbod_core::record::{MAX_CONTENT_TYPE_BYTES, MAX_USER_METADATA_BYTES};
+    let test = start_node(2, 1, 1).await;
+    let mut client = test.client().await;
+    let body = [1u8; 10];
+    let long_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES + 1));
+    match client.put_object("k", &body, CHUNK, long_type).await {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
+        }
+        other => panic!("expected MetadataTooLarge, got {other:?}"),
+    }
+    let mut client = test.client().await;
+    let mut big = std::collections::BTreeMap::new();
+    big.insert("blob".to_string(), "y".repeat(MAX_USER_METADATA_BYTES));
+    let mut cursor: &[u8] = &body;
+    match client
+        .put_object_with_metadata("k", 10, &mut cursor, CHUNK, None, big)
+        .await
+    {
+        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+            assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
+        }
+        other => panic!("expected MetadataTooLarge, got {other:?}"),
+    }
+    for device in test.node.devices() {
+        assert!(!device.object_directory(&hash_key(b"k")).exists());
+    }
+    // At the limit is fine, and the metadata comes back.
+    let mut client = test.client().await;
+    let mut fits = std::collections::BTreeMap::new();
+    fits.insert("blob".to_string(), "y".repeat(MAX_USER_METADATA_BYTES - 4));
+    let mut cursor: &[u8] = &body;
+    client
+        .put_object_with_metadata(
+            "k",
+            10,
+            &mut cursor,
+            CHUNK,
+            Some("x".repeat(MAX_CONTENT_TYPE_BYTES)),
+            fits.clone(),
+        )
+        .await
+        .expect("put at the limits");
+    let record = head(&mut client, "k").await.expect("head");
+    assert_eq!(record.user_metadata, fits);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn listings_are_paged_so_no_response_outgrows_a_frame() {
+    use djbod_proto::message::{RecordCursor, MAX_LIST_PAGE_BYTES};
+    // One device, no parity: every record and shard is written once, which
+    // keeps this test cheap, since a debug build serializes 1 MiB keys
+    // slowly.
+    let test = start_node(1, 1, 0).await;
+    let mut client = test.client().await;
+    // Ten keys at the largest length a document may allow, 1 MiB each:
+    // 10 MiB of key text, more than one page.
+    let mut next = test.node.document();
+    next.version += 1;
+    next.max_key_bytes = djbod_core::cluster::LIMIT_MAX_KEY_BYTES;
+    test.node.apply_document(next).expect("apply");
+    let key_len = djbod_core::cluster::LIMIT_MAX_KEY_BYTES as usize;
+    let count = 10u32;
+    for i in 0..count {
+        let key = format!("{i:06}-") + &"k".repeat(key_len - 7);
+        client
+            .put_object(&key, b"x", CHUNK, None)
+            .await
+            .expect("put");
+    }
+
+    // A client listing with no limit gets a frame-sized page and a
+    // truncation flag; paging through start_after yields every key once.
+    let mut seen: Vec<String> = Vec::new();
+    let mut start_after: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        match client
+            .request(Request::ListKeys(ListQuery {
+                prefix: None,
+                start_after: start_after.clone(),
+                limit: None,
+            }))
+            .await
+            .expect("list")
+        {
+            Response::ListKeys { keys, truncated } => {
+                pages += 1;
+                let bytes: usize = keys.iter().map(|k| k.key.len()).sum();
+                assert!(bytes <= MAX_LIST_PAGE_BYTES, "page of {bytes} bytes");
+                start_after = keys.last().map(|k| k.key.clone());
+                seen.extend(keys.into_iter().map(|k| k.key));
+                if !truncated {
+                    break;
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(pages >= 2, "{pages} page(s)");
+    assert_eq!(seen.len(), count as usize);
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted, seen, "sorted and free of duplicates");
+
+    // The per-device record listing pages the same way.
+    let device = test.node.devices()[0].id();
+    let mut records = 0usize;
+    let mut after: Option<RecordCursor> = None;
+    let mut pages = 0;
+    loop {
+        match client
+            .request(Request::LocalRecords {
+                device,
+                after: after.clone(),
+            })
+            .await
+            .expect("local records")
+        {
+            Response::LocalRecords {
+                records: page,
+                truncated,
+            } => {
+                pages += 1;
+                records += page.len();
+                after = page.last().map(|r| RecordCursor {
+                    key: r.key.clone(),
+                    version: r.version,
+                });
+                if !truncated {
+                    break;
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(pages >= 2, "{pages} page(s)");
+    assert_eq!(records, count as usize);
+
+    // Everything that walks the whole key space still sees all of it.
+    let events = run_scrub(&mut client, false).await;
+    assert!(no_findings(&events), "{events:?}");
+}

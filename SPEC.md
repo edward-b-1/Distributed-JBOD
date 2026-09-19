@@ -277,9 +277,11 @@ operation that re-encodes existing objects (18.9).
 
 6.2.4 [D] Sanity limits, enforced when the document is applied:
 `1 <= k <= 32`, `0 <= m <= 8`, `k + m <= 64`, `B` a multiple of 4096 with
-`64 KiB <= B <= 64 MiB`, `1 <= max_key_bytes <= 1 MiB` (a key travels
-inside one protocol frame), `max_object_bytes >= 1`. The bounds are
-generous and exist only to reject typos.
+`64 KiB <= B <= 64 MiB`, `1 <= max_key_bytes <= 1 MiB`,
+`max_object_bytes >= 1`. The bounds are generous and exist only to reject
+typos. The key bound keeps one key a small fraction of a protocol frame
+(19.1.2); messages that carry many keys or records are paged (15.2.1), so
+no message grows with the number of objects.
 
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
@@ -719,9 +721,10 @@ shards              array of { index, device }, exactly k+m entries, one per
 revision            integer, the placement revision (18.8.1); 0 when the
                     version is first written and then omitted from the
                     file, incremented by every re-placement
-content_type        string, optional
+content_type        string, optional, at most 1 KiB
 user_metadata       opaque map, optional, reserved for clients and the
-                    future translation layer
+                    future translation layer; keys and values together at
+                    most 64 KiB
 checksum            16 hex characters, over the other fields (9.4.5);
                     a property of the file, not of the version
 ```
@@ -730,6 +733,13 @@ checksum            16 hex characters, over the other fields (9.4.5);
 owning node is resolved through the cluster document at request time. A
 disk moved to another machine keeps its UUID (5.2) and every record that
 names it stays correct; a node UUID in the record would go stale.
+
+9.4.2.1.1 [D] The two bounds on `content_type` and `user_metadata` keep
+every record small enough that any message carrying one, or a page of
+them, fits a protocol frame with room to spare (15.2.1). A write that
+exceeds either is refused (`MetadataTooLarge`) before any shard is
+stored, and a record that exceeds either is invalid (9.4.2.2), so no
+such record can be written and later fail to travel.
 
 9.4.2.2 [D] A record is validated whenever it is read: system name and
 format version; the key hash must equal the hash of the key (9.1.6); the
@@ -937,6 +947,17 @@ holding shard index 0 of a version report it, which makes deduplication
 free but makes a listing depend on every shard-0 holder being reachable,
 which under fail-stop (16.1) it already does. For a first version a
 simple collect, deduplicate, and sort is acceptable.
+
+15.2.2 [D] **Paging.** Whatever the coordinator's memory does, no single
+message may grow with the number of keys, because a protocol frame has a
+fixed maximum size (19.1.2) and a message beyond it is a hard failure.
+Every listing is therefore paged: a `ListKeys` or `LocalList` page holds
+at most 8 MiB of key text, and a `LocalRecords` page at most 8 MiB of
+encoded records, each with a flag saying more follow and a cursor to
+continue from (the last key, or the last key and version). A client
+`limit` only makes a page smaller. Every internal walk of the key space
+(the listing coordinator over each node, the scrub's cross-node pass,
+the drain, the removal scan, `reencode`) follows the pages to the end.
 
 15.3 [X] A sorted index to make listing fast is deferred.
 
@@ -1328,7 +1349,8 @@ coordinator, and those nodes send to each other. Every response is either
 `ListKeys`
 : Request: optional prefix, optional start-after key, optional limit.
   Response: sorted list of keys and, for each, size and version id; plus a
-  flag saying whether more remain. Section 15.
+  flag saying whether more remain. A page holds at most 8 MiB of key text
+  whatever the limit (15.2.2). Section 15.
 
 `RepairObject`
 : Request: key. Response: a report listing every shard of the newest
@@ -1392,11 +1414,16 @@ coordinator, and those nodes send to each other. Every response is either
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.
   Response: for each matching record on any local device, the key, size,
-  and version id. Duplicates across devices are the coordinator's problem.
+  and version id, in pages of at most 8 MiB of key text with a flag
+  saying more follow (15.2.2). Duplicates across devices are the
+  coordinator's problem.
 
 `LocalRecords`
-: Request: device UUID. Response: every readable record on that device,
-  sorted by key then version; the drain's list of versions (18.2.1).
+: Request: device UUID, optional cursor (the last key and version of the
+  previous page). Response: the readable records on that device after the
+  cursor, sorted by key then version, in pages of at most 8 MiB of
+  encoded records with a flag saying more follow (15.2.2); the drain's
+  and the removal scan's list of versions (18.2.1, 18.5).
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of

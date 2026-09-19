@@ -479,7 +479,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => {
+        Response::LocalList { entries, .. } => {
             let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
             assert_eq!(keys, vec!["a/1", "b/1", "b/2", "c"]);
             assert_eq!(entries[0].size, 101);
@@ -495,7 +495,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => {
+        Response::LocalList { entries, .. } => {
             let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
             assert_eq!(keys, vec!["b/2"]);
         }
@@ -510,7 +510,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => assert_eq!(entries.len(), 2),
+        Response::LocalList { entries, .. } => assert_eq!(entries.len(), 2),
         other => panic!("expected LocalList, got {other:?}"),
     }
 }

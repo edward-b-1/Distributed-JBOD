@@ -89,10 +89,22 @@ pub struct MetadataRecord {
     pub user_metadata: BTreeMap<String, String>,
 }
 
+/// Longest content type a record may carry, in bytes (SPEC 9.4.2).
+pub const MAX_CONTENT_TYPE_BYTES: usize = 1024;
+/// Largest user metadata map a record may carry, as the sum of its keys'
+/// and values' lengths in bytes (SPEC 9.4.2).
+pub const MAX_USER_METADATA_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RecordError {
     #[error("not valid JSON or not a metadata record: {0}")]
     Json(String),
+    #[error("content type is {0} bytes; the limit is {MAX_CONTENT_TYPE_BYTES}")]
+    ContentTypeTooLong(usize),
+    #[error(
+        "user metadata is {0} bytes of keys and values; the limit is {MAX_USER_METADATA_BYTES}"
+    )]
+    UserMetadataTooLarge(usize),
     #[error(
         "record checksum {stored:?} does not match its contents, which checksum to {computed:?}"
     )]
@@ -244,9 +256,27 @@ impl MetadataRecord {
 
     /// Check the invariants a record must satisfy regardless of where it
     /// came from.
+    /// The size of the user metadata map: the sum of its keys' and
+    /// values' lengths in bytes.
+    pub fn user_metadata_bytes(&self) -> usize {
+        self.user_metadata
+            .iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum()
+    }
+
     pub fn validate(&self) -> Result<(), RecordError> {
         if self.system != SYSTEM_NAME {
             return Err(RecordError::WrongSystem(self.system.clone()));
+        }
+        if let Some(content_type) = &self.content_type {
+            if content_type.len() > MAX_CONTENT_TYPE_BYTES {
+                return Err(RecordError::ContentTypeTooLong(content_type.len()));
+            }
+        }
+        let metadata_bytes = self.user_metadata_bytes();
+        if metadata_bytes > MAX_USER_METADATA_BYTES {
+            return Err(RecordError::UserMetadataTooLarge(metadata_bytes));
         }
         if self.format_version != RECORD_FORMAT_VERSION {
             return Err(RecordError::UnsupportedFormatVersion(self.format_version));

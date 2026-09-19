@@ -17,7 +17,7 @@ use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    Request, Response, ScrubItem, StreamEnd,
+    RecordCursor, Request, Response, ScrubItem, StreamEnd, MAX_LIST_PAGE_BYTES,
 };
 
 use crate::node::{Node, NodeError, ShardWriteKey};
@@ -39,8 +39,8 @@ pub async fn handle(
             respond(writer, id, local_lookup(node, key_hash).await).await
         }
         Request::LocalList(query) => respond(writer, id, local_list(node, query).await).await,
-        Request::LocalRecords { device } => {
-            respond(writer, id, local_records(node, device).await).await
+        Request::LocalRecords { device, after } => {
+            respond(writer, id, local_records(node, device, after).await).await
         }
         Request::LocalScrub {
             max_bytes_per_second,
@@ -331,7 +331,11 @@ async fn local_lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Response, F
 /// Every readable record on one device, sorted by key then version, for
 /// the drain (18.2.1). An unreadable record is logged and skipped; the
 /// scrub is the tool that reports it.
-async fn local_records(node: &Arc<Node>, device: DeviceId) -> Result<Response, Failure> {
+async fn local_records(
+    node: &Arc<Node>,
+    device: DeviceId,
+    after: Option<RecordCursor>,
+) -> Result<Response, Failure> {
     let Some(device) = node.device(device) else {
         return Err(Failure::Error(ErrorDetail {
             device: Some(device),
@@ -358,7 +362,28 @@ async fn local_records(node: &Arc<Node>, device: DeviceId) -> Result<Response, F
         other => other,
     })?;
     records.sort_by(|a, b| a.key.cmp(&b.key).then(a.version.cmp(&b.version)));
-    Ok(Response::LocalRecords { records })
+    if let Some(after) = after {
+        records.retain(|r| (r.key.as_str(), r.version) > (after.key.as_str(), after.version));
+    }
+    // One page: as many records as fit in a frame with room to spare.
+    let mut page = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for record in records {
+        let encoded = djbod_proto::codec::encode_cbor(&record)
+            .map_err(|e| Failure::Error(ErrorDetail::new(ErrorCode::Internal, e.to_string())))?
+            .len();
+        if !page.is_empty() && bytes + encoded > MAX_LIST_PAGE_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += encoded;
+        page.push(record);
+    }
+    Ok(Response::LocalRecords {
+        records: page,
+        truncated,
+    })
 }
 
 async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
@@ -404,10 +429,28 @@ async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Fail
     if let Some(after) = &query.start_after {
         entries.retain(|e| e.key.as_str() > after.as_str());
     }
-    if let Some(limit) = query.limit {
-        entries.truncate(limit as usize);
+    let (entries, truncated) = page_of_keys(entries, query.limit);
+    Ok(Response::LocalList { entries, truncated })
+}
+
+/// The first page of `entries`: at most `limit` of them, and at most
+/// `MAX_LIST_PAGE_BYTES` of key text, so the response fits in a frame
+/// (SPEC 15.2.1). The second value says whether any were left over.
+pub fn page_of_keys(entries: Vec<KeyEntry>, limit: Option<u32>) -> (Vec<KeyEntry>, bool) {
+    let mut page = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for entry in entries {
+        let full = limit.is_some_and(|l| page.len() >= l as usize)
+            || (!page.is_empty() && bytes + entry.key.len() > MAX_LIST_PAGE_BYTES);
+        if full {
+            truncated = true;
+            break;
+        }
+        bytes += entry.key.len();
+        page.push(entry);
     }
-    Ok(Response::LocalList { entries })
+    (page, truncated)
 }
 
 struct PutShardParams {

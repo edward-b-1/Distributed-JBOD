@@ -19,7 +19,7 @@ use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_proto::message::{ErrorCode, ErrorDetail, Request, Response};
+use djbod_proto::message::{ErrorCode, ErrorDetail, RecordCursor, Request, Response};
 
 use crate::client::{ClientError, Connection};
 use crate::config::NodeConfig;
@@ -636,14 +636,33 @@ pub async fn scan_references(
             .iter()
             .filter(|d| d.node == entry.id && d.state != DeviceState::Removed)
         {
-            let records = match connection
-                .request(Request::LocalRecords { device: device.id })
-                .await
-            {
-                Ok(Response::LocalRecords { records }) => records,
-                Ok(other) => return Err(unreachable(format!("unexpected response {other:?}"))),
-                Err(e) => return Err(unreachable(e.to_string())),
-            };
+            let mut records = Vec::new();
+            let mut after: Option<RecordCursor> = None;
+            loop {
+                match connection
+                    .request(Request::LocalRecords {
+                        device: device.id,
+                        after: after.clone(),
+                    })
+                    .await
+                {
+                    Ok(Response::LocalRecords {
+                        records: page,
+                        truncated,
+                    }) => {
+                        after = page.last().map(|r| RecordCursor {
+                            key: r.key.clone(),
+                            version: r.version,
+                        });
+                        records.extend(page);
+                        if !truncated || after.is_none() {
+                            break;
+                        }
+                    }
+                    Ok(other) => return Err(unreachable(format!("unexpected response {other:?}"))),
+                    Err(e) => return Err(unreachable(e.to_string())),
+                }
+            }
             for record in records {
                 let slot = current.entry((record.key.clone(), record.version));
                 match slot {
