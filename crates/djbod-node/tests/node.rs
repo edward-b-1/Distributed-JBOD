@@ -65,6 +65,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         temporary_max_age_secs: 3600,
         // Temporary directories all live on one filesystem.
         allow_shared_filesystem: true,
+        tls: None,
     };
     let parameters = ClusterParameters {
         k,
@@ -238,6 +239,7 @@ async fn hello_exchange_and_local_status() {
             node,
             document_version,
             devices,
+            ..
         } => {
             assert_eq!(node, test.node.id());
             assert_eq!(document_version, 1);
@@ -911,6 +913,7 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: false,
+        tls: None,
     };
     match Node::init_cluster(config, ClusterParameters::default()) {
         Err(djbod_node::node::NodeError::SameFilesystem { .. }) => {}

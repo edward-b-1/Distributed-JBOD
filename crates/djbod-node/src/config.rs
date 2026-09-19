@@ -9,7 +9,16 @@
 //! devices = ["/mnt/disk0/data", "/mnt/disk1/data"]
 //! bootstrap_peers = ["10.0.0.2:5263"]   # optional; empty for the first node
 //! allow_shared_filesystem = false   # optional; true only for tests and experiments
+//!
+//! [tls]                             # optional; paths only, never key material (SPEC 19.1.6.2)
+//! cert = "/etc/djbod/node.crt"      # this node's certificate, with an IP SAN for its address
+//! key = "/etc/djbod/node.key"       # owner-readable only
+//! ca = "/etc/djbod/ca.crt"          # the cluster's authority, or a bundle
 //! ```
+//!
+//! The `[tls]` paths can also be given as `--tls-cert`, `--tls-key`,
+//! `--tls-ca` or `DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`, `DJBOD_TLS_CA`, which
+//! take precedence in that order (SPEC 20.6).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -17,6 +26,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::transport::TlsPaths;
 
 /// The default TCP port. It spells JBOD on a telephone keypad (J=5, B=2,
 /// O=6, D=3) and IANA lists it as unassigned. The first candidate, 7400,
@@ -48,6 +59,10 @@ pub struct NodeConfig {
     /// node logs a warning at startup when it is set.
     #[serde(default)]
     pub allow_shared_filesystem: bool,
+    /// Where this node's TLS material lives (SPEC 19.1.6.2). Required
+    /// when the cluster's transport is not `plain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsPaths>,
 }
 
 fn default_listen() -> SocketAddr {
@@ -162,6 +177,7 @@ devices = ["/mnt/a", "/mnt/a"]
             bootstrap_peers: vec!["10.0.0.2:5263".to_string()],
             temporary_max_age_secs: 60,
             allow_shared_filesystem: false,
+            tls: None,
         };
         let text = config.to_toml();
         let parsed: NodeConfig = toml::from_str(&text).expect("parse");

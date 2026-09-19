@@ -26,7 +26,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use djbod_core::checksum::BlockChecksum;
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, Transport};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::scrub::{Finding, ScrubSummary};
@@ -73,6 +73,9 @@ pub enum ErrorCode {
     ProtocolViolation,
     /// Handshake failed.
     Unauthorised,
+    /// The cluster's transport is `tls` and the connection was plain
+    /// (SPEC 19.1.6.4).
+    TlsRequired,
     /// Anything else; the message says what.
     Internal,
 }
@@ -357,6 +360,8 @@ pub enum Response {
         cluster_id: Uuid,
         document_version: u64,
         coordinator: NodeId,
+        #[serde(default)]
+        transport: Transport,
         devices: Vec<DeviceStatus>,
     },
     PutObject {
@@ -396,6 +401,9 @@ pub enum Response {
     LocalStatus {
         node: NodeId,
         document_version: u64,
+        /// Whether this node has TLS material loaded (19.1.6.4).
+        #[serde(default)]
+        tls_ready: bool,
         devices: Vec<DeviceStatus>,
     },
     /// A page of record copies; `truncated` says whether more follow

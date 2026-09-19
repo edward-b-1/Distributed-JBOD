@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -12,7 +13,7 @@ use uuid::Uuid;
 
 use djbod_core::cluster::{
     ClusterDocument, ClusterDocumentError, DeviceEntry, DeviceState, IndependenceLevel, NodeEntry,
-    NodeId,
+    NodeId, Transport,
 };
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::keyhash::KeyHash;
@@ -20,6 +21,7 @@ use djbod_core::record::DeviceId;
 use djbod_core::version::VersionId;
 
 use crate::config::NodeConfig;
+use crate::transport::{Connector, TlsError, TlsMaterial};
 use crate::ulid::VersionGenerator;
 
 pub const CLUSTER_DOCUMENT_FILE: &str = "cluster.json";
@@ -75,6 +77,12 @@ pub enum NodeError {
     NotNewer { current: u64, proposed: u64 },
     #[error("cluster document names cluster {proposed}, this node belongs to {ours}")]
     WrongCluster { ours: Uuid, proposed: Uuid },
+    #[error(
+        "the cluster's transport is {transport} but this node has no TLS material; give [tls] paths in the configuration or --tls-cert, --tls-key, --tls-ca (SPEC 19.1.6.2)"
+    )]
+    TlsRequired { transport: Transport },
+    #[error(transparent)]
+    Tls(#[from] TlsError),
 }
 
 /// A running node's shared state.
@@ -93,6 +101,12 @@ pub struct Node {
     /// Becomes true when an adopted document no longer lists this node
     /// (18.2.1, 6.2.6.3); the server stops accepting connections.
     removed: tokio::sync::watch::Sender<bool>,
+    /// Loaded from the configured paths at startup (19.1.6.2).
+    tls: Option<Arc<TlsMaterial>>,
+    /// Connections accepted since startup, by transport, for status and
+    /// tests.
+    accepted_plain: AtomicU64,
+    accepted_tls: AtomicU64,
 }
 
 /// Identifies one shard file being written.
@@ -199,6 +213,7 @@ impl Node {
             max_key_bytes: parameters.max_key_bytes,
             max_object_bytes: parameters.max_object_bytes,
             max_user_metadata_bytes: parameters.max_user_metadata_bytes,
+            transport: Transport::Plain,
             nodes: vec![NodeEntry {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],
@@ -221,6 +236,11 @@ impl Node {
     pub fn open(config: NodeConfig) -> Result<Node, NodeError> {
         let document_path = Self::document_path(&config);
         let document = load_document(&document_path)?;
+        if document.transport != Transport::Plain && config.tls.is_none() {
+            return Err(NodeError::TlsRequired {
+                transport: document.transport,
+            });
+        }
         let mut devices = Vec::with_capacity(config.devices.len());
         for path in &config.devices {
             devices.push(Device::open(path, Some(document.cluster_id))?);
@@ -240,6 +260,10 @@ impl Node {
         document: ClusterDocument,
         devices: Vec<Device>,
     ) -> Result<Node, NodeError> {
+        let tls = match &config.tls {
+            Some(paths) => Some(Arc::new(TlsMaterial::load(paths)?)),
+            None => None,
+        };
         // Two configured paths on one filesystem are one disk (5.3).
         let mut by_filesystem: BTreeMap<u64, Vec<&Device>> = BTreeMap::new();
         for device in &devices {
@@ -308,7 +332,43 @@ impl Node {
             versions: VersionGenerator::new(),
             writes_in_flight: Mutex::new(HashSet::new()),
             removed: tokio::sync::watch::Sender::new(false),
+            tls,
+            accepted_plain: AtomicU64::new(0),
+            accepted_tls: AtomicU64::new(0),
         })
+    }
+
+    /// This node's TLS material, if configured.
+    pub fn tls(&self) -> Option<&Arc<TlsMaterial>> {
+        self.tls.as_ref()
+    }
+
+    /// How this node connects to its peers: TLS whenever the document's
+    /// transport is not `plain` (19.1.6.4).
+    pub fn connector(&self) -> Result<Connector, NodeError> {
+        let transport = self.document.read().expect("document lock").transport;
+        match (transport, &self.tls) {
+            (Transport::Plain, _) => Ok(Connector::plain()),
+            (_, Some(material)) => Ok(material.connector()),
+            (transport, None) => Err(NodeError::TlsRequired { transport }),
+        }
+    }
+
+    pub fn count_accepted(&self, tls: bool) {
+        let counter = if tls {
+            &self.accepted_tls
+        } else {
+            &self.accepted_plain
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Connections accepted since startup: (plain, TLS).
+    pub fn connections_accepted(&self) -> (u64, u64) {
+        (
+            self.accepted_plain.load(Ordering::Relaxed),
+            self.accepted_tls.load(Ordering::Relaxed),
+        )
     }
 
     /// Whether an adopted document has dropped this node.
@@ -344,6 +404,11 @@ impl Node {
             return Err(NodeError::NotNewer {
                 current: current.version,
                 proposed: proposed.version,
+            });
+        }
+        if proposed.transport != Transport::Plain && self.tls.is_none() {
+            return Err(NodeError::TlsRequired {
+                transport: proposed.transport,
             });
         }
         save_document(&Self::document_path(&self.config), &proposed)?;

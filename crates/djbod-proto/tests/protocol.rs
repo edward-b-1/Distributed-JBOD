@@ -82,6 +82,7 @@ fn sample_document() -> ClusterDocument {
         max_key_bytes: 16 * 1024,
         max_object_bytes: 1 << 40,
         max_user_metadata_bytes: 10 * 1024 * 1024,
+        transport: djbod_core::cluster::Transport::TlsOptional,
         nodes: vec![NodeEntry {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
@@ -447,6 +448,7 @@ fn every_response_round_trips() {
         Response::Status {
             cluster_id: Uuid::from_u128(0xC1),
             document_version: 7,
+            transport: djbod_core::cluster::Transport::Plain,
             coordinator: node(1),
             devices: vec![status.clone()],
         },
@@ -514,6 +516,7 @@ fn every_response_round_trips() {
         Response::LocalStatus {
             node: node(1),
             document_version: 7,
+            tls_ready: true,
             devices: vec![status],
         },
         Response::LocalRecords {
