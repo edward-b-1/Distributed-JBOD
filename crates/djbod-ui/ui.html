@@ -174,7 +174,7 @@
   <div class="split">
     <div>
       <table>
-        <thead><tr><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
+        <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
         <tbody id="objects"></tbody>
       </table>
       <div class="row"><button id="list-more" hidden>More</button><span class="hint" id="list-count"></span></div>
@@ -467,9 +467,10 @@ async function list(startAfter) {
 function renderListing() {
   const { keys, truncated } = state.listing;
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', { class: 'key' }, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object failed; open it for details' }) : null, k.key),
+    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object was stopped by the node; open it for details' }) : null),
+    el('td', { class: 'key', text: k.key }),
     el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
-  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 3, class: 'empty', text: 'no objects' })));
+  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
   $('list-more').hidden = !truncated;
   $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
 }
@@ -493,6 +494,13 @@ async function select(key) {
 /// read, and redraws the panel when it did. The server remembers only
 /// reads it relayed, in memory, until a read, verify, or repair of the
 /// key succeeds.
+async function refreshFailures() {
+  try {
+    const r = await api('/read-failures');
+    state.failures = Object.fromEntries(r.failures.map((f) => [f.key, f]));
+    renderListing();
+  } catch (_) { /* the next refresh will try again */ }
+}
 let failurePoll = 0;
 function watchForReadFailure(key) {
   const since = Math.floor(Date.now() / 1000) - 1;
@@ -575,6 +583,7 @@ async function verify(key, button) {
           break;
         }
         case 'done': {
+          refreshFailures();
           const when = new Date().toLocaleTimeString();
           if (e.verified) {
             box.replaceChildren(el('p', { class: 'ok', style: 'margin:0 0 10px', text: `verified at ${when}: ${human(e.bytes)} read and every block checked` }));
@@ -602,6 +611,7 @@ async function repair(key) {
     });
     const rewritten = r.shards.filter((s) => s.rewritten).length;
     toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
+    refreshFailures();
     select(key);
   } catch (e) { fail('repair', e); }
 }
