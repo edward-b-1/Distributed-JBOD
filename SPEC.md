@@ -1761,6 +1761,25 @@ against a coordinator retrying into its own unfinished write.
 20.1.3 [D] Since reads report rather than heal, scrubbing is the mechanism
 by which corruption is found before a client encounters it.
 
+20.1.4 [O] **Scrub history.** Today a scrub's findings exist only in the
+stream sent to the client that asked for it; once that client exits,
+nothing in the cluster records that a scrub ran, when, or what it found.
+An administrator cannot ask "when was this cluster last scrubbed, and was
+it clean?", which is the first question after any incident, and a cron
+job's output is wherever cron put it. Wanted: the time and result of the
+last scrub, and possibly the full history. Deferred (22); open points to
+settle when it is taken up: where the record lives (a small history file
+in each node's state directory for its own local scrubs, since the
+node-local scrub has no coordinator and the state directory is the only
+place a node owns; the coordinator's cross-node findings, which belong to
+no one node, would need a home too, perhaps as a record written by the
+client to a reserved key, or as a document field for the last completion
+time only); how much to keep (the last result, the last N, or everything
+with a size cap); and how it is shown (`djbod status`, a `djbod scrub
+--history` listing, the web UI's overview). The offline `djbod-node scrub`
+should record its results the same way, since a machine that scrubs while
+its node is down is still a machine that has been scrubbed.
+
 ### 20.2 Recovery tool
 
 20.2.1 [D] A single static binary that, given one or more device paths and
@@ -1897,6 +1916,10 @@ future credential.
 - Inline reconstruction on read (16.5).
 - A built-in scrub schedule inside the node; today `djbod-node scrub` is
   run by cron or a systemd timer (20.1.2).
+- **Scrub history** (20.1.4): the time and result of the last scrub, and
+  possibly every scrub, kept somewhere the cluster owns and shown by
+  `status` and the web UI, so that "when was this last scrubbed, and was
+  it clean?" has an answer without reading cron's output.
 - Rebalance (18.7).
 - Non-systematic encoding option (8.1.6).
 - Optional parity verification on read, for deployments that want it.
