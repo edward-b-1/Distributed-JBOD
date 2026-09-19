@@ -1601,20 +1601,25 @@ differs (6.2.7), with an error naming which. This catches a node or client
 pointed at the wrong cluster and a node running stale software or
 configuration. It authenticates nothing; see 6.1.2 and 19.1.6.
 
-19.1.6 [P] **TLS.** Optional; when enabled it authenticates nodes to each
+19.1.6 [D] **TLS.** Optional; when enabled it authenticates nodes to each
 other, authenticates clients, and encrypts every connection. TLS wraps
 the byte stream beneath the frames, so `djbod-proto` is unchanged.
 
-19.1.6.1 [P] **One certificate authority per cluster, managed with
+19.1.6.1 [D] **One certificate authority per cluster, managed with
 standard tools.** The administrator creates a CA and issues one
 certificate per node and one per client with `openssl` or any tool that
 produces PEM files; djbod generates no keys and signs nothing. A node's
 certificate names the host at which the document lists it, as a DNS or IP
 subject alternative name, so that the ordinary server-name check applies
 when a peer or client connects to it. Certificates carry no djbod-specific
-fields. The getting-started guide gives the commands.
+fields. The getting-started guide gives the commands. As built, the
+addresses in the cluster document are IP and port, so a node's
+certificate carries an IP subject alternative name; a certificate with an
+extended key usage extension must include `serverAuth` for a node and
+`clientAuth` for anything that connects, and one with no such extension
+is accepted for both, as the verifier requires.
 
-19.1.6.2 [P] **Material lives in files, never in configuration or the
+19.1.6.2 [D] **Material lives in files, never in configuration or the
 document.** A node needs three files: its certificate, its private key,
 and the CA certificate (which may be a bundle of several roots, see
 19.1.6.6). Each is named by path, following 20.6: a `djbod-node run` flag
@@ -1625,7 +1630,7 @@ same three for the client's certificate, key, and CA, as flags or
 environment variables. The private key file must be readable only by its
 owner; the node refuses to start otherwise.
 
-19.1.6.3 [P] **Verification.** A connecting side verifies the server's
+19.1.6.3 [D] **Verification.** A connecting side verifies the server's
 certificate against the CA and against the host it dialled, as any TLS
 client does. A node verifies a connecting node's or client's certificate
 against the CA; possession of a certificate the cluster's CA issued is
@@ -1637,7 +1642,7 @@ not an attack the design defends against. Likewise the design does not
 distinguish node certificates from client certificates; a node could act
 as a client, and nodes are already trusted with everything.
 
-19.1.6.4 [P] **Three transport modes**, set in the cluster document
+19.1.6.4 [D] **Three transport modes**, set in the cluster document
 (`transport`, 6.2.2) and changed with `djbod cluster set-transport`:
 
 - `plain`: the default and what exists today. Nodes speak plain to each
@@ -1661,12 +1666,12 @@ to one that has not, which accepts it, so there is no window of failure
 in that direction; the reverse direction is plain into a listener that
 still accepts plain. Moving back to `plain` is a proposal like any other.
 
-19.1.6.5 [P] **Joining under TLS.** A joining node already holds a
+19.1.6.5 [D] **Joining under TLS.** A joining node already holds a
 certificate the CA issued, so `djbod-node join` authenticates with it
 like any node connection; nothing is registered in advance and nothing
 is added to the document beyond the node's entry.
 
-19.1.6.6 [P] **Revocation is CA rotation.** A certificate is valid until
+19.1.6.6 [D] **Revocation is CA rotation.** A certificate is valid until
 it expires, and a CA cannot withdraw one it has signed; the standard
 remedies (revocation lists, online status checks, short-lived
 certificates) each need machinery this system does not want. Instead, to
@@ -1679,7 +1684,7 @@ renewal are handled the same way, by files and restarts, with no protocol
 involvement. Removing a node from the document (18.2.1) does not by itself
 withdraw its certificate; rotate if that matters.
 
-19.1.6.7 [P] **Implementation.** `rustls` with `tokio-rustls`, pure Rust
+19.1.6.7 [D] **Implementation.** `rustls` with `tokio-rustls`, pure Rust
 with no OpenSSL dependency at run time; the node and client crates gain a
 transport layer that yields a byte stream, plain or TLS, over which the
 existing frame code runs unchanged. `djbod-recover` and the offline
@@ -2184,6 +2189,21 @@ streamed GET into a PUT per version. Step (e): `max_key_bytes` and
 `max_object_bytes` in the cluster document (6.2.2), `djbod-node
 init-cluster --max-key-bytes --max-object-bytes`, and `djbod cluster
 set-limits`; settles 21.3. Every step of C.4 is built.
+
+C.4.6 **Milestone 5 (TLS) status, 19 September 2026: complete.** (a)
+`djbod_node::transport` (material from PEM paths with the key-permission
+check, the plain-or-TLS stream, first-byte accept), `transport` in the
+cluster document with `membership::set_transport` and `djbod cluster
+set-transport`, mutual TLS between nodes, a node refusing to start or to
+adopt a document under a TLS transport without material; tested by
+moving a three-node cluster from `plain` to `tls-optional` to `tls` and
+back with connection counters proving the switch. (b) `djbod --tls-ca
+--tls-cert --tls-key` and the `DJBOD_TLS_*` variables, with the
+anonymous-client case; `join` with the node's own certificate. (c) every
+node setting as argument, environment variable, or file (20.6), the file
+optional. (d) the guide's `openssl` walkthrough, verified end to end
+against the real binaries. Certificate rotation is by files and restarts
+(19.1.6.6); nothing in the protocol changed.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
