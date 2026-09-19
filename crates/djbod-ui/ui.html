@@ -531,7 +531,7 @@ function describeFailure(f) {
   return el('p', { class: 'bad', style: 'margin:0 0 10px' },
     `${what} at ${when} was stopped by the node after ${human(f.bytes)}: ${f.error.code}: ${f.error.message}`,
     el('br'),
-    el('span', { class: 'hint', text: describeError(f.error).replace(/\n/g, '   ') + '   Repair rebuilds it from the other shards; Verify checks it again.' }));
+    el('span', { class: 'hint', text: describeError(f.error).replace(/\n/g, '   ') }));
 }
 function renderDetail(record) {
   const deviceNode = (id) => state.status?.devices.find((d) => d.device === id)?.node;
