@@ -942,19 +942,77 @@ exists on k+m devices), sorts, and returns.
 
 15.2 [D] This is a full scan of every device and is accepted as slow.
 
-15.2.1 [O] **Listing at scale.** As written, the coordinator collects
-every node's full result, deduplicates, sorts, and then answers, so its
-memory grows with the number of keys in the cluster and nothing reaches
-the client until the slowest node has finished. To revisit at
-implementation time. Options noted so far: each node returns its entries
-already sorted and the coordinator performs a streaming k-way merge,
-dropping duplicates as adjacent equal keys and emitting as it goes;
-pagination through `start_after` and `limit` so no single response is
-unbounded; and avoiding duplicates at the source by having only the device
-holding shard index 0 of a version report it, which makes deduplication
-free but makes a listing depend on every shard-0 holder being reachable,
-which under fail-stop (16.1) it already does. For a first version a
-simple collect, deduplicate, and sort is acceptable.
+15.2.1 [O] **Listing at scale.** As built, a node finds the keys it holds
+by walking its objects tree, which is in key-hash order (9.3), so
+answering "the keys after X" means reading every record and sorting.
+The coordinator asks every node for its whole list on every page, merges,
+sorts, and then cuts the page (issue #29 narrows the transfer but not the
+disk scan). Two consequences, both accepted for the first version:
+
+- **Cost.** A walk of N keys in P pages reads every record P times.
+- **Consistency.** The result of a walk is not a snapshot of any single
+  instant; see 15.2.2 for the exact guarantee.
+
+Options for doing better, recorded here so the choice is made once:
+
+1. **Streaming listing.** `ListKeys` becomes a stream like `Scrub`: every
+   node scans once, sorts its own keys, and streams them in order; the
+   coordinator performs a k-way merge, dropping duplicates as adjacent
+   equal keys, and streams the merged result to the client. One scan per
+   walk, so linear; each node's contribution is consistent to the single
+   instant of its scan, though the cluster as a whole still is not. Memory
+   at a node is its own key list, which paging already needs; at the
+   coordinator, one head per node. Not resumable: a client consumes or
+   aborts. The right shape for the whole-space walks (scrub, `reencode`,
+   the removal scan) and a sensible default for `djbod list`.
+2. **In-memory key index per device.** Each node keeps, for each device,
+   an ordered map from key to the versions and record summaries it holds,
+   built by one scan at startup (or lazily on first use) and kept current
+   by the node's own write and delete paths, which are the only writers
+   while the node runs; a restart rebuilds it, so it can never be stale
+   across restarts, unlike an on-disk index. A page is then a seek plus a
+   sequential read, so a walk is linear and a page costs nothing on disk.
+   Memory is roughly the total length of the keys held, bounded by
+   `max_key_bytes` times the number of records; with typical keys a
+   million records is on the order of 100 MiB. Startup cost is one scan of
+   every device. Every mutation path (record write, version delete, stale
+   copy removal) must update it under the same lock, which is the risk.
+   With a persistent (structurally shared) ordered map, taking a snapshot
+   is O(1) and readers hold an old version while writers produce a new
+   one, which gives point-in-time pages without freezing writers or
+   queueing events. Holding a snapshot across pages needs a session token
+   with an idle timeout, which is server state; snapshot-per-page needs
+   none and gives the guarantee of 15.2.2 at linear cost.
+   A variant freezes the map for the duration of a paging session and
+   queues add and delete events in an ordered log to apply afterwards; it
+   gives the same result with more moving parts (the queue grows with
+   writes during the walk, and a slow client holds the freeze), so the
+   persistent map is preferred if snapshots are wanted.
+3. **Server-side snapshot iterators.** A node takes its listing once,
+   holds it in memory or a temporary file, and pages through that frozen
+   copy under a token until an idle timeout. Per-node point-in-time
+   pages and linear cost, but expiry, restarts losing the snapshot, and
+   concurrent walks multiplying memory. Dominated by option 2 with a
+   persistent map.
+4. **A change counter.** Each node keeps a mutation counter returned with
+   every page; a client that sees it change knows the walk spanned a
+   change and can restart or accept. Cheap, detects rather than prevents,
+   and a busy cluster changes constantly.
+5. **A sorted on-disk index per device** (15.3). Key order kept on disk,
+   maintained on write and delete, giving cheap pages, linear walks, and
+   with a store that has snapshot reads, true point-in-time pages. The
+   largest change: derived state that can disagree with the records, so
+   it needs a rebuild command and a scrub check.
+6. **Deduplication at the source**: only the device holding shard index 0
+   of a version reports it, which makes the coordinator's merge free but
+   makes a listing depend on every shard-0 holder being reachable, which
+   under fail-stop (16.1) it already does. Combines with any of the above.
+
+Recommendation: keep keyset paging as the client-facing API, since the
+future S3 layer (19.2) needs exactly those semantics; build option 1 for
+the internal whole-space walks and as the default for `djbod list`; take
+option 2 when a real cluster shows page cost to matter, since it removes
+the disk scan without adding on-disk state; leave 15.3 deferred.
 
 15.2.2 [D] **Paging.** Whatever the coordinator's memory does, no single
 message may grow with the number of keys, because a protocol frame has a
@@ -968,6 +1026,22 @@ alone in its own page. A client `limit` only makes a page smaller. Every
 internal walk (the listing coordinator over each node, the lookup behind
 every read, the scrub's cross-node pass, the drain, the removal scan,
 `reencode`) follows the pages to the end.
+
+The cursor is the sort key of the last item returned, never a position
+or a server-side token, and every page is computed afresh from disk, so
+no state is held between pages and nothing expires. The guarantee this
+gives, the same as S3's `ListObjects` or `readdir`, is exactly: every
+item that exists for the whole of a walk appears exactly once; an item
+created or deleted during the walk may or may not appear, depending on
+whether the walk had passed its position; nothing appears twice; and the
+deletion of the item the cursor names is harmless, since the next page is
+"greater than the cursor", a comparison rather than a lookup. The result
+of a walk is therefore the union of things that were true at different
+moments and need not correspond to any state that ever existed at one
+instant. The internal walks need no more: a scrub that misses a key
+written during it finds it next time, a drain's list cannot grow because
+a `draining` device receives no new shards, and the removal scan is
+protected by requiring that state first (issue #28).
 
 15.3 [X] A sorted index to make listing fast is deferred.
 
