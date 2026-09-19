@@ -78,12 +78,13 @@ objects with no cluster running, and turning on TLS.
   records the scheme it was written with, so old and new objects coexist
   and you re-encode at your own pace, or never.
 - **Bitrot found and fixed.** Every block, every object, and every
-  metadata record carries a checksum. A read that meets a bad block says
-  so, naming the disk, the shard, and the stripe, and `djbod repair`
-  rebuilds the shard from the others, onto another disk if its own is
-  gone. A scrub checks every disk on a schedule you set, then checks
-  across the cluster that every object's records agree and every shard is
-  where its record says, and can repair what it finds.
+  metadata record carries an XXH3-64 checksum, fast enough to verify at
+  disk speed; keys are located by their SHA-256. A read that meets a bad
+  block says so, naming the disk, the shard, and the stripe, and `djbod
+  repair` rebuilds the shard from the others, onto another disk if its
+  own is gone. A scrub checks every disk on a schedule you set, then
+  checks across the cluster that every object's records agree and every
+  shard is where its record says, and can repair what it finds.
 - **Grow, shrink, and fix while running.** Add a disk or a machine, name
   it, mark it draining so it takes no new data, move its shards off,
   remove it; force out a machine that will never come back and rebuild
