@@ -558,55 +558,48 @@ async fn delete_version_everywhere(
     Ok(())
 }
 
+/// One page of the cluster's keys (15.1, 15.2.2). The client's cursor and
+/// limit go down to every node, so each node returns one page of the
+/// keys after the cursor, and the coordinator holds at most one page per
+/// node rather than every key in the cluster.
+///
+/// One page from each node is enough, provided the merged page stops at
+/// the last key of any node that had more. Every key such a node left
+/// out is greater than the last key it returned, so nothing beyond that
+/// key can be reported yet: a key from another node placed after it
+/// would become the cursor and the left-out keys, being smaller, would
+/// never be asked for again. Under the count limit alone the cut could
+/// not pass that key anyway, but the byte bound can: a node's page may
+/// stop before a long key while the merged page still has room for a
+/// short key from elsewhere that sorts after it. Duplicates (one
+/// version's record on k+m devices) collapse to the newest version per
+/// key, which can make a page shorter than the bound; that is why the
+/// truncation flag also says whether any node had more.
 async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
-    // v1: collect everything matching the prefix from every node, keep
-    // the newest version per key, sort, then page (15.1, 15.2.1). Each
-    // node's list is fetched in frame-sized pages; the merged result is
-    // paged the same way before it goes to the client.
     let mut newest: BTreeMap<String, KeyEntry> = BTreeMap::new();
-    let document = node.document();
-    for entry in &document.nodes {
-        for item in local_list_all(node, entry.id, query.prefix.clone()).await? {
-            match newest.get(&item.key) {
-                Some(existing) if existing.version >= item.version => {}
-                _ => {
-                    newest.insert(item.key.clone(), item);
-                }
-            }
-        }
-    }
-    let mut keys: Vec<KeyEntry> = newest.into_values().collect();
-    if let Some(after) = &query.start_after {
-        keys.retain(|e| e.key.as_str() > after.as_str());
-    }
-    let (keys, truncated) = crate::local_ops::page_of_keys(keys, query.limit);
-    Ok(Response::ListKeys { keys, truncated })
-}
-
-/// One node's whole key list under `prefix`, fetched page by page.
-async fn local_list_all(
-    node: &Arc<Node>,
-    target: NodeId,
-    prefix: Option<String>,
-) -> Result<Vec<KeyEntry>, Failure> {
-    let mut connection = connect_to(node, target).await?;
-    let mut all = Vec::new();
-    let mut start_after: Option<String> = None;
-    loop {
-        let answer = connection
-            .request(Request::LocalList(ListQuery {
-                prefix: prefix.clone(),
-                start_after: start_after.clone(),
-                limit: None,
-            }))
-            .await
-            .map_err(|e| remote_failure(target, e))?;
-        match answer {
+    let mut any_node_truncated = false;
+    // The smallest "last key" among the nodes that had more: the merged
+    // page may not go beyond it.
+    let mut horizon: Option<String> = None;
+    for (target, response) in broadcast(node, Request::LocalList(query.clone())).await? {
+        match response {
             Response::LocalList { entries, truncated } => {
-                start_after = entries.last().map(|e| e.key.clone());
-                all.extend(entries);
-                if !truncated || start_after.is_none() {
-                    return Ok(all);
+                any_node_truncated |= truncated;
+                if truncated {
+                    if let Some(last) = entries.last() {
+                        let closer = horizon.as_ref().is_none_or(|h| last.key < *h);
+                        if closer {
+                            horizon = Some(last.key.clone());
+                        }
+                    }
+                }
+                for item in entries {
+                    match newest.get(&item.key) {
+                        Some(existing) if existing.version >= item.version => {}
+                        _ => {
+                            newest.insert(item.key.clone(), item);
+                        }
+                    }
                 }
             }
             other => {
@@ -617,6 +610,15 @@ async fn local_list_all(
             }
         }
     }
+    let mut keys: Vec<KeyEntry> = newest.into_values().collect();
+    if let Some(horizon) = &horizon {
+        keys.retain(|e| e.key <= *horizon);
+    }
+    let (keys, cut) = crate::local_ops::page_of_keys(keys, query.limit);
+    Ok(Response::ListKeys {
+        keys,
+        truncated: cut || any_node_truncated,
+    })
 }
 
 /// Every key in the cluster, newest version each, fetched page by page.

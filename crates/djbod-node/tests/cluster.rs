@@ -1290,3 +1290,146 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
         "{events:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
+    use djbod_proto::message::ListQuery;
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(1, &a).await;
+    let c = joined_node(1, &b).await;
+    let d = joined_node(1, &c).await;
+    let mut client = a.client().await;
+    // Seven objects at 2+1 over four devices: every key's record is on
+    // three of the four nodes, so every node's page overlaps the others'.
+    let records = put_objects(&mut client, 7, 400).await;
+    let mut expected: Vec<String> = records.iter().map(|r| r.key.clone()).collect();
+    expected.sort();
+    for limit in [1u32, 2, 3, 100] {
+        let mut walked: Vec<String> = Vec::new();
+        let mut start_after: Option<String> = None;
+        loop {
+            match client
+                .request(Request::ListKeys(ListQuery {
+                    prefix: None,
+                    start_after: start_after.clone(),
+                    limit: Some(limit),
+                }))
+                .await
+                .expect("list")
+            {
+                Response::ListKeys { keys, truncated } => {
+                    assert!(!keys.is_empty());
+                    assert!(keys.len() <= limit as usize);
+                    start_after = keys.last().map(|k| k.key.clone());
+                    walked.extend(keys.into_iter().map(|k| k.key));
+                    if !truncated {
+                        break;
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(walked, expected, "limit {limit}");
+    }
+    // The other node is as good a coordinator.
+    let mut client = d.client().await;
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: Some("obj-".to_string()),
+            start_after: Some("obj-4".to_string()),
+            limit: None,
+        }))
+        .await
+        .expect("list")
+    {
+        Response::ListKeys { keys, truncated } => {
+            let got: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
+            assert_eq!(got, vec!["obj-5", "obj-6"]);
+            assert!(!truncated);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() {
+    use djbod_proto::message::{ListQuery, MAX_LIST_PAGE_BYTES};
+    // Two nodes, one device each, no parity, so every key lives on exactly
+    // one node and placement can be steered with the device state.
+    let a = first_node(1, 1, 0).await;
+    let b = joined_node(1, &a).await;
+    let cluster = a.node.cluster_id();
+    let device_a = a.node.devices()[0].id();
+    let device_b = b.node.devices()[0].id();
+    let mut client = a.client().await;
+    let mut next = a.node.document();
+    next.version += 1;
+    next.max_key_bytes = djbod_core::cluster::LIMIT_MAX_KEY_BYTES;
+    membership::propose(&a.node.document(), &next)
+        .await
+        .expect("raise the key limit");
+
+    // Node a holds nine long keys a0..a8, each a little under 1 MiB, so
+    // its page holds eight of them and leaves a8 out for want of room.
+    // Node b holds one short key "b", which sorts after all of them.
+    let long = MAX_LIST_PAGE_BYTES / 8 - 100;
+    membership::set_device_state(a.addr, cluster, device_b, DeviceState::Draining)
+        .await
+        .expect("set state");
+    let mut expected: Vec<String> = Vec::new();
+    for i in 0..9 {
+        let key = format!("a{i}-") + &"k".repeat(long - 3);
+        client
+            .put_object(&key, b"x", 100_000, None)
+            .await
+            .expect("put");
+        expected.push(key);
+    }
+    membership::set_device_state(a.addr, cluster, device_b, DeviceState::Active)
+        .await
+        .expect("set state");
+    membership::set_device_state(a.addr, cluster, device_a, DeviceState::Draining)
+        .await
+        .expect("set state");
+    client
+        .put_object("b", b"x", 100_000, None)
+        .await
+        .expect("put");
+    expected.push("b".to_string());
+    membership::set_device_state(a.addr, cluster, device_a, DeviceState::Active)
+        .await
+        .expect("set state");
+
+    // The first page must stop at a7, not run on to "b" past the unseen
+    // a8; the walk must then yield all ten keys.
+    let mut walked: Vec<String> = Vec::new();
+    let mut start_after: Option<String> = None;
+    let mut first = true;
+    loop {
+        match client
+            .request(Request::ListKeys(ListQuery {
+                prefix: None,
+                start_after: start_after.clone(),
+                limit: None,
+            }))
+            .await
+            .expect("list")
+        {
+            Response::ListKeys { keys, truncated } => {
+                if first {
+                    assert_eq!(keys.len(), 8, "first page stops at the horizon");
+                    assert!(keys.last().expect("non-empty").key.starts_with("a7-"));
+                    assert!(truncated);
+                    first = false;
+                }
+                start_after = keys.last().map(|k| k.key.clone());
+                walked.extend(keys.into_iter().map(|k| k.key));
+                if !truncated {
+                    break;
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(walked, expected);
+}

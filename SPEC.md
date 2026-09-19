@@ -945,11 +945,15 @@ exists on k+m devices), sorts, and returns.
 15.2.1 [O] **Listing at scale.** As built, a node finds the keys it holds
 by walking its objects tree, which is in key-hash order (9.3), so
 answering "the keys after X" means reading every record and sorting.
-The coordinator asks every node for its whole list on every page, merges,
-sorts, and then cuts the page (issue #29 narrows the transfer but not the
-disk scan). Two consequences, both accepted for the first version:
+The coordinator sends the client's cursor and limit to every node, takes
+one page from each, merges, and cuts the merged page no further than the
+last key of any node that had more (a key that node left out is greater
+than that, and a shorter key from another node sorting after it must not
+become the cursor and hide it), so it holds at most one page per node;
+but each node still reads every record to produce its page. Two consequences, both accepted for the first version:
 
-- **Cost.** A walk of N keys in P pages reads every record P times.
+- **Cost.** A walk of N keys in P pages reads every record P times on
+  disk, though it moves each key over the network only once.
 - **Consistency.** The result of a walk is not a snapshot of any single
   instant; see 15.2.2 for the exact guarantee.
 

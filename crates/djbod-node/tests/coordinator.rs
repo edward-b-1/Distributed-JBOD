@@ -1533,6 +1533,39 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
     sorted.dedup();
     assert_eq!(sorted, seen, "sorted and free of duplicates");
 
+    // A small limit walks the same keys in more pages, and a limit of zero
+    // still advances.
+    for limit in [3u32, 0] {
+        let mut walked: Vec<String> = Vec::new();
+        let mut start_after: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            match client
+                .request(Request::ListKeys(ListQuery {
+                    prefix: None,
+                    start_after: start_after.clone(),
+                    limit: Some(limit),
+                }))
+                .await
+                .expect("list")
+            {
+                Response::ListKeys { keys, truncated } => {
+                    pages += 1;
+                    assert!(!keys.is_empty(), "a page never comes back empty");
+                    assert!(keys.len() <= limit.max(1) as usize);
+                    start_after = keys.last().map(|k| k.key.clone());
+                    walked.extend(keys.into_iter().map(|k| k.key));
+                    if !truncated {
+                        break;
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(walked, seen, "limit {limit}");
+        assert!(pages >= (count / limit.max(1)) as usize, "{pages} page(s)");
+    }
+
     // The per-device record listing pages the same way.
     let device = test.node.devices()[0].id();
     let mut records = 0usize;

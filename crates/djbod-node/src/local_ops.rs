@@ -472,6 +472,9 @@ async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Fail
 /// `MAX_LIST_PAGE_BYTES` of key text, so the response fits in a frame
 /// (SPEC 15.2.1). The second value says whether any were left over.
 pub fn page_of_keys(entries: Vec<KeyEntry>, limit: Option<u32>) -> (Vec<KeyEntry>, bool) {
+    // A limit of zero would make an empty, truncated page, and a walk that
+    // never advances; treat it as one.
+    let limit = limit.map(|l| l.max(1));
     let mut page = Vec::new();
     let mut bytes = 0usize;
     let mut truncated = false;
