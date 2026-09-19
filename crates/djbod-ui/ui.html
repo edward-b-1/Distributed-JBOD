@@ -330,7 +330,11 @@ function describeError(error) {
   return lines.join('\n');
 }
 function fail(context, e) {
-  if (e && e.error) toast(`${context}: ${e.error.code}: ${e.error.message}`, describeError(e.error), true);
+  // The status says whose fault it is: a refusal by the store (409), a
+  // name that does not exist (404), a bad request (400), or a node this
+  // server could not reach (502).
+  const kind = e && e.status === 409 ? 'refused' : e && e.status === 404 ? 'not found' : e && e.status === 400 ? 'bad request' : e && e.status >= 500 ? 'cannot reach the cluster' : null;
+  if (e && e.error) toast(`${context}${kind ? ` ${kind}` : ''}: ${e.error.code}: ${e.error.message}`, describeError(e.error), true);
   else toast(`${context}: ${e?.message || e}`, '', true);
 }
 
@@ -340,7 +344,7 @@ async function api(path, options = {}) {
   const text = await response.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch (_) { body = { error: { code: 'http', message: text || response.statusText } }; }
-  if (!response.ok) throw body || { error: { code: 'http', message: response.statusText } };
+  if (!response.ok) throw Object.assign(body || { error: { code: 'http', message: response.statusText } }, { status: response.status });
   return body;
 }
 function post(path, body) {

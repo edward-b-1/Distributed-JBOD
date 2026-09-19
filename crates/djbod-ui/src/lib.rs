@@ -35,7 +35,10 @@
 //! Errors are JSON: `{"error": {"code", "message", ...}}`, where the
 //! fields are those of the node's `ErrorDetail` (SPEC 16.2) when the
 //! node refused, so the administrator sees the same identifying detail
-//! the command line prints.
+//! the command line prints. The status says whose fault it is: 502 when
+//! a node could not be reached, 404 for something that does not exist,
+//! 409 when the store refused a well-formed request because of its
+//! state, 400 for a malformed request (see `membership_status`).
 //!
 //! The HTTP side has no authentication of its own, so the server binds
 //! to localhost by default. Towards the cluster it connects as the
@@ -256,16 +259,64 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_GATEWAY,
                 json!({ "error": { "code": "node_unreachable", "message": e.to_string() } }),
             ),
-            ApiError::Membership(e) => (
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": { "code": "membership", "message": e.to_string() } }),
-            ),
+            ApiError::Membership(e) => {
+                let (status, code) = membership_status(&e);
+                (
+                    status,
+                    json!({ "error": { "code": code, "message": e.to_string() } }),
+                )
+            }
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 json!({ "error": { "code": "bad_request", "message": message } }),
             ),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+/// Whose fault a failed document change is, so the page can tell a
+/// refusal from an outage: 502 when a node could not be reached or the
+/// change only got part way round; 404 when the request named something
+/// that does not exist; 409 when the store refused a well-formed request
+/// because of its current state, or another change won the race, which
+/// a retry settles; 500 for a fault in this server's own configuration.
+/// The code is the error's name, for scripts.
+fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
+    use MembershipError as M;
+    match e {
+        M::BadAddress { .. } => (StatusCode::BAD_GATEWAY, "bad_address"),
+        M::Unreachable { .. } => (StatusCode::BAD_GATEWAY, "unreachable"),
+        M::PeerUnreachable { .. } => (StatusCode::BAD_GATEWAY, "peer_unreachable"),
+        M::Partial { .. } => (StatusCode::BAD_GATEWAY, "partial"),
+        M::UnexpectedResponse { .. } => (StatusCode::BAD_GATEWAY, "unexpected_response"),
+        M::TooManyRetries(_) => (StatusCode::BAD_GATEWAY, "too_many_retries"),
+        M::WrongCluster { .. } => (StatusCode::BAD_GATEWAY, "wrong_cluster"),
+        M::Diverged { .. } => (StatusCode::BAD_GATEWAY, "diverged"),
+        M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
+        M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
+        M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
+        M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
+        M::Superseded { .. } => (StatusCode::CONFLICT, "superseded"),
+        M::AlreadyMember { .. } => (StatusCode::CONFLICT, "already_member"),
+        M::RemovedDevice { .. } => (StatusCode::CONFLICT, "removed_device"),
+        M::StillReferenced { .. } => (StatusCode::CONFLICT, "still_referenced"),
+        M::DeviceActive(_) => (StatusCode::CONFLICT, "device_active"),
+        M::NodeHasActiveDevices { .. } => (StatusCode::CONFLICT, "node_has_active_devices"),
+        M::NodeIsAlive { .. } => (StatusCode::CONFLICT, "node_is_alive"),
+        M::LastNode => (StatusCode::CONFLICT, "last_node"),
+        M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
+        M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
+        M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
+        // A document that fails validation: a bad or duplicate label, a
+        // scheme the devices cannot carry, and the like.
+        M::Node(djbod_node::node::NodeError::InvalidDocument(_)) => {
+            (StatusCode::CONFLICT, "invalid_document")
+        }
+        M::Node(_) => (StatusCode::INTERNAL_SERVER_ERROR, "node"),
+        M::Device(_) => (StatusCode::INTERNAL_SERVER_ERROR, "device"),
+        M::Tls(_) => (StatusCode::INTERNAL_SERVER_ERROR, "tls"),
     }
 }
 

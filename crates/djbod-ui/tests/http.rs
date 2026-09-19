@@ -493,10 +493,10 @@ async fn move_shard_scheme_and_limits() {
     .await;
     assert_eq!(
         status,
-        StatusCode::BAD_GATEWAY,
+        StatusCode::CONFLICT,
         "fewer active devices than k+m: {json}"
     );
-    assert_eq!(json["error"]["code"], "membership");
+    assert_eq!(json["error"]["code"], "too_few_active_devices");
 
     let (status, json) = post_json(
         &test,
@@ -555,8 +555,30 @@ async fn bad_requests_are_reported_as_such() {
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
-    assert_eq!(json["error"]["code"], "membership");
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"]["code"], "last_node");
+
+    // Something that does not exist is 404.
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/remove", Uuid::new_v4()),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(json["error"]["code"], "unknown_device");
+    // A refusal because of the store's state is 409: an active device
+    // cannot be removed.
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let device = status_json["devices"][0]["device"].as_str().unwrap();
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/remove"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"]["code"], "device_active");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -804,7 +826,8 @@ async fn device_labels_are_set_shown_and_cleared() {
         serde_json::json!({ "label": "nas1-bay0" }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"]["code"], "invalid_document");
     assert!(
         json["error"]["message"]
             .as_str()
@@ -818,7 +841,7 @@ async fn device_labels_are_set_shown_and_cleared() {
         serde_json::json!({ "label": "has space" }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
 
     // Null, or an empty string, clears it.
     let (status, json) = post_json(
