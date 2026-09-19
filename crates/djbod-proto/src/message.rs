@@ -291,6 +291,9 @@ pub struct DeviceStatus {
     /// The device's label from the cluster document, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The owning node's label, if it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_label: Option<String>,
     pub total_bytes: u64,
     pub free_bytes: u64,
 }

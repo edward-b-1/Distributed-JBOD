@@ -266,7 +266,8 @@ the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
 `max_user_metadata_bytes` (9.4.2), the transport mode `transport` (19.1.6:
 `plain`, `tls-optional`, or `tls`; absent means `plain`), the node list
-(UUID, addresses), and the device list (UUID, owning node, state). The
+(UUID, addresses, optional label), and the device list (UUID, owning node,
+state, optional label). The
 three limits and the transport were added after the first documents were
 written; a document without them means the defaults. `djbod cluster
 set-limits` and `djbod cluster set-transport` change them. The document
@@ -292,15 +293,22 @@ no message grows with the number of objects.
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
 
-6.2.5.1 [D] **Device labels.** A device entry may carry a `label`, an
-administrator-chosen name of 1 to 128 bytes with no whitespace, unique
-within the document and not shaped like a UUID, set or cleared with
-`djbod cluster set-label` as a document change like any other. `status`
-shows it beside the UUID, and every `djbod` command that takes a device
-accepts either the UUID or the label. Paths are still not recorded (5.2);
-the label is the administrator's name for the disk, for example
-`nas1-bay3`, and survives the disk moving to another machine as the UUID
-does. Errors from nodes carry the UUID; `status` maps it.
+6.2.5.1 [D] **Device and node labels.** A device entry may carry a
+`label`, an administrator-chosen name of 1 to 128 bytes with no
+whitespace, unique among devices and not shaped like a UUID, set or
+cleared with `djbod cluster set-label` as a document change like any
+other. `status` shows it beside the UUID, and every `djbod` command that
+takes a device accepts either the UUID or the label. Paths are still not
+recorded (5.2); the label is the administrator's name for the disk, for
+example `nas1-bay3`, and survives the disk moving to another machine as
+the UUID does. A node entry may carry a label under the same rules,
+unique among nodes, set with `djbod cluster set-node-label`; `status` and
+`cluster show` show it, and `remove-node` and `drain --node-id` accept
+it. Device labels and node labels are separate namespaces, so `nas1` may
+name a node and `nas1-bay0` one of its disks, and a device and a node may
+even share a label without ambiguity, since no command takes both.
+Errors from nodes carry UUIDs; `status` maps them. The typed confirmation
+of a forced removal (6.2.6.3) remains the UUID.
 
 6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's

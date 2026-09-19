@@ -72,6 +72,20 @@ async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// The node a UUID or label names (SPEC 6.2.5.1), looked up in the
+/// cluster document.
+async fn resolve_node(cli: &Cli, name: &str) -> anyhow::Result<NodeId> {
+    let node = cli
+        .node
+        .context("no node address: pass --node or set DJBOD_NODE")?;
+    let cluster = cli
+        .cluster
+        .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+    djbod_node::membership::resolve_node(&connector(cli)?, node, cluster, name)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// How this client connects (SPEC 19.1.6.2), decided by the transport
 /// module so that every client program decides it the same way.
 fn connector(cli: &Cli) -> anyhow::Result<Connector> {
@@ -164,14 +178,26 @@ enum ClusterCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Give a node a short name shown beside its UUID, or clear it with
+    /// --clear. Node labels are unique within the cluster.
+    SetNodeLabel {
+        /// The node, by UUID or current label.
+        node_id: String,
+        /// The new label: 1 to 128 characters, no whitespace.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        label: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Move every shard off a draining device in one pass.
     Drain {
         /// The draining device to empty, by UUID or label.
         #[arg(required_unless_present = "node_id", conflicts_with = "node_id")]
         device: Option<String>,
-        /// Drain every draining device of this node in turn.
+        /// Drain every draining device of this node in turn, by UUID or
+        /// label.
         #[arg(long = "node-id", value_name = "NODE")]
-        node_id: Option<Uuid>,
+        node_id: Option<String>,
         /// Start even if the estimate says not everything will fit.
         #[arg(long)]
         partial: bool,
@@ -219,7 +245,8 @@ enum ClusterCommand {
     /// object still has a shard on them: drain them first. The node stops
     /// serving once it has acknowledged.
     RemoveNode {
-        node_id: Uuid,
+        /// The node, by UUID or label.
+        node_id: String,
         /// The node is permanently gone and cannot acknowledge: remove it
         /// without its agreement and rebuild its shards from parity.
         /// Shows the cost and asks for confirmation first.
@@ -336,15 +363,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         println!(
-                            "{:<36}  {:<16}  {:<36}  {:<9}  {:>12}  {:>12}",
-                            "DEVICE", "LABEL", "NODE", "STATE", "TOTAL", "FREE"
+                            "{:<36}  {:<16}  {:<36}  {:<16}  {:<9}  {:>12}  {:>12}",
+                            "DEVICE", "LABEL", "NODE", "NODE LABEL", "STATE", "TOTAL", "FREE"
                         );
                         for d in devices {
                             println!(
-                                "{:<36}  {:<16}  {:<36}  {:<9}  {:>12}  {:>12}",
+                                "{:<36}  {:<16}  {:<36}  {:<16}  {:<9}  {:>12}  {:>12}",
                                 d.device.0,
                                 d.label.as_deref().unwrap_or("-"),
                                 d.node.0,
+                                d.node_label.as_deref().unwrap_or("-"),
                                 format!("{:?}", d.state).to_lowercase(),
                                 human_bytes(d.total_bytes),
                                 human_bytes(d.free_bytes)
@@ -709,6 +737,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .map(|r| {
                                 serde_json::json!({
                                     "node": r.node,
+                                    "label": r.label,
                                     "address": r.address,
                                     "version": r.result.as_ref().ok().map(|d| d.version),
                                     "error": r.result.as_ref().err(),
@@ -720,13 +749,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("cluster   {}", document.cluster_id);
                         println!("document  version {} as held by {node}", document.version);
                         println!();
-                        println!("{:<36}  {:<21}  VERSION", "NODE", "ADDRESS");
+                        println!(
+                            "{:<36}  {:<16}  {:<21}  VERSION",
+                            "NODE", "LABEL", "ADDRESS"
+                        );
                         for r in &reports {
                             let version = match &r.result {
                                 Ok(d) => d.version.to_string(),
                                 Err(e) => format!("unreachable: {e}"),
                             };
-                            println!("{:<36}  {:<21}  {version}", r.node.0, r.address);
+                            println!(
+                                "{:<36}  {:<16}  {:<21}  {version}",
+                                r.node.0,
+                                r.label.as_deref().unwrap_or("-"),
+                                r.address
+                            );
                         }
                     }
                 }
@@ -783,12 +820,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let wanted =
+                                document
+                                    .node_by_name(node_id)
+                                    .map(|n| n.id)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "no node is named {node_id:?}, as a UUID or a label"
+                                        )
+                                    })?;
                             let found: Vec<Uuid> = document
                                 .devices
                                 .iter()
-                                .filter(|d| {
-                                    d.node.0 == *node_id && d.state == DeviceState::Draining
-                                })
+                                .filter(|d| d.node == wanted && d.state == DeviceState::Draining)
                                 .map(|d| d.id.0)
                                 .collect();
                             if found.is_empty() {
@@ -972,6 +1016,45 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     }
                 }
+                ClusterCommand::SetNodeLabel {
+                    node_id,
+                    label,
+                    clear: _,
+                } => {
+                    let id = resolve_node(&cli, node_id).await?;
+                    let (document, changed) = djbod_node::membership::set_node_label(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        id,
+                        label.clone(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "node": id,
+                                "label": label,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if !changed {
+                        println!("nothing changed");
+                    } else if let Some(label) = label {
+                        println!(
+                            "node {} is now labelled {label} (document version {})",
+                            id.0, document.version
+                        );
+                    } else {
+                        println!(
+                            "label cleared from node {} (document version {})",
+                            id.0, document.version
+                        );
+                    }
+                }
                 ClusterCommand::RemoveDevice { device } => {
                     let device_id = resolve_device(&cli, device).await?;
                     let (document, changed) = djbod_node::membership::remove_device(
@@ -1005,26 +1088,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     force: false,
                     ..
                 } => {
-                    let document = djbod_node::membership::remove_node(
-                        &connector(&cli)?,
-                        node,
-                        cluster,
-                        NodeId(*node_id),
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let id = resolve_node(&cli, node_id).await?;
+                    let document =
+                        djbod_node::membership::remove_node(&connector(&cli)?, node, cluster, id)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
-                                "node": node_id,
+                                "node": id,
                                 "document_version": document.version,
                             }))?
                         );
                     } else {
                         println!(
-                            "node {node_id} removed (document version {}); its process stops on its own, and its devices can be reused with `djbod-node join --wipe-removed-device`",
-                            document.version
+                            "node {} removed (document version {}); its process stops on its own, and its devices can be reused with `djbod-node join --wipe-removed-device`",
+                            id.0, document.version
                         );
                     }
                 }
@@ -1032,7 +1112,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     node_id,
                     force: true,
                     yes,
-                } => force_remove_node(&cli, node, cluster, NodeId(*node_id), *yes).await?,
+                } => {
+                    let id = resolve_node(&cli, node_id).await?;
+                    force_remove_node(&cli, node, cluster, id, *yes).await?
+                }
                 ClusterCommand::Sync => {
                     let report = djbod_node::membership::sync(&connector(&cli)?, node, cluster)
                         .await

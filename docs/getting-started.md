@@ -298,7 +298,13 @@ target/release/djbod cluster set-state nas1-bay0 draining
 
 Labels are unique, up to 128 characters with no spaces, and live in the
 cluster document, so they follow the disk if it moves to another machine.
-`set-label <label> --clear` removes one.
+`set-label <label> --clear` removes one. Nodes take labels the same way:
+
+```sh
+target/release/djbod cluster set-node-label <node-uuid> nas1
+target/release/djbod cluster show                 # LABEL column
+target/release/djbod cluster drain --node-id nas1
+```
 
 **Moving a shard.** Any shard can be moved to another device while the
 cluster is running, which is the building block of draining a disk:

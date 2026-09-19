@@ -86,6 +86,7 @@ fn sample_document() -> ClusterDocument {
         nodes: vec![NodeEntry {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
+            label: Some("nas1".to_string()),
         }],
         devices: vec![DeviceEntry {
             id: device(1),
@@ -426,6 +427,7 @@ fn every_response_round_trips() {
         device: device(1),
         node: node(1),
         label: Some("nas1-bay0".to_string()),
+        node_label: Some("nas1".to_string()),
         state: DeviceState::Active,
         total_bytes: 4 << 40,
         free_bytes: 3 << 40,
