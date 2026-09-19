@@ -16,13 +16,17 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 anyhow = { workspace = true }
 rand = { workspace = true }
 xxhash-rust = { workspace = true }
 time = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
 
 [dev-dependencies]
+rcgen = "0.13"
 tempfile = { workspace = true }
 
 [lints]

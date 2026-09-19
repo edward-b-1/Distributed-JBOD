@@ -53,6 +53,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: true,
+        tls: None,
     };
     let config_path = state.path().join("node.toml");
     std::fs::write(&config_path, config.to_toml()).expect("write config");

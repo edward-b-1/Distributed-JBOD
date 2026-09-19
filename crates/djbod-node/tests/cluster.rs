@@ -12,6 +12,7 @@ use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
+use djbod_node::transport::Connector;
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{DrainEvent, ErrorCode, Request, Response, ShardCondition};
 use tokio::net::TcpListener;
@@ -60,6 +61,7 @@ fn make_config(
         bootstrap_peers: bootstrap,
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: true,
+        tls: None,
     };
     (config, dirs, state)
 }
@@ -200,7 +202,7 @@ async fn three_nodes_join_and_objects_spread_across_them() {
     }
 
     // `cluster show` data: every node reports version 3.
-    let reports = membership::fetch_all(&document).await;
+    let reports = membership::fetch_all(&Connector::plain(), &document).await;
     assert_eq!(reports.len(), 3);
     assert!(reports
         .iter()
@@ -273,10 +275,10 @@ async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
     let mut second = current.clone();
     second.version = 3;
     second.headroom = 0.20;
-    membership::propose(&current, &first)
+    membership::propose(&Connector::plain(), &current, &first)
         .await
         .expect("first proposal");
-    match membership::propose(&current, &second).await {
+    match membership::propose(&Connector::plain(), &current, &second).await {
         Err(membership::MembershipError::StaleProposal {
             expected: 2,
             found: 3,
@@ -307,12 +309,12 @@ async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
     let mut fifth = fourth.clone();
     fifth.version = 5;
     assert!(matches!(
-        membership::propose(&fourth, &fifth).await,
+        membership::propose(&Connector::plain(), &fourth, &fifth).await,
         Err(membership::MembershipError::VersionsDiffer(_))
     ));
 
     // Sync brings b up; requests work again.
-    let report = membership::sync(b.addr, a.node.cluster_id())
+    let report = membership::sync(&Connector::plain(), b.addr, a.node.cluster_id())
         .await
         .expect("sync");
     assert_eq!(report.highest_version, 4);
@@ -442,11 +444,11 @@ async fn documents_that_differ_at_the_same_version_stop_proposals_and_sync() {
     let mut next = other.clone();
     next.version += 1;
     assert!(matches!(
-        membership::propose(&other, &next).await,
+        membership::propose(&Connector::plain(), &other, &next).await,
         Err(membership::MembershipError::Diverged { .. })
     ));
     assert!(matches!(
-        membership::sync(a.addr, a.node.cluster_id()).await,
+        membership::sync(&Connector::plain(), a.addr, a.node.cluster_id()).await,
         Err(membership::MembershipError::Diverged { .. })
     ));
 }
@@ -939,10 +941,15 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
         .iter()
         .filter(|r| r.shard_on(device).is_some())
         .count();
-    let (document, changed) =
-        membership::set_device_state(c.addr, c.node.cluster_id(), device, DeviceState::Draining)
-            .await
-            .expect("set state");
+    let (document, changed) = membership::set_device_state(
+        &Connector::plain(),
+        c.addr,
+        c.node.cluster_id(),
+        device,
+        DeviceState::Draining,
+    )
+    .await
+    .expect("set state");
     assert!(changed);
     for n in nodes {
         assert_eq!(n.node.document().version, document.version);
@@ -1060,7 +1067,7 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
     let cluster = a.node.cluster_id();
 
     // An active device cannot be removed, referenced or not (issue #28).
-    match membership::remove_device(c.addr, cluster, device).await {
+    match membership::remove_device(&Connector::plain(), c.addr, cluster, device).await {
         Err(membership::MembershipError::DeviceActive(found)) => assert_eq!(found, device),
         other => panic!("expected DeviceActive, got {other:?}"),
     }
@@ -1068,11 +1075,17 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
         a.node.document().device(device).expect("device").state,
         DeviceState::Active
     );
-    membership::set_device_state(c.addr, cluster, device, DeviceState::Draining)
-        .await
-        .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        c.addr,
+        cluster,
+        device,
+        DeviceState::Draining,
+    )
+    .await
+    .expect("set state");
     // Draining but still holding shards: refused with the keys.
-    match membership::remove_device(c.addr, cluster, device).await {
+    match membership::remove_device(&Connector::plain(), c.addr, cluster, device).await {
         Err(membership::MembershipError::StillReferenced {
             versions, examples, ..
         }) => {
@@ -1082,9 +1095,10 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
         other => panic!("expected StillReferenced, got {other:?}"),
     }
     drain_clean(&mut client, device).await;
-    let (document, changed) = membership::remove_device(c.addr, cluster, device)
-        .await
-        .expect("remove device");
+    let (document, changed) =
+        membership::remove_device(&Connector::plain(), c.addr, cluster, device)
+            .await
+            .expect("remove device");
     assert!(changed);
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
@@ -1097,7 +1111,7 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
             DeviceState::Removed
         );
     }
-    let (_, changed) = membership::remove_device(c.addr, cluster, device)
+    let (_, changed) = membership::remove_device(&Connector::plain(), c.addr, cluster, device)
         .await
         .expect("remove again");
     assert!(!changed);
@@ -1133,24 +1147,30 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let old_device_path = d.config.devices[0].clone();
 
     // A node with an active device cannot be removed (issue #28).
-    match membership::remove_node(a.addr, cluster, d_id).await {
+    match membership::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
         Err(membership::MembershipError::NodeHasActiveDevices { node, devices }) => {
             assert_eq!(node, d_id);
             assert_eq!(devices, vec![device]);
         }
         other => panic!("expected NodeHasActiveDevices, got {other:?}"),
     }
-    membership::set_device_state(a.addr, cluster, device, DeviceState::Draining)
-        .await
-        .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        device,
+        DeviceState::Draining,
+    )
+    .await
+    .expect("set state");
     if records.iter().any(|r| r.shard_on(device).is_some()) {
-        match membership::remove_node(a.addr, cluster, d_id).await {
+        match membership::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
             Err(membership::MembershipError::StillReferenced { .. }) => {}
             other => panic!("expected StillReferenced, got {other:?}"),
         }
         drain_clean(&mut client, device).await;
     }
-    let document = membership::remove_node(a.addr, cluster, d_id)
+    let document = membership::remove_node(&Connector::plain(), a.addr, cluster, d_id)
         .await
         .expect("remove node");
     assert!(document.node(d_id).is_none());
@@ -1232,14 +1252,14 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
         .collect();
 
     // A live node cannot be forced.
-    match membership::plan_forced_removal(a.addr, cluster, d_id).await {
+    match membership::plan_forced_removal(&Connector::plain(), a.addr, cluster, d_id).await {
         Err(membership::MembershipError::NodeIsAlive { node, .. }) => assert_eq!(node, d_id),
         other => panic!("expected NodeIsAlive, got {other:?}"),
     }
 
     d.stop();
     drop(d);
-    let plan = membership::plan_forced_removal(a.addr, cluster, d_id)
+    let plan = membership::plan_forced_removal(&Connector::plain(), a.addr, cluster, d_id)
         .await
         .expect("plan");
     assert_eq!(plan.devices, vec![device]);
@@ -1247,7 +1267,7 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
     planned.sort();
     assert_eq!(planned, affected);
     assert!(plan.unrecoverable().is_empty(), "m = 1 and one device");
-    let document = membership::execute_forced_removal(&plan)
+    let document = membership::execute_forced_removal(&Connector::plain(), &plan)
         .await
         .expect("execute");
     assert!(document.node(d_id).is_none());
@@ -1366,7 +1386,7 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
     let mut next = a.node.document();
     next.version += 1;
     next.max_key_bytes = djbod_core::cluster::LIMIT_MAX_KEY_BYTES;
-    membership::propose(&a.node.document(), &next)
+    membership::propose(&Connector::plain(), &a.node.document(), &next)
         .await
         .expect("raise the key limit");
 
@@ -1374,9 +1394,15 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
     // its page holds eight of them and leaves a8 out for want of room.
     // Node b holds one short key "b", which sorts after all of them.
     let long = MAX_LIST_PAGE_BYTES / 8 - 100;
-    membership::set_device_state(a.addr, cluster, device_b, DeviceState::Draining)
-        .await
-        .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        device_b,
+        DeviceState::Draining,
+    )
+    .await
+    .expect("set state");
     let mut expected: Vec<String> = Vec::new();
     for i in 0..9 {
         let key = format!("a{i}-") + &"k".repeat(long - 3);
@@ -1386,20 +1412,38 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
             .expect("put");
         expected.push(key);
     }
-    membership::set_device_state(a.addr, cluster, device_b, DeviceState::Active)
-        .await
-        .expect("set state");
-    membership::set_device_state(a.addr, cluster, device_a, DeviceState::Draining)
-        .await
-        .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        device_b,
+        DeviceState::Active,
+    )
+    .await
+    .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        device_a,
+        DeviceState::Draining,
+    )
+    .await
+    .expect("set state");
     client
         .put_object("b", b"x", 100_000, None)
         .await
         .expect("put");
     expected.push("b".to_string());
-    membership::set_device_state(a.addr, cluster, device_a, DeviceState::Active)
-        .await
-        .expect("set state");
+    membership::set_device_state(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        device_a,
+        DeviceState::Active,
+    )
+    .await
+    .expect("set state");
 
     // The first page must stop at a7, not run on to "b" past the unseen
     // a8; the walk must then yield all ten keys.

@@ -308,6 +308,7 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
     Ok(Response::LocalStatus {
         node: node.id(),
         document_version: document.version,
+        tls_ready: node.tls().is_some(),
         devices,
     })
 }

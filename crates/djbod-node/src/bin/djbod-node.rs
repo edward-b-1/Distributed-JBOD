@@ -31,6 +31,33 @@ enum LogFormat {
     Json,
 }
 
+/// Where this node's TLS material lives (SPEC 19.1.6.2): flags win over
+/// environment variables, which win over the `[tls]` table.
+#[derive(clap::Args)]
+struct TlsArgs {
+    /// This node's PEM certificate (with an IP SAN for its address).
+    #[arg(long, env = "DJBOD_TLS_CERT", requires_all = ["tls_key", "tls_ca"])]
+    tls_cert: Option<PathBuf>,
+    /// This node's PEM private key, readable only by its owner.
+    #[arg(long, env = "DJBOD_TLS_KEY", requires_all = ["tls_cert", "tls_ca"])]
+    tls_key: Option<PathBuf>,
+    /// The cluster's PEM certificate authority, or a bundle.
+    #[arg(long, env = "DJBOD_TLS_CA", requires_all = ["tls_cert", "tls_key"])]
+    tls_ca: Option<PathBuf>,
+}
+
+impl TlsArgs {
+    fn apply(&self, config: &mut NodeConfig) {
+        if let (Some(cert), Some(key), Some(ca)) = (&self.tls_cert, &self.tls_key, &self.tls_ca) {
+            config.tls = Some(djbod_node::transport::TlsPaths {
+                cert: cert.clone(),
+                key: key.clone(),
+                ca: ca.clone(),
+            });
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Create a new cluster consisting of this node and its devices.
@@ -79,6 +106,8 @@ enum Command {
         /// add them as new. Destroys their data.
         #[arg(long)]
         wipe_removed_device: bool,
+        #[command(flatten)]
+        tls: TlsArgs,
     },
     /// Initialise a device path listed in the configuration but not yet
     /// in the cluster document, and add it. Restart the node afterwards.
@@ -95,11 +124,15 @@ enum Command {
         /// add it as new. Destroys its data.
         #[arg(long)]
         wipe_removed_device: bool,
+        #[command(flatten)]
+        tls: TlsArgs,
     },
     /// Run the node.
     Run {
         #[arg(long)]
         config: PathBuf,
+        #[command(flatten)]
+        tls: TlsArgs,
     },
     /// Offline check of this machine's devices: verify every record and
     /// shard block against its checksum and report what is wrong. Reads
@@ -214,8 +247,10 @@ async fn main() -> anyhow::Result<()> {
             peer,
             cluster,
             wipe_removed_device,
+            tls,
         } => {
-            let config = NodeConfig::load(&config).context("loading node configuration")?;
+            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
+            tls.apply(&mut config);
             let document =
                 djbod_node::membership::join(&config, peer, cluster, wipe_removed_device)
                     .await
@@ -240,8 +275,10 @@ async fn main() -> anyhow::Result<()> {
             path,
             peer,
             wipe_removed_device,
+            tls,
         } => {
-            let config = NodeConfig::load(&config).context("loading node configuration")?;
+            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
+            tls.apply(&mut config);
             for p in &path {
                 if !config.devices.contains(p) {
                     anyhow::bail!(
@@ -273,8 +310,9 @@ async fn main() -> anyhow::Result<()> {
             rate_mib,
             json,
         } => scrub(&config, &device, rate_mib, json).await,
-        Command::Run { config } => {
-            let config = NodeConfig::load(&config).context("loading node configuration")?;
+        Command::Run { config, tls } => {
+            let mut config = NodeConfig::load(&config).context("loading node configuration")?;
+            tls.apply(&mut config);
             let listen = config.listen;
             djbod_node::membership::adopt_from_peers(&config)
                 .await
@@ -289,6 +327,8 @@ async fn main() -> anyhow::Result<()> {
                 document_version = node.document_version(),
                 %listen,
                 devices = node.devices().len(),
+                transport = %node.document().transport,
+                tls_material = node.tls().is_some(),
                 "node running"
             );
             server::serve(node.clone(), listener).await;

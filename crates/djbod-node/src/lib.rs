@@ -30,5 +30,6 @@ pub mod local_ops;
 pub mod membership;
 pub mod node;
 pub mod server;
+pub mod transport;
 pub mod ulid;
 pub mod wire;
