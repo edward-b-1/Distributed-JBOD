@@ -395,6 +395,109 @@ On real machines, `listen` is that machine's own address, or `0.0.0.0`
 with `advertise` set to the address the others should use, and
 `allow_shared_filesystem` is omitted.
 
+## TLS
+
+Everything so far runs in the clear, which is the `plain` transport and
+is fine on a LAN you trust (SPEC.md 3.12). To authenticate nodes and
+clients and encrypt every connection, give each node and each
+administrator a certificate from one certificate authority you create
+with `openssl`, point the processes at the files, and switch the
+cluster's transport (SPEC.md 19.1.6). djbod generates no keys and signs
+nothing; the files are yours.
+
+**Create the authority.** Once per cluster, on any machine, kept offline
+afterwards:
+
+```sh
+mkdir -p ~/djbod-pki && cd ~/djbod-pki
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+  -subj "/CN=djbod cluster CA" \
+  -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+  -keyout ca.key -out ca.crt
+```
+
+**Issue a node certificate.** The certificate must name the address at
+which the cluster document lists the node, as an IP subject alternative
+name, because that is what peers and clients check it against:
+
+```sh
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=nas1" \
+  -addext "subjectAltName=IP:10.0.0.1" -addext "extendedKeyUsage=serverAuth,clientAuth" \
+  -keyout nas1.key -out nas1.csr
+openssl x509 -req -in nas1.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 \
+  -copy_extensions copy -out nas1.crt
+```
+
+Repeat per node with its own address. A node that listens on several
+addresses can list them all: `subjectAltName=IP:10.0.0.1,IP:192.168.1.5`.
+
+**Issue a client certificate.** One per administrator or machine that
+runs `djbod`; the name is for your own bookkeeping:
+
+```sh
+openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -subj "/CN=admin laptop" \
+  -addext "extendedKeyUsage=clientAuth" -keyout admin.key -out admin.csr
+openssl x509 -req -in admin.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 3650 \
+  -copy_extensions copy -out admin.crt
+```
+
+**Install the files.** Copy each node's certificate and key and the
+authority's certificate (never its key) to the node, readable only by the
+user the node runs as, and name them in the configuration:
+
+```sh
+chmod 600 nas1.key admin.key
+```
+
+```toml
+[tls]
+cert = "/etc/djbod/nas1.crt"
+key = "/etc/djbod/nas1.key"
+ca = "/etc/djbod/ca.crt"
+```
+
+The same three can be given as `--tls-cert`, `--tls-key`, `--tls-ca` on
+`djbod-node run` or as `DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`, `DJBOD_TLS_CA`;
+an argument wins over a variable, which wins over the file. The node
+refuses to start if the key is readable by others. Restart each node;
+`djbod status` still says `transport plain`, but every node now accepts
+TLS as well, so the client can start using it:
+
+```sh
+export DJBOD_TLS_CA=~/djbod-pki/ca.crt DJBOD_TLS_CERT=~/djbod-pki/admin.crt DJBOD_TLS_KEY=~/djbod-pki/admin.key
+target/release/djbod status
+```
+
+**Switch the transport.** Two steps, so that nothing is locked out by
+accident:
+
+```sh
+target/release/djbod cluster set-transport tls-optional
+target/release/djbod cluster set-transport tls
+```
+
+`tls-optional` makes the nodes speak TLS to each other while still
+accepting plain clients; `tls` refuses plain connections and clients
+without a certificate. Either step is refused while any node lacks TLS
+material, naming the node. Try `djbod status` without the three variables
+under `tls`: the refusal says `TlsRequired` and which node said so. With
+only `DJBOD_TLS_CA` set the client is encrypted but presents no
+certificate, which `tls-optional` accepts and `tls` refuses. `set-transport
+plain` goes back.
+
+**A new node** joins a TLS cluster with its own certificate and nothing
+else: issue it as above, put the `[tls]` table in its configuration, and
+run `djbod-node join` as before.
+
+**Withdrawing a certificate** (a lost laptop, a decommissioned node) is
+done by rotating the authority, since a CA cannot take back a signature:
+create a new CA, put both certificates in every `ca.crt` file for the
+transition (a PEM file may hold several), restart the nodes, reissue
+certificates to everyone who should remain, then remove the old CA
+certificate from the bundles. Expiry is handled the same way, by files
+and restarts. Removing a node from the cluster does not by itself
+withdraw its certificate.
+
 ## Starting over
 
 Stop the node and remove `/tmp/djbod`. `init-cluster` refuses a
