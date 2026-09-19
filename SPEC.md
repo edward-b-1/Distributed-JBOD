@@ -1784,10 +1784,16 @@ each stripe it had to reconstruct.
 
 ### 20.3 Administration
 
-20.3.1 [X] A web UI for administration (cluster status, device states,
-drain and repair, errors) is required eventually and deferred. Every
+20.3.1 [D] A web UI for administration (cluster status, device states,
+drain and repair, errors) is the `djbod-ui` binary (C.4.5). Every
 administrative action it performs must also be available as a command-line
-operation over the native protocol.
+operation over the native protocol, and it is: the UI is a translation of
+HTTP calls onto the same native operations and membership procedures the
+`djbod` client uses, holds no state of its own, and can run beside it.
+It has no authentication until the protocol has (19.1.6), so it binds to
+localhost by default. Forced node removal (6.2.6.3), which needs a typed
+confirmation, and re-encode (18.9), a long client-driven migration, stay
+on the command line.
 
 ### 20.4 Logging
 
@@ -1902,7 +1908,6 @@ future credential.
   optimisation: one fewer hop per block.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
-- Administration web UI (20.3).
 - Users and permissions: who may read or write which keys, once clients
   are authenticated. Distinct from authentication and may be dropped.
 - S3 translation layer (19.2). Separate stream of work.
@@ -2064,6 +2069,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. |
 | `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
+| `djbod-ui` | The administration web UI of 20.3: an HTTP server serving one embedded page and a JSON API under `/api`, each call of which is one native-protocol operation or one membership procedure sent to a node as the `djbod` client would send it. |
 
 C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.
 Findings so far on `reed-solomon-erasure` 6.0.0 from the library tests:
@@ -2184,6 +2190,18 @@ streamed GET into a PUT per version. Step (e): `max_key_bytes` and
 `max_object_bytes` in the cluster document (6.2.2), `djbod-node
 init-cluster --max-key-bytes --max-object-bytes`, and `djbod cluster
 set-limits`; settles 21.3. Every step of C.4 is built.
+
+C.4.5 **Milestone 5 status, 19 September 2026: the administration web
+UI (20.3.1) is built.** The `djbod-ui` crate serves one page and a JSON
+API with `axum` on a local HTTP port; `Status`, `ListKeys`, `HeadObject`,
+`DeleteObject`, `RepairObject`, `MoveShard`, and the membership
+procedures (`set_device_state`, `remove_device`, `remove_node`, `sync`,
+`set_scheme`, `set_limits`) are one call each; `PutObject` and
+`GetObject` stream the body through in both directions without holding
+it; `Scrub` and `Drain` are relayed as newline-delimited JSON events so
+the page shows progress as it happens. Node errors are returned with
+every field of 16.2. Tested against a node started in-process, including
+a damaged shard read through the UI and repaired from it.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
