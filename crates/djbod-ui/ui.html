@@ -43,12 +43,25 @@
   header h1 { font-size: 17px; margin: 0; font-weight: 600; }
   header .meta { color: var(--text-2); font-size: 13px; }
   header .meta code { font-family: var(--mono); }
-  nav { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--line); background: var(--surface); }
-  nav button {
-    background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px;
-    font: inherit; color: var(--text-2); cursor: pointer;
+  nav { display: flex; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--surface); overflow-x: auto; }
+  /* A segmented control: the tabs sit in one rounded track, the selected
+     one raised on the surface colour with a thin outline; the others are
+     quiet text that darkens on hover. */
+  nav .tabs {
+    display: inline-flex; gap: 2px; padding: 3px; border-radius: 9px;
+    background: var(--bg); border: 1px solid var(--line);
   }
-  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  nav button {
+    background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 14px;
+    font: inherit; font-weight: 500; color: var(--text-2); cursor: pointer; white-space: nowrap;
+    transition: color .12s, background-color .12s;
+  }
+  nav button:hover { color: var(--text); }
+  nav button[aria-selected="true"] {
+    color: var(--text); background: var(--surface); border-color: var(--line);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .10);
+  }
+  nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   main { padding: 16px; max-width: 1200px; margin: 0 auto; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
@@ -131,11 +144,13 @@
   <span class="meta" id="h-refreshed"></span>
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
-<nav role="tablist">
-  <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
-  <button role="tab" data-tab="objects">Objects</button>
-  <button role="tab" data-tab="maintenance">Maintenance</button>
-  <button role="tab" data-tab="settings">Settings</button>
+<nav>
+  <div class="tabs" role="tablist">
+    <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button role="tab" data-tab="objects">Objects</button>
+    <button role="tab" data-tab="maintenance">Maintenance</button>
+    <button role="tab" data-tab="settings">Settings</button>
+  </div>
 </nav>
 <main>
 
