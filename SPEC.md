@@ -260,8 +260,12 @@ bootstrap peer.
 
 6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
-the node list (UUID, addresses), and the device list (UUID, owning node,
-state).
+the key length limit `max_key_bytes` (9.1.5), the object size limit
+`max_object_bytes` (9.3.1), the user metadata limit
+`max_user_metadata_bytes` (9.4.2), the node list (UUID, addresses), and
+the device list (UUID, owning node, state). The three limits were added
+after the first documents were written; a document without them means
+the defaults. `djbod cluster set-limits` changes them.
 
 The checksum algorithm and key hash algorithm are **not** configuration.
 They are fixed by the on-disk format version. Changing either is a format
@@ -272,10 +276,13 @@ encoded with the same parameters at the time it is written. There is no
 per-object redundancy policy. Changing them later is an administrative
 operation that re-encodes existing objects (18.9).
 
-6.2.4 [P] Sanity limits, enforced when the document is applied:
+6.2.4 [D] Sanity limits, enforced when the document is applied:
 `1 <= k <= 32`, `0 <= m <= 8`, `k + m <= 64`, `B` a multiple of 4096 with
-`64 KiB <= B <= 64 MiB`. The bounds are generous and exist only to reject
-typos.
+`64 KiB <= B <= 64 MiB`, `1 <= max_key_bytes <= 1 MiB`,
+`max_object_bytes >= 1`, `1 <= max_user_metadata_bytes <= 48 MiB`. The bounds are generous and exist only to reject
+typos. The key bound keeps one key a small fraction of a protocol frame
+(19.1.2); messages that carry many keys or records are paged (15.2.1), so
+no message grows with the number of objects.
 
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
@@ -534,9 +541,14 @@ is uniformly distributed, so fan-out is even.
 record. A disk can be searched for an object by name with ordinary tools.
 
 9.1.5 [D] There is no fixed maximum key length. A configurable sanity limit
-rejects absurd keys by accident; proposed default 16 KiB. The key is stored
-only inside the metadata record and in the wire protocol, so no filesystem
-limit applies to it.
+rejects absurd keys by accident: `max_key_bytes` in the cluster document
+(6.2.2), default 16 KiB, changed with `djbod cluster set-limits`. Likewise
+the maximum object size is `max_object_bytes`, default 1 TiB, and the
+limit on a record's user metadata is `max_user_metadata_bytes`, default
+10 MiB (9.4.2). All three apply to new requests only; objects already
+stored are untouched. The key is
+stored only inside the metadata record and in the wire protocol, so no
+filesystem limit applies to it.
 
 9.1.6 [D] **Collisions.** With a 256-bit hash, two distinct keys share a
 directory only if SHA-256 collides, which has never been observed and
@@ -712,9 +724,10 @@ shards              array of { index, device }, exactly k+m entries, one per
 revision            integer, the placement revision (18.8.1); 0 when the
                     version is first written and then omitted from the
                     file, incremented by every re-placement
-content_type        string, optional
+content_type        string, optional, at most 1 KiB
 user_metadata       opaque map, optional, reserved for clients and the
-                    future translation layer
+                    future translation layer; keys and values together at
+                    most `max_user_metadata_bytes` (6.2.2; default 10 MiB)
 checksum            16 hex characters, over the other fields (9.4.5);
                     a property of the file, not of the version
 ```
@@ -723,6 +736,18 @@ checksum            16 hex characters, over the other fields (9.4.5);
 owning node is resolved through the cluster document at request time. A
 disk moved to another machine keeps its UUID (5.2) and every record that
 names it stays correct; a node UUID in the record would go stale.
+
+9.4.2.1.1 [D] The bounds on `content_type` and `user_metadata` keep
+every record small enough that any message carrying one fits a protocol
+frame with room to spare (15.2.2): the content type bound is a fixed 1
+KiB, a property of the format, since a media type is a short token; the
+user metadata bound is the document's `max_user_metadata_bytes`, which
+the document validator caps at 48 MiB so that one record always fits a
+64 MiB frame. A write that exceeds either is refused
+(`MetadataTooLarge`) before any shard is stored. A record over the
+content type bound is invalid (9.4.2.2); a record over the metadata bound
+is not, since the bound may have been lowered after it was written, and
+messages that carry several records are paged so it still travels.
 
 9.4.2.2 [D] A record is validated whenever it is read: system name and
 format version; the key hash must equal the hash of the key (9.1.6); the
@@ -917,19 +942,106 @@ exists on k+m devices), sorts, and returns.
 
 15.2 [D] This is a full scan of every device and is accepted as slow.
 
-15.2.1 [O] **Listing at scale.** As written, the coordinator collects
-every node's full result, deduplicates, sorts, and then answers, so its
-memory grows with the number of keys in the cluster and nothing reaches
-the client until the slowest node has finished. To revisit at
-implementation time. Options noted so far: each node returns its entries
-already sorted and the coordinator performs a streaming k-way merge,
-dropping duplicates as adjacent equal keys and emitting as it goes;
-pagination through `start_after` and `limit` so no single response is
-unbounded; and avoiding duplicates at the source by having only the device
-holding shard index 0 of a version report it, which makes deduplication
-free but makes a listing depend on every shard-0 holder being reachable,
-which under fail-stop (16.1) it already does. For a first version a
-simple collect, deduplicate, and sort is acceptable.
+15.2.1 [O] **Listing at scale.** As built, a node finds the keys it holds
+by walking its objects tree, which is in key-hash order (9.3), so
+answering "the keys after X" means reading every record and sorting.
+The coordinator asks every node for its whole list on every page, merges,
+sorts, and then cuts the page (issue #29 narrows the transfer but not the
+disk scan). Two consequences, both accepted for the first version:
+
+- **Cost.** A walk of N keys in P pages reads every record P times.
+- **Consistency.** The result of a walk is not a snapshot of any single
+  instant; see 15.2.2 for the exact guarantee.
+
+Options for doing better, recorded here so the choice is made once:
+
+1. **Streaming listing.** `ListKeys` becomes a stream like `Scrub`: every
+   node scans once, sorts its own keys, and streams them in order; the
+   coordinator performs a k-way merge, dropping duplicates as adjacent
+   equal keys, and streams the merged result to the client. One scan per
+   walk, so linear; each node's contribution is consistent to the single
+   instant of its scan, though the cluster as a whole still is not. Memory
+   at a node is its own key list, which paging already needs; at the
+   coordinator, one head per node. Not resumable: a client consumes or
+   aborts. The right shape for the whole-space walks (scrub, `reencode`,
+   the removal scan) and a sensible default for `djbod list`.
+2. **In-memory key index per device.** Each node keeps, for each device,
+   an ordered map from key to the versions and record summaries it holds,
+   built by one scan at startup (or lazily on first use) and kept current
+   by the node's own write and delete paths, which are the only writers
+   while the node runs; a restart rebuilds it, so it can never be stale
+   across restarts, unlike an on-disk index. A page is then a seek plus a
+   sequential read, so a walk is linear and a page costs nothing on disk.
+   Memory is roughly the total length of the keys held, bounded by
+   `max_key_bytes` times the number of records; with typical keys a
+   million records is on the order of 100 MiB. Startup cost is one scan of
+   every device. Every mutation path (record write, version delete, stale
+   copy removal) must update it under the same lock, which is the risk.
+   With a persistent (structurally shared) ordered map, taking a snapshot
+   is O(1) and readers hold an old version while writers produce a new
+   one, which gives point-in-time pages without freezing writers or
+   queueing events. Holding a snapshot across pages needs a session token
+   with an idle timeout, which is server state; snapshot-per-page needs
+   none and gives the guarantee of 15.2.2 at linear cost.
+   A variant freezes the map for the duration of a paging session and
+   queues add and delete events in an ordered log to apply afterwards; it
+   gives the same result with more moving parts (the queue grows with
+   writes during the walk, and a slow client holds the freeze), so the
+   persistent map is preferred if snapshots are wanted.
+3. **Server-side snapshot iterators.** A node takes its listing once,
+   holds it in memory or a temporary file, and pages through that frozen
+   copy under a token until an idle timeout. Per-node point-in-time
+   pages and linear cost, but expiry, restarts losing the snapshot, and
+   concurrent walks multiplying memory. Dominated by option 2 with a
+   persistent map.
+4. **A change counter.** Each node keeps a mutation counter returned with
+   every page; a client that sees it change knows the walk spanned a
+   change and can restart or accept. Cheap, detects rather than prevents,
+   and a busy cluster changes constantly.
+5. **A sorted on-disk index per device** (15.3). Key order kept on disk,
+   maintained on write and delete, giving cheap pages, linear walks, and
+   with a store that has snapshot reads, true point-in-time pages. The
+   largest change: derived state that can disagree with the records, so
+   it needs a rebuild command and a scrub check.
+6. **Deduplication at the source**: only the device holding shard index 0
+   of a version reports it, which makes the coordinator's merge free but
+   makes a listing depend on every shard-0 holder being reachable, which
+   under fail-stop (16.1) it already does. Combines with any of the above.
+
+Recommendation: keep keyset paging as the client-facing API, since the
+future S3 layer (19.2) needs exactly those semantics; build option 1 for
+the internal whole-space walks and as the default for `djbod list`; take
+option 2 when a real cluster shows page cost to matter, since it removes
+the disk scan without adding on-disk state; leave 15.3 deferred.
+
+15.2.2 [D] **Paging.** Whatever the coordinator's memory does, no single
+message may grow with the number of keys, because a protocol frame has a
+fixed maximum size (19.1.2) and a message beyond it is a hard failure.
+Every listing is therefore paged: a `ListKeys` or `LocalList` page holds
+at most 8 MiB of key text, and a `LocalRecords` or `LocalLookup` page at
+most 8 MiB of encoded records, each with a flag saying more follow and a
+cursor to continue from (the last key; the last key and version; or the
+last version and device). A single record larger than a page travels
+alone in its own page. A client `limit` only makes a page smaller. Every
+internal walk (the listing coordinator over each node, the lookup behind
+every read, the scrub's cross-node pass, the drain, the removal scan,
+`reencode`) follows the pages to the end.
+
+The cursor is the sort key of the last item returned, never a position
+or a server-side token, and every page is computed afresh from disk, so
+no state is held between pages and nothing expires. The guarantee this
+gives, the same as S3's `ListObjects` or `readdir`, is exactly: every
+item that exists for the whole of a walk appears exactly once; an item
+created or deleted during the walk may or may not appear, depending on
+whether the walk had passed its position; nothing appears twice; and the
+deletion of the item the cursor names is harmless, since the next page is
+"greater than the cursor", a comparison rather than a lookup. The result
+of a walk is therefore the union of things that were true at different
+moments and need not correspond to any state that ever existed at one
+instant. The internal walks need no more: a scrub that misses a key
+written during it finds it next time, a drain's list cannot grow because
+a `draining` device receives no new shards, and the removal scan is
+protected by requiring that state first (issue #28).
 
 15.3 [X] A sorted index to make listing fast is deferred.
 
@@ -1321,7 +1433,8 @@ coordinator, and those nodes send to each other. Every response is either
 `ListKeys`
 : Request: optional prefix, optional start-after key, optional limit.
   Response: sorted list of keys and, for each, size and version id; plus a
-  flag saying whether more remain. Section 15.
+  flag saying whether more remain. A page holds at most 8 MiB of key text
+  whatever the limit (15.2.2). Section 15.
 
 `RepairObject`
 : Request: key. Response: a report listing every shard of the newest
@@ -1378,18 +1491,26 @@ coordinator, and those nodes send to each other. Every response is either
   local device: UUID, state, total bytes, free bytes (5.5).
 
 `LocalLookup`
-: Request: key hash. Response: every metadata record found under that
-  hash on any local device, each tagged with the device UUID it was read
-  from. Empty list if none.
+: Request: key hash, optional cursor (the last version and device of the
+  previous page). Response: the metadata records found under that hash on
+  any local device after the cursor, each tagged with the device UUID it
+  was read from, sorted by version then device, in pages of at most 8 MiB
+  of encoded records with a flag saying more follow (15.2.2). Empty list
+  if none.
 
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.
   Response: for each matching record on any local device, the key, size,
-  and version id. Duplicates across devices are the coordinator's problem.
+  and version id, in pages of at most 8 MiB of key text with a flag
+  saying more follow (15.2.2). Duplicates across devices are the
+  coordinator's problem.
 
 `LocalRecords`
-: Request: device UUID. Response: every readable record on that device,
-  sorted by key then version; the drain's list of versions (18.2.1).
+: Request: device UUID, optional cursor (the last key and version of the
+  previous page). Response: the readable records on that device after the
+  cursor, sorted by key then version, in pages of at most 8 MiB of
+  encoded records with a flag saying more follow (15.2.2); the drain's
+  and the removal scan's list of versions (18.2.1, 18.5).
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of
@@ -1641,7 +1762,7 @@ layout in section 9 uses fixed-length names and stays well within both.
 |---|----------|-------|----------------|
 | 21.1 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
 | 21.2 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
-| 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. Constants in the coordinator today. | 9.1.5, 9.3.1 | Move both into the cluster document so they are cluster-wide and changeable without a rebuild; revisit when the document gains its administrative commands (18). |
+| 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. | 6.2.2, 9.1.5 | Settled in milestone 4 (e): both are fields of the cluster document, defaulted when absent, changed with `djbod cluster set-limits`. |
 
 ## 22. Deferred items
 
@@ -1931,7 +2052,7 @@ join|add-device`, `djbod cluster show|sync`. Seven multi-node tests run
 several nodes in one process. Remaining: step (d), the cluster-wide scrub
 (20.1.2), once the local engine (PR 16) has merged.
 
-C.4.4 **Milestone 4 status, 18 September 2026: step (a) complete.** The
+C.4.4 **Milestone 4 status, 18 September 2026: complete.** The
 record carries `revision` (9.4.2, 18.8.1); `versions_of` applies the
 amended read rule; `RepairObject` trusts the highest revision, completes
 an interrupted re-placement forwards, and removes stale copies; the
@@ -1950,8 +2071,10 @@ the other shards otherwise. Step (b): `membership::set_device_state` and
 `extract`, tested against device directories written by `djbod-core`.
 Step (d): `membership::set_scheme` and `djbod cluster set-scheme` change
 the document; `djbod cluster reencode` runs the migration of 18.9 as a
-streamed GET into a PUT per version. Next: step (e), the size limits into the cluster document
-(21.3).
+streamed GET into a PUT per version. Step (e): `max_key_bytes` and
+`max_object_bytes` in the cluster document (6.2.2), `djbod-node
+init-cluster --max-key-bytes --max-object-bytes`, and `djbod cluster
+set-limits`; settles 21.3. Every step of C.4 is built.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure

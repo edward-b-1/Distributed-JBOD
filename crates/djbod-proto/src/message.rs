@@ -67,6 +67,8 @@ pub enum ErrorCode {
     KeyTooLong,
     /// Object exceeds the maximum size.
     ObjectTooLarge,
+    /// Content type or user metadata exceeds the record's limits.
+    MetadataTooLarge,
     /// The request was malformed or out of sequence.
     ProtocolViolation,
     /// Handshake failed.
@@ -109,6 +111,29 @@ impl ErrorDetail {
 }
 
 // -------------------------------------------------------------- requests
+
+/// Keys per listing page are limited by their total length, so that a
+/// page always fits inside one protocol frame with room to spare,
+/// however many keys the cluster holds or how long the document allows
+/// them to be (SPEC 15.2.1). A record listing page is bounded the same
+/// way by encoded size.
+pub const MAX_LIST_PAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Where a paged record listing continues from: the last (key, version)
+/// of the previous page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordCursor {
+    pub key: String,
+    pub version: VersionId,
+}
+
+/// Where a paged lookup continues from: the last (version, device) of the
+/// previous page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupCursor {
+    pub version: VersionId,
+    pub device: DeviceId,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListQuery {
@@ -180,13 +205,22 @@ pub enum Request {
 
     // ---- node to node
     LocalStatus,
+    /// Every record copy under a key hash on this node's devices, in pages
+    /// of at most `MAX_LIST_PAGE_BYTES` of encoded records sorted by
+    /// version then device (15.2.2).
     LocalLookup {
         key_hash: KeyHash,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<LookupCursor>,
     },
     LocalList(ListQuery),
-    /// Every record on one local device, for the drain (18.2.1).
+    /// Every record on one local device, for the drain (18.2.1) and the
+    /// removal scan (18.5), in pages: records after `after`, sorted by
+    /// key then version, up to `MAX_LIST_PAGE_BYTES` of encoded records.
     LocalRecords {
         device: DeviceId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<RecordCursor>,
     },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
     /// the holder answers `PutShardDone`.
@@ -364,14 +398,23 @@ pub enum Response {
         document_version: u64,
         devices: Vec<DeviceStatus>,
     },
+    /// A page of record copies; `truncated` says whether more follow
+    /// after the last one.
     LocalLookup {
         records: Vec<LocatedRecord>,
+        truncated: bool,
     },
+    /// A page of at most `MAX_LIST_PAGE_BYTES` of keys; `truncated` says
+    /// whether more follow after the last entry.
     LocalList {
         entries: Vec<KeyEntry>,
+        truncated: bool,
     },
+    /// A page of records; `truncated` says whether more follow after the
+    /// last one.
     LocalRecords {
         records: Vec<MetadataRecord>,
+        truncated: bool,
     },
     /// The holder has created and reserved the file; send blocks.
     PutShardReady,

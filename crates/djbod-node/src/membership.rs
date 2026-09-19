@@ -19,7 +19,7 @@ use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_proto::message::{ErrorCode, ErrorDetail, Request, Response};
+use djbod_proto::message::{ErrorCode, ErrorDetail, RecordCursor, Request, Response};
 
 use crate::client::{ClientError, Connection};
 use crate::config::NodeConfig;
@@ -561,6 +561,37 @@ pub async fn set_scheme(
     Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
+/// Change the key length, object size, and user metadata limits in the
+/// document (9.1.5, 9.3.1, 9.4.2). Any may be left as it is. Returns the
+/// document and whether anything changed.
+pub async fn set_limits(
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    max_key_bytes: Option<u64>,
+    max_object_bytes: Option<u64>,
+    max_user_metadata_bytes: Option<u64>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(peer, cluster_id).await?;
+        let mut next = current.clone();
+        next.max_key_bytes = max_key_bytes.unwrap_or(current.max_key_bytes);
+        next.max_object_bytes = max_object_bytes.unwrap_or(current.max_object_bytes);
+        next.max_user_metadata_bytes =
+            max_user_metadata_bytes.unwrap_or(current.max_user_metadata_bytes);
+        if next == current {
+            return Ok((current, false));
+        }
+        next.version += 1;
+        match propose(&current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
 // ------------------------------------------------------------- REMOVAL
 
 /// A version whose current record places shards on the devices being
@@ -608,14 +639,33 @@ pub async fn scan_references(
             .iter()
             .filter(|d| d.node == entry.id && d.state != DeviceState::Removed)
         {
-            let records = match connection
-                .request(Request::LocalRecords { device: device.id })
-                .await
-            {
-                Ok(Response::LocalRecords { records }) => records,
-                Ok(other) => return Err(unreachable(format!("unexpected response {other:?}"))),
-                Err(e) => return Err(unreachable(e.to_string())),
-            };
+            let mut records = Vec::new();
+            let mut after: Option<RecordCursor> = None;
+            loop {
+                match connection
+                    .request(Request::LocalRecords {
+                        device: device.id,
+                        after: after.clone(),
+                    })
+                    .await
+                {
+                    Ok(Response::LocalRecords {
+                        records: page,
+                        truncated,
+                    }) => {
+                        after = page.last().map(|r| RecordCursor {
+                            key: r.key.clone(),
+                            version: r.version,
+                        });
+                        records.extend(page);
+                        if !truncated || after.is_none() {
+                            break;
+                        }
+                    }
+                    Ok(other) => return Err(unreachable(format!("unexpected response {other:?}"))),
+                    Err(e) => return Err(unreachable(e.to_string())),
+                }
+            }
             for record in records {
                 let slot = current.entry((record.key.clone(), record.version));
                 match slot {

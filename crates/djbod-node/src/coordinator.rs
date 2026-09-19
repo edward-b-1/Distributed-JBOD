@@ -21,15 +21,16 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
 use djbod_core::record::{
-    DeviceId, MetadataRecord, ShardLocation, RECORD_FORMAT_VERSION, SYSTEM_NAME,
+    DeviceId, MetadataRecord, ShardLocation, MAX_CONTENT_TYPE_BYTES, RECORD_FORMAT_VERSION,
+    SYSTEM_NAME,
 };
 use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry,
-    ListQuery, LocatedRecord, Message, RepairReport, Request, Response, ScrubEvent, ScrubItem,
-    ShardCondition, ShardRepair, StreamEnd,
+    ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, RepairReport, Request, Response,
+    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::client::{ClientError, Connection, StreamItem};
@@ -38,11 +39,6 @@ use crate::node::Node;
 use crate::server::{our_hello, ConnectionEnd, Reader, Writer};
 use crate::ulid::VersionGenerator;
 use crate::wire::{read_message, write_message};
-
-/// Sanity limit on key length (SPEC 9.1.5).
-pub const MAX_KEY_BYTES: usize = 16 * 1024;
-/// Maximum object size (SPEC 9.3.1).
-pub const MAX_OBJECT_BYTES: u64 = 1 << 40;
 
 pub fn is_client_operation(request: &Request) -> bool {
     matches!(
@@ -244,12 +240,66 @@ async fn broadcast(node: &Arc<Node>, request: Request) -> Result<Vec<(NodeId, Re
 // ------------------------------------------------------------- lookups
 
 /// The broadcast lookup of section 13: every record copy for a key hash,
-/// from every node.
+/// from every node, asked concurrently and each read to the end of its
+/// pages (15.2.2).
 async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord>, Failure> {
+    let document = node.document();
+    let mut tasks = JoinSet::new();
+    for entry in &document.nodes {
+        let target = entry.id;
+        let node = node.clone();
+        tasks.spawn(async move { lookup_on(&node, target, key_hash).await });
+    }
     let mut located = Vec::new();
-    for (target, response) in broadcast(node, Request::LocalLookup { key_hash }).await? {
-        match response {
-            Response::LocalLookup { records } => located.extend(records),
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(records)) => located.extend(records),
+            Ok(Err(f)) => return Err(f),
+            Err(e) => {
+                return Err(error(
+                    ErrorCode::Internal,
+                    format!("lookup task failed: {e}"),
+                ))
+            }
+        }
+    }
+    located.sort_by(|a, b| {
+        a.record
+            .version
+            .cmp(&b.record.version)
+            .then(a.device.cmp(&b.device))
+    });
+    Ok(located)
+}
+
+/// One node's record copies under `key_hash`, page by page.
+async fn lookup_on(
+    node: &Arc<Node>,
+    target: NodeId,
+    key_hash: KeyHash,
+) -> Result<Vec<LocatedRecord>, Failure> {
+    let mut connection = connect_to(node, target).await?;
+    let mut all = Vec::new();
+    let mut after: Option<LookupCursor> = None;
+    loop {
+        let answer = connection
+            .request(Request::LocalLookup {
+                key_hash,
+                after: after.clone(),
+            })
+            .await
+            .map_err(|e| remote_failure(target, e))?;
+        match answer {
+            Response::LocalLookup { records, truncated } => {
+                after = records.last().map(|r| LookupCursor {
+                    version: r.record.version,
+                    device: r.device,
+                });
+                all.extend(records);
+                if !truncated || after.is_none() {
+                    return Ok(all);
+                }
+            }
             other => {
                 return Err(error(
                     ErrorCode::ProtocolViolation,
@@ -258,7 +308,6 @@ async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord
             }
         }
     }
-    Ok(located)
 }
 
 /// Group record copies by version, newest first, applying the read rule
@@ -360,16 +409,23 @@ fn stale_copies(current: &MetadataRecord, located: &[LocatedRecord]) -> Vec<(Dev
         .collect()
 }
 
-fn check_key(key: &str) -> Result<(), Failure> {
+/// The key sanity check of 9.1.5, against the limit in the cluster
+/// document.
+fn check_key(node: &Node, key: &str) -> Result<(), Failure> {
     if key.is_empty() {
         return Err(error(ErrorCode::ProtocolViolation, "key is empty"));
     }
-    if key.len() > MAX_KEY_BYTES {
+    let limit = node.document().max_key_bytes;
+    if key.len() as u64 > limit {
+        let shown: String = key.chars().take(64).collect();
         return Err(Failure::Error(ErrorDetail {
-            key: Some(key[..64].to_string() + "..."),
+            key: Some(shown + "..."),
             ..ErrorDetail::new(
                 ErrorCode::KeyTooLong,
-                format!("key is {} bytes; the limit is {MAX_KEY_BYTES}", key.len()),
+                format!(
+                    "key is {} bytes; the cluster's limit is {limit} (max_key_bytes)",
+                    key.len()
+                ),
             )
         }));
     }
@@ -378,7 +434,7 @@ fn check_key(key: &str) -> Result<(), Failure> {
 
 /// The newest version of `key`, or NotFound.
 async fn newest_version(node: &Arc<Node>, key: &str) -> Result<MetadataRecord, Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let versions = versions_of(key, located)?;
     versions.into_iter().next().ok_or_else(|| {
@@ -451,7 +507,7 @@ async fn head_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
 }
 
 async fn delete_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let key_hash = hash_key(key.as_bytes());
     let located = lookup(node, key_hash).await?;
     let versions = versions_of(key, located)?;
@@ -504,23 +560,53 @@ async fn delete_version_everywhere(
 
 async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
     // v1: collect everything matching the prefix from every node, keep
-    // the newest version per key, sort, then page (15.1, 15.2.1).
+    // the newest version per key, sort, then page (15.1, 15.2.1). Each
+    // node's list is fetched in frame-sized pages; the merged result is
+    // paged the same way before it goes to the client.
     let mut newest: BTreeMap<String, KeyEntry> = BTreeMap::new();
-    let local = ListQuery {
-        prefix: query.prefix.clone(),
-        start_after: None,
-        limit: None,
-    };
-    for (target, response) in broadcast(node, Request::LocalList(local)).await? {
-        match response {
-            Response::LocalList { entries } => {
-                for entry in entries {
-                    match newest.get(&entry.key) {
-                        Some(existing) if existing.version >= entry.version => {}
-                        _ => {
-                            newest.insert(entry.key.clone(), entry);
-                        }
-                    }
+    let document = node.document();
+    for entry in &document.nodes {
+        for item in local_list_all(node, entry.id, query.prefix.clone()).await? {
+            match newest.get(&item.key) {
+                Some(existing) if existing.version >= item.version => {}
+                _ => {
+                    newest.insert(item.key.clone(), item);
+                }
+            }
+        }
+    }
+    let mut keys: Vec<KeyEntry> = newest.into_values().collect();
+    if let Some(after) = &query.start_after {
+        keys.retain(|e| e.key.as_str() > after.as_str());
+    }
+    let (keys, truncated) = crate::local_ops::page_of_keys(keys, query.limit);
+    Ok(Response::ListKeys { keys, truncated })
+}
+
+/// One node's whole key list under `prefix`, fetched page by page.
+async fn local_list_all(
+    node: &Arc<Node>,
+    target: NodeId,
+    prefix: Option<String>,
+) -> Result<Vec<KeyEntry>, Failure> {
+    let mut connection = connect_to(node, target).await?;
+    let mut all = Vec::new();
+    let mut start_after: Option<String> = None;
+    loop {
+        let answer = connection
+            .request(Request::LocalList(ListQuery {
+                prefix: prefix.clone(),
+                start_after: start_after.clone(),
+                limit: None,
+            }))
+            .await
+            .map_err(|e| remote_failure(target, e))?;
+        match answer {
+            Response::LocalList { entries, truncated } => {
+                start_after = entries.last().map(|e| e.key.clone());
+                all.extend(entries);
+                if !truncated || start_after.is_none() {
+                    return Ok(all);
                 }
             }
             other => {
@@ -531,18 +617,38 @@ async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failu
             }
         }
     }
-    let mut keys: Vec<KeyEntry> = newest.into_values().collect();
-    if let Some(after) = &query.start_after {
-        keys.retain(|e| e.key.as_str() > after.as_str());
-    }
-    let mut truncated = false;
-    if let Some(limit) = query.limit {
-        if keys.len() > limit as usize {
-            keys.truncate(limit as usize);
-            truncated = true;
+}
+
+/// Every key in the cluster, newest version each, fetched page by page.
+async fn all_keys(node: &Arc<Node>) -> Result<Vec<String>, Failure> {
+    let mut all = Vec::new();
+    let mut start_after: Option<String> = None;
+    loop {
+        let page = list_keys(
+            node,
+            ListQuery {
+                prefix: None,
+                start_after: start_after.clone(),
+                limit: None,
+            },
+        )
+        .await?;
+        match page {
+            Response::ListKeys { keys, truncated } => {
+                start_after = keys.last().map(|e| e.key.clone());
+                all.extend(keys.into_iter().map(|e| e.key));
+                if !truncated || start_after.is_none() {
+                    return Ok(all);
+                }
+            }
+            other => {
+                return Err(error(
+                    ErrorCode::Internal,
+                    format!("list_keys answered {other:?}"),
+                ))
+            }
         }
     }
-    Ok(Response::ListKeys { keys, truncated })
 }
 
 // ------------------------------------------------------------------ GET
@@ -996,17 +1102,42 @@ async fn prepare_put(
     versions: &VersionGenerator,
     params: &PutParams,
 ) -> Result<(Scheme, MetadataRecord, Vec<Holder>), Failure> {
-    check_key(&params.key)?;
-    if params.size > MAX_OBJECT_BYTES {
+    check_key(node, &params.key)?;
+    if let Some(content_type) = &params.content_type {
+        if content_type.len() > MAX_CONTENT_TYPE_BYTES {
+            return Err(error(
+                ErrorCode::MetadataTooLarge,
+                format!(
+                    "content type is {} bytes; the limit is {MAX_CONTENT_TYPE_BYTES}",
+                    content_type.len()
+                ),
+            ));
+        }
+    }
+    let document = node.document();
+    let metadata_bytes: u64 = params
+        .user_metadata
+        .iter()
+        .map(|(k, v)| (k.len() + v.len()) as u64)
+        .sum();
+    if metadata_bytes > document.max_user_metadata_bytes {
         return Err(error(
-            ErrorCode::ObjectTooLarge,
+            ErrorCode::MetadataTooLarge,
             format!(
-                "object of {} bytes exceeds the maximum of {MAX_OBJECT_BYTES}",
-                params.size
+                "user metadata is {metadata_bytes} bytes of keys and values; the cluster's limit is {} (max_user_metadata_bytes)",
+                document.max_user_metadata_bytes
             ),
         ));
     }
-    let document = node.document();
+    if params.size > document.max_object_bytes {
+        return Err(error(
+            ErrorCode::ObjectTooLarge,
+            format!(
+                "object of {} bytes exceeds the cluster's maximum of {} (max_object_bytes)",
+                params.size, document.max_object_bytes
+            ),
+        ));
+    }
     let scheme = document
         .scheme()
         .map_err(|e| error(ErrorCode::Internal, e.to_string()))?;
@@ -1307,7 +1438,7 @@ async fn repairable_record(
     node: &Arc<Node>,
     key: &str,
 ) -> Result<(MetadataRecord, Vec<DeviceId>, Vec<(DeviceId, u64)>), Failure> {
-    check_key(key)?;
+    check_key(node, key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {
@@ -2357,16 +2488,34 @@ async fn fetch_device_records(
     device: DeviceId,
 ) -> Result<Vec<MetadataRecord>, Failure> {
     let mut connection = connect_to(node, owner).await?;
-    match connection
-        .request(Request::LocalRecords { device })
-        .await
-        .map_err(|e| remote_failure(owner, e))?
-    {
-        Response::LocalRecords { records } => Ok(records),
-        other => Err(error(
-            ErrorCode::ProtocolViolation,
-            format!("{owner} answered LocalRecords with {other:?}"),
-        )),
+    let mut all = Vec::new();
+    let mut after: Option<RecordCursor> = None;
+    loop {
+        let answer = connection
+            .request(Request::LocalRecords {
+                device,
+                after: after.clone(),
+            })
+            .await
+            .map_err(|e| remote_failure(owner, e))?;
+        match answer {
+            Response::LocalRecords { records, truncated } => {
+                after = records.last().map(|r| RecordCursor {
+                    key: r.key.clone(),
+                    version: r.version,
+                });
+                all.extend(records);
+                if !truncated || after.is_none() {
+                    return Ok(all);
+                }
+            }
+            other => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{owner} answered LocalRecords with {other:?}"),
+                ))
+            }
+        }
     }
 }
 
@@ -2821,21 +2970,8 @@ async fn scrub(
     while tasks.join_next().await.is_some() {}
 
     // Phase 2: cross-node checks over every key (20.1.2, 18.5).
-    let mut keys: Vec<String> = Vec::new();
-    match list_keys(
-        node,
-        ListQuery {
-            prefix: None,
-            start_after: None,
-            limit: None,
-        },
-    )
-    .await
-    {
-        Ok(Response::ListKeys { keys: entries, .. }) => {
-            keys.extend(entries.into_iter().map(|e| e.key))
-        }
-        Ok(_) => {}
+    let keys: Vec<String> = match all_keys(node).await {
+        Ok(keys) => keys,
         Err(Failure::Error(detail)) => {
             let end = StreamEnd::failed(ErrorDetail {
                 message: format!(
@@ -2848,7 +2984,7 @@ async fn scrub(
             return Ok(());
         }
         Err(other) => return Err(other),
-    }
+    };
     for key in &keys {
         for finding in cross_check_key(node, key).await {
             finding_count += 1;

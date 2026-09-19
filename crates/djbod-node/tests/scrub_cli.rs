@@ -61,6 +61,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         m,
         block_size: BLOCK,
         headroom: 0.0,
+        ..ClusterParameters::default()
     };
     let node = Arc::new(Node::init_cluster(config, parameters).expect("init cluster"));
     tokio::spawn(server::serve(node.clone(), listener));

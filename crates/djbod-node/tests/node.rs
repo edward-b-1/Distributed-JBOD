@@ -71,6 +71,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         m,
         block_size: BLOCK,
         headroom: 0.0,
+        ..ClusterParameters::default()
     };
     let node = Arc::new(Node::init_cluster(config, parameters).expect("init cluster"));
     tokio::spawn(server::serve(node.clone(), listener));
@@ -366,11 +367,12 @@ async fn shards_and_records_round_trip_through_the_protocol() {
     match conn
         .request(Request::LocalLookup {
             key_hash: record.key_hash,
+            after: None,
         })
         .await
         .expect("lookup")
     {
-        Response::LocalLookup { records } => {
+        Response::LocalLookup { records, .. } => {
             assert_eq!(records.len(), 4);
             for located in &records {
                 assert_eq!(located.record, record);
@@ -428,11 +430,12 @@ async fn shards_and_records_round_trip_through_the_protocol() {
     match conn
         .request(Request::LocalLookup {
             key_hash: record.key_hash,
+            after: None,
         })
         .await
         .expect("lookup")
     {
-        Response::LocalLookup { records } => {
+        Response::LocalLookup { records, .. } => {
             assert_eq!(records.len(), 3);
             assert!(records.iter().all(|r| r.device != device0));
         }
@@ -478,7 +481,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => {
+        Response::LocalList { entries, .. } => {
             let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
             assert_eq!(keys, vec!["a/1", "b/1", "b/2", "c"]);
             assert_eq!(entries[0].size, 101);
@@ -494,7 +497,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => {
+        Response::LocalList { entries, .. } => {
             let keys: Vec<&str> = entries.iter().map(|e| e.key.as_str()).collect();
             assert_eq!(keys, vec!["b/2"]);
         }
@@ -509,7 +512,7 @@ async fn local_list_filters_sorts_deduplicates_and_paginates() {
         .await
         .expect("list")
     {
-        Response::LocalList { entries } => assert_eq!(entries.len(), 2),
+        Response::LocalList { entries, .. } => assert_eq!(entries.len(), 2),
         other => panic!("expected LocalList, got {other:?}"),
     }
 }

@@ -146,6 +146,20 @@ enum ClusterCommand {
     /// Rewrite every object still at a scheme or block size other than
     /// the document's, one at a time. Safe to interrupt and rerun.
     Reencode,
+    /// Change the key length, object size, or user metadata limit.
+    /// Applies to new writes; existing objects are untouched.
+    SetLimits {
+        /// Sanity limit on key length, in bytes.
+        #[arg(long, required_unless_present_any = ["max_object_bytes", "max_user_metadata_bytes"])]
+        max_key_bytes: Option<u64>,
+        /// Maximum object size, in bytes.
+        #[arg(long, required_unless_present_any = ["max_key_bytes", "max_user_metadata_bytes"])]
+        max_object_bytes: Option<u64>,
+        /// Limit on an object's user metadata, keys and values together,
+        /// in bytes.
+        #[arg(long, required_unless_present_any = ["max_key_bytes", "max_object_bytes"])]
+        max_user_metadata_bytes: Option<u64>,
+    },
     /// Mark a device removed. Refused while any object still has a shard
     /// on it: drain it first.
     RemoveDevice { device: Uuid },
@@ -751,6 +765,42 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         } else {
                             println!("every object is at this scheme");
                         }
+                    }
+                }
+                ClusterCommand::SetLimits {
+                    max_key_bytes,
+                    max_object_bytes,
+                    max_user_metadata_bytes,
+                } => {
+                    let (document, changed) = djbod_node::membership::set_limits(
+                        node,
+                        cluster,
+                        *max_key_bytes,
+                        *max_object_bytes,
+                        *max_user_metadata_bytes,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "max_key_bytes": document.max_key_bytes,
+                                "max_object_bytes": document.max_object_bytes,
+                                "max_user_metadata_bytes": document.max_user_metadata_bytes,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "max key length {} bytes, max object size {} bytes, max user metadata {} bytes (document version {}){}",
+                            document.max_key_bytes,
+                            document.max_object_bytes,
+                            document.max_user_metadata_bytes,
+                            document.version,
+                            if changed { "" } else { "; nothing changed" }
+                        );
                     }
                 }
                 ClusterCommand::Reencode => {

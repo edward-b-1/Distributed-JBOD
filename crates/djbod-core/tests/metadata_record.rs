@@ -90,6 +90,24 @@ fn revision_is_omitted_when_zero_and_covered_by_the_checksum() {
 }
 
 #[test]
+fn content_type_is_bounded_and_user_metadata_is_measured() {
+    use djbod_core::record::{RecordError, MAX_CONTENT_TYPE_BYTES};
+    let mut record = sample_record();
+    record.content_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES));
+    record.validate().expect("at the limit is fine");
+    record.content_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES + 1));
+    assert!(matches!(
+        record.validate(),
+        Err(RecordError::ContentTypeTooLong(_))
+    ));
+
+    let mut record = sample_record();
+    record.user_metadata.insert("k".to_string(), "v".repeat(99));
+    record.user_metadata.insert("k2".to_string(), String::new());
+    assert_eq!(record.user_metadata_bytes(), 1 + 99 + 2);
+}
+
+#[test]
 fn json_is_readable_and_uses_the_specified_text_forms() {
     let json = sample_record().to_json();
     // Flat: fields in declaration order, indented for humans, and the

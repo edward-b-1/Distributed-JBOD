@@ -82,6 +82,7 @@ async fn first_node(device_count: usize, k: u8, m: u8) -> TestNode {
                 m,
                 block_size: BLOCK,
                 headroom: 0.0,
+                ..ClusterParameters::default()
             },
         )
         .expect("init cluster"),
