@@ -17,6 +17,7 @@
 //! | `POST /cluster/limits`               | `djbod cluster set-limits`          |
 //! | `GET  /objects?prefix&start_after&limit` | `ListKeys`                      |
 //! | `GET  /objects/{key}`                | `HeadObject`                        |
+//! | `GET  /read-failures`                | reads this server relayed that the node stopped for damage |
 //! | `PUT  /objects/{key}`                | `PutObject`, body streamed through  |
 //! | `GET  /upload-check?size=N`          | `Status` and the document: would a write of N bytes fit? |
 //! | `DELETE /objects/{key}`              | `DeleteObject`                      |
@@ -68,6 +69,82 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
 
+/// A read of an object that the node stopped because of damage, kept so
+/// the page can say why a download failed after the browser has reported
+/// only that it did. The UI server is the one relaying the read, so it
+/// is the only party outside the node that sees the node's error. Held
+/// in memory, one per key, most recent wins; cleared when a read, verify,
+/// or repair of the key succeeds or the key is deleted. This is a
+/// stopgap for a store that forgets what it found (see
+/// docs/proposals/damage-marks.md): it lives in one process, dies with
+/// it, knows only about reads that went through it, and is found by the
+/// page by asking, which for a slow download may be after the page has
+/// stopped asking (see `watchForReadFailure` in ui.html).
+#[derive(Debug, Clone, Serialize)]
+pub struct ReadFailure {
+    pub key: String,
+    /// Seconds since the Unix epoch.
+    pub at: u64,
+    /// Which operation met the damage: `download` or `verify`.
+    pub operation: &'static str,
+    /// Bytes delivered before the node stopped.
+    pub bytes: u64,
+    pub error: ErrorDetail,
+}
+
+/// Everything the handlers share: which cluster, and the recent read
+/// failures.
+pub struct App {
+    pub target: Target,
+    failures: std::sync::Mutex<std::collections::HashMap<String, ReadFailure>>,
+}
+
+/// At most this many keys are remembered; the oldest go first.
+const MAX_FAILURES: usize = 1000;
+
+impl App {
+    fn record_failure(&self, key: &str, operation: &'static str, bytes: u64, error: ErrorDetail) {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        if failures.len() >= MAX_FAILURES && !failures.contains_key(key) {
+            if let Some(oldest) = failures
+                .values()
+                .min_by_key(|f| f.at)
+                .map(|f| f.key.clone())
+            {
+                failures.remove(&oldest);
+            }
+        }
+        failures.insert(
+            key.to_string(),
+            ReadFailure {
+                key: key.to_string(),
+                at,
+                operation,
+                bytes,
+                error,
+            },
+        );
+    }
+
+    fn clear_failure(&self, key: &str) {
+        self.failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(key);
+    }
+
+    fn failures(&self) -> Vec<ReadFailure> {
+        let failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all: Vec<ReadFailure> = failures.values().cloned().collect();
+        all.sort_by(|a, b| b.at.cmp(&a.at).then(a.key.cmp(&b.key)));
+        all
+    }
+}
+
 /// Which cluster the UI administers and how to reach it: any node's
 /// address, the cluster id, and the connector (plain or TLS), the same
 /// values the command-line client needs.
@@ -87,6 +164,7 @@ pub fn router(target: Target) -> Router {
         .route("/cluster/scheme", post(cluster_scheme))
         .route("/cluster/limits", post(cluster_limits))
         .route("/objects", get(list_objects))
+        .route("/read-failures", get(read_failures))
         .route("/upload-check", get(upload_check))
         .route(
             "/objects/{*key}",
@@ -107,7 +185,10 @@ pub fn router(target: Target) -> Router {
     Router::new()
         .route("/", get(page))
         .nest("/api", api)
-        .with_state(Arc::new(target))
+        .with_state(Arc::new(App {
+            target,
+            failures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }))
 }
 
 async fn page() -> Html<&'static str> {
@@ -203,8 +284,9 @@ fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
 
 // ---------------------------------------------------------------- status
 
-async fn status(State(target): State<Arc<Target>>) -> ApiResult {
-    let mut conn = connect(&target).await?;
+async fn status(State(app): State<Arc<App>>) -> ApiResult {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     match conn.request(Request::Status).await? {
         // `..`: the status gains fields as the protocol grows (the TLS
         // work adds `transport`); the page needs only these.
@@ -226,7 +308,8 @@ async fn status(State(target): State<Arc<Target>>) -> ApiResult {
 
 /// The document as the target node holds it, and what every node listed
 /// in it answers when asked for its own version (`djbod cluster show`).
-async fn cluster(State(target): State<Arc<Target>>) -> ApiResult {
+async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
+    let target = &app.target;
     let document =
         membership::fetch_document(&target.connector, target.node, target.cluster).await?;
     let reports = membership::fetch_all(&target.connector, &document).await;
@@ -244,7 +327,8 @@ async fn cluster(State(target): State<Arc<Target>>) -> ApiResult {
     Ok(Json(json!({ "document": document, "nodes": nodes })))
 }
 
-async fn cluster_sync(State(target): State<Arc<Target>>) -> ApiResult {
+async fn cluster_sync(State(app): State<Arc<App>>) -> ApiResult {
+    let target = &app.target;
     let report = membership::sync(&target.connector, target.node, target.cluster).await?;
     Ok(Json(json!({
         "highest_version": report.highest_version,
@@ -261,10 +345,8 @@ struct SchemeBody {
     block_size: Option<u64>,
 }
 
-async fn cluster_scheme(
-    State(target): State<Arc<Target>>,
-    Json(body): Json<SchemeBody>,
-) -> ApiResult {
+async fn cluster_scheme(State(app): State<Arc<App>>, Json(body): Json<SchemeBody>) -> ApiResult {
+    let target = &app.target;
     let (document, changed) = membership::set_scheme(
         &target.connector,
         target.node,
@@ -290,10 +372,8 @@ struct LimitsBody {
     max_user_metadata_bytes: Option<u64>,
 }
 
-async fn cluster_limits(
-    State(target): State<Arc<Target>>,
-    Json(body): Json<LimitsBody>,
-) -> ApiResult {
+async fn cluster_limits(State(app): State<Arc<App>>, Json(body): Json<LimitsBody>) -> ApiResult {
+    let target = &app.target;
     if body.max_key_bytes.is_none()
         && body.max_object_bytes.is_none()
         && body.max_user_metadata_bytes.is_none()
@@ -327,11 +407,9 @@ struct ListParams {
     limit: Option<u32>,
 }
 
-async fn list_objects(
-    State(target): State<Arc<Target>>,
-    Query(params): Query<ListParams>,
-) -> ApiResult {
-    let mut conn = connect(&target).await?;
+async fn list_objects(State(app): State<Arc<App>>, Query(params): Query<ListParams>) -> ApiResult {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     let query = ListQuery {
         prefix: params.prefix.filter(|p| !p.is_empty()),
         start_after: params.start_after.filter(|s| !s.is_empty()),
@@ -345,8 +423,14 @@ async fn list_objects(
     }
 }
 
-async fn head_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
-    let mut conn = connect(&target).await?;
+/// Recent read failures this server relayed, most recent first.
+async fn read_failures(State(app): State<Arc<App>>) -> ApiResult {
+    Ok(Json(json!({ "failures": app.failures() })))
+}
+
+async fn head_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     match conn.request(Request::HeadObject { key }).await? {
         Reply::HeadObject { record } => Ok(Json(json!(record))),
         other => Err(ApiError::unexpected(other)),
@@ -357,11 +441,12 @@ async fn head_object(State(target): State<Arc<Target>>, Path(key): Path<String>)
 /// (SPEC 10.1), so `Content-Length` is required; browsers send it for a
 /// `File` body. The body is streamed to the node a chunk at a time.
 async fn put_object(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(key): Path<String>,
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult {
+    let target = &app.target;
     let size: u64 = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -372,7 +457,7 @@ async fn put_object(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(str::to_string);
-    let mut conn = connect(&target).await?;
+    let mut conn = connect(target).await?;
     let mut source = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
     let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
@@ -406,10 +491,11 @@ struct UploadCheckParams {
 /// share one filesystem report the same free space several times, so
 /// the answer is optimistic there.
 async fn upload_check(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Query(params): Query<UploadCheckParams>,
 ) -> ApiResult {
-    let mut conn = connect(&target).await?;
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     let document = match conn.request(Request::GetClusterConfig).await? {
         Reply::GetClusterConfig { document } => document,
         other => return Err(ApiError::unexpected(other)),
@@ -454,13 +540,17 @@ async fn upload_check(
     })))
 }
 
-async fn delete_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
-    let mut conn = connect(&target).await?;
+async fn delete_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     match conn
         .request(Request::DeleteObject { key: key.clone() })
         .await?
     {
-        Reply::DeleteObject => Ok(Json(json!({ "key": key, "deleted": true }))),
+        Reply::DeleteObject => {
+            app.clear_failure(&key);
+            Ok(Json(json!({ "key": key, "deleted": true })))
+        }
         other => Err(ApiError::unexpected(other)),
     }
 }
@@ -473,10 +563,11 @@ async fn delete_object(State(target): State<Arc<Target>>, Path(key): Path<String
 /// its declared `Content-Length` and the browser reports a failed
 /// download rather than presenting a wrong file.
 async fn download_object(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
-    let mut conn = connect(&target).await?;
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -484,47 +575,75 @@ async fn download_object(
         Reply::GetObject { record } => record,
         other => return Err(ApiError::unexpected(other)),
     };
+    let app_for_stream = app.clone();
+    let key_for_stream = key.clone();
     let body = futures_util::stream::unfold(
-        (conn, 0u64, false),
-        move |(mut conn, expected_sequence, finished)| async move {
-            if finished {
-                return None;
-            }
-            let item = match conn.read_stream_item(id).await {
-                Ok(item) => item,
-                Err(e) => return Some((Err(io::Error::other(e.to_string())), (conn, 0, true))),
-            };
-            match item {
-                StreamItem::Data(data) => {
-                    if data.sequence != expected_sequence
-                        || checksum_block(&data.bytes) != data.checksum
-                    {
-                        let error = io::Error::other(format!(
-                            "body chunk {} out of order or corrupt in transit",
-                            data.sequence
-                        ));
-                        return Some((Err(error), (conn, 0, true)));
-                    }
-                    Some((
-                        Ok(Bytes::from(data.bytes)),
-                        (conn, expected_sequence + 1, false),
-                    ))
+        (conn, 0u64, 0u64, false),
+        move |(mut conn, expected_sequence, delivered, finished)| {
+            let app = app_for_stream.clone();
+            let key = key_for_stream.clone();
+            async move {
+                if finished {
+                    return None;
                 }
-                // A clean end means the coordinator has already checked
-                // the delivered length and the whole-object checksum
-                // against the record (SPEC 11.7) and would have ended with
-                // ObjectChecksumMismatch otherwise; each chunk was checked
-                // above. This is what `djbod get` relies on too.
-                StreamItem::End(end) => match end.error {
-                    None => None,
-                    Some(detail) => Some((
-                        Err(io::Error::other(format!(
-                            "{:?}: {}",
-                            detail.code, detail.message
-                        ))),
-                        (conn, 0, true),
-                    )),
-                },
+                let item = match conn.read_stream_item(id).await {
+                    Ok(item) => item,
+                    Err(e) => {
+                        let detail = match e {
+                            ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                            other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
+                        };
+                        app.record_failure(&key, "download", delivered, detail.clone());
+                        return Some((
+                            Err(io::Error::other(format!(
+                                "{:?}: {}",
+                                detail.code, detail.message
+                            ))),
+                            (conn, 0, delivered, true),
+                        ));
+                    }
+                };
+                match item {
+                    StreamItem::Data(data) => {
+                        if data.sequence != expected_sequence
+                            || checksum_block(&data.bytes) != data.checksum
+                        {
+                            let error = io::Error::other(format!(
+                                "body chunk {} out of order or corrupt in transit",
+                                data.sequence
+                            ));
+                            return Some((Err(error), (conn, 0, delivered, true)));
+                        }
+                        let delivered = delivered + data.bytes.len() as u64;
+                        Some((
+                            Ok(Bytes::from(data.bytes)),
+                            (conn, expected_sequence + 1, delivered, false),
+                        ))
+                    }
+                    // A clean end means the coordinator has already checked
+                    // the delivered length and the whole-object checksum
+                    // against the record (SPEC 11.7) and would have ended
+                    // with ObjectChecksumMismatch otherwise; each chunk was
+                    // checked above. This is what `djbod get` relies on too.
+                    // It also proves every shard read intact, so any note
+                    // of an earlier failure on this key is dropped.
+                    StreamItem::End(end) => match end.error {
+                        None => {
+                            app.clear_failure(&key);
+                            None
+                        }
+                        Some(detail) => {
+                            app.record_failure(&key, "download", delivered, detail.clone());
+                            Some((
+                                Err(io::Error::other(format!(
+                                    "{:?}: {}",
+                                    detail.code, detail.message
+                                ))),
+                                (conn, 0, delivered, true),
+                            ))
+                        }
+                    },
+                }
             }
         },
     );
@@ -573,11 +692,12 @@ async fn download_object(
 /// a failure of the request; only not finding the object or the node is
 /// an HTTP error.
 async fn verify_object(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
+    let target = &app.target;
     const REPORT_EVERY: u64 = 8 * 1024 * 1024;
-    let mut conn = connect(&target).await?;
+    let mut conn = connect(target).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -598,6 +718,8 @@ async fn verify_object(
         bytes: u64,
         unreported: u64,
         finished: bool,
+        app: Arc<App>,
+        key: String,
     }
     let state = Progress {
         conn,
@@ -605,8 +727,18 @@ async fn verify_object(
         bytes: 0,
         unreported: 0,
         finished: false,
+        app: app.clone(),
+        key: key.clone(),
     };
-    let done = |verified: bool, error: Option<ErrorDetail>, bytes: u64| json!({ "event": "done", "verified": verified, "error": error, "bytes": bytes });
+    /// The last line: the verdict, remembered or cleared for the key.
+    fn done(app: &App, key: &str, verified: bool, error: Option<ErrorDetail>, bytes: u64) -> Value {
+        match &error {
+            None if verified => app.clear_failure(key),
+            Some(detail) => app.record_failure(key, "verify", bytes, detail.clone()),
+            None => {}
+        }
+        json!({ "event": "done", "verified": verified, "error": error, "bytes": bytes })
+    }
     let lines = futures_util::stream::unfold(state, move |mut st| async move {
         if st.finished {
             return None;
@@ -625,7 +757,7 @@ async fn verify_object(
                                 data.sequence
                             ),
                         );
-                        break done(false, Some(detail), st.bytes);
+                        break done(&st.app, &st.key, false, Some(detail), st.bytes);
                     }
                     st.expected_sequence += 1;
                     st.bytes += data.bytes.len() as u64;
@@ -638,7 +770,7 @@ async fn verify_object(
                 }
                 Ok(StreamItem::End(end)) => {
                     st.finished = true;
-                    break done(end.error.is_none(), end.error, st.bytes);
+                    break done(&st.app, &st.key, end.error.is_none(), end.error, st.bytes);
                 }
                 Err(e) => {
                     st.finished = true;
@@ -646,7 +778,7 @@ async fn verify_object(
                         ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
-                    break done(false, Some(detail), st.bytes);
+                    break done(&st.app, &st.key, false, Some(detail), st.bytes);
                 }
             }
         };
@@ -670,10 +802,17 @@ async fn verify_object(
     Ok(response)
 }
 
-async fn repair_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
-    let mut conn = connect(&target).await?;
-    match conn.request(Request::RepairObject { key }).await? {
-        Reply::RepairObject(report) => Ok(Json(json!(report))),
+async fn repair_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
+    match conn
+        .request(Request::RepairObject { key: key.clone() })
+        .await?
+    {
+        Reply::RepairObject(report) => {
+            app.clear_failure(&key);
+            Ok(Json(json!(report)))
+        }
         other => Err(ApiError::unexpected(other)),
     }
 }
@@ -685,11 +824,12 @@ struct MoveShardBody {
 }
 
 async fn move_shard(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(key): Path<String>,
     Json(body): Json<MoveShardBody>,
 ) -> ApiResult {
-    let mut conn = connect(&target).await?;
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     let request = Request::MoveShard {
         key,
         shard_index: body.shard_index,
@@ -769,11 +909,9 @@ struct ScrubBody {
     repair: bool,
 }
 
-async fn scrub(
-    State(target): State<Arc<Target>>,
-    Json(body): Json<ScrubBody>,
-) -> ApiResult<Response> {
-    let mut conn = connect(&target).await?;
+async fn scrub(State(app): State<Arc<App>>, Json(body): Json<ScrubBody>) -> ApiResult<Response> {
+    let target = &app.target;
+    let mut conn = connect(target).await?;
     let id = conn
         .start_scrub(body.rate_mib.map(|m| m * 1024 * 1024), body.repair)
         .await?;
@@ -790,12 +928,13 @@ struct DrainBody {
 }
 
 async fn drain(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Json(body): Json<DrainBody>,
 ) -> ApiResult<Response> {
+    let target = &app.target;
     let device = DeviceId(parse_id(&id, "device")?);
-    let mut conn = connect(&target).await?;
+    let mut conn = connect(target).await?;
     let id = conn.start_drain(device, body.partial).await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
         let item = conn.next_drain_event(id).await;
@@ -811,10 +950,11 @@ struct StateBody {
 }
 
 async fn set_device_state(
-    State(target): State<Arc<Target>>,
+    State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Json(body): Json<StateBody>,
 ) -> ApiResult {
+    let target = &app.target;
     let device = DeviceId(parse_id(&id, "device")?);
     if body.state == DeviceState::Removed {
         return Err(ApiError::BadRequest(
@@ -837,7 +977,8 @@ async fn set_device_state(
     })))
 }
 
-async fn remove_device(State(target): State<Arc<Target>>, Path(id): Path<String>) -> ApiResult {
+async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
+    let target = &app.target;
     let device = DeviceId(parse_id(&id, "device")?);
     let (document, changed) =
         membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
@@ -848,7 +989,8 @@ async fn remove_device(State(target): State<Arc<Target>>, Path(id): Path<String>
     })))
 }
 
-async fn remove_node(State(target): State<Arc<Target>>, Path(id): Path<String>) -> ApiResult {
+async fn remove_node(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
+    let target = &app.target;
     let node = NodeId(parse_id(&id, "node")?);
     let document =
         membership::remove_node(&target.connector, target.node, target.cluster, node).await?;
