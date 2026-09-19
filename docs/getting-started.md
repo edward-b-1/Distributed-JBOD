@@ -160,9 +160,10 @@ target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_NODE and DJBOD_CLUST
 Open <http://127.0.0.1:5264/>. Each action the page offers is one
 `djbod` command underneath, and it holds no state of its own, so the two
 can be used side by side. The Overview tab shows every node's document
-version and every device with a used-space meter and its state; a device
-is marked draining, drained, and removed from there and from the
-Maintenance tab, where scrubs and drains show their events as they
+version and every device with a used-space meter and its state, shown by
+its label with the UUID in parentheses when it has one and by its UUID
+alone when it does not; a device is labelled, marked draining, drained,
+and removed from there and from the Maintenance tab, where scrubs and drains show their events as they
 happen. The Objects tab lists keys by prefix and shows a record, its
 shard placement, and verify, repair, move-shard, download, upload, and
 delete. Verify reads the object through the node without saving it, so

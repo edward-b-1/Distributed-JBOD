@@ -67,6 +67,7 @@
   tr:last-child td { border-bottom: none; }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .id { font-family: var(--mono); font-size: 12.5px; cursor: copy; }
+  .label-name { font-weight: 600; }
   .key { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
   .meter { display: flex; align-items: center; gap: 8px; min-width: 160px; }
   .meter .track { flex: 1; height: 8px; border-radius: 4px; background: var(--accent-track); overflow: hidden; }
@@ -292,6 +293,25 @@ async function copyText(text) {
 }
 function encodeKey(key) { return key.split('/').map(encodeURIComponent).join('/'); }
 
+// Devices are shown by their label when they have one, with the UUID
+// following in parentheses; a device without a label is shown by its
+// UUID alone (SPEC 6.2.5.1).
+function deviceLabel(id) {
+  const fromStatus = state.status?.devices.find((d) => d.device === id)?.label;
+  if (fromStatus) return fromStatus;
+  return state.cluster?.document.devices.find((d) => d.id === id)?.label || null;
+}
+function deviceCell(id) {
+  const label = deviceLabel(id);
+  if (!label) return idCell(id);
+  return el('span', {}, el('span', { class: 'label-name', text: label }), ' ',
+    el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => copyText(String(id)) }, `(${short(id)})`));
+}
+function deviceText(id) {
+  const label = deviceLabel(id);
+  return label ? `${label} (${short(id)})` : short(id);
+}
+
 function toast(message, detail, isError = false) {
   const box = el('div', { class: 'toast' + (isError ? ' error' : '') },
     el('button', { text: '×', onclick: () => box.remove(), 'aria-label': 'dismiss' }),
@@ -302,8 +322,11 @@ function toast(message, detail, isError = false) {
 }
 function describeError(error) {
   const lines = [];
-  for (const f of ['node', 'device', 'key', 'version', 'shard_index', 'stripe'])
-    if (error[f] !== undefined && error[f] !== null) lines.push(`${f}: ${error[f]}`);
+  for (const f of ['node', 'device', 'key', 'version', 'shard_index', 'stripe']) {
+    if (error[f] === undefined || error[f] === null) continue;
+    const label = f === 'device' ? deviceLabel(error[f]) : null;
+    lines.push(`${f}: ${label ? `${label} (${error[f]})` : error[f]}`);
+  }
   return lines.join('\n');
 }
 function fail(context, e) {
@@ -426,7 +449,8 @@ function renderOverview() {
       actions.append(el('button', { text: 'Set active', onclick: () => setState(d.device, 'active') }));
       actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
     }
-    return el('tr', {}, el('td', {}, idCell(d.device)),
+    actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
+    return el('tr', {}, el('td', {}, deviceCell(d.device)),
       el('td', {}, idCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
       el('td', {}, el('span', { class: 'state ' + d.state, text: d.state })),
       el('td', {}, d.state === 'removed' ? el('span', { class: 'hint', text: '—' }) : meter),
@@ -434,10 +458,21 @@ function renderOverview() {
       el('td', {}, actions));
   }));
 }
+async function setLabel(device, current) {
+  const answer = prompt(`Label for device ${device}\n\n1 to 128 characters, no spaces, unique in the cluster. Leave empty to clear.`, current || '');
+  if (answer === null) return;
+  const label = answer.trim() || null;
+  if (label === (current || null)) return;
+  try {
+    const r = await post(`/devices/${device}/label`, { label });
+    toast(label ? `device ${short(device)} is now labelled ${label} (document version ${r.document_version})` : `label cleared from device ${short(device)} (document version ${r.document_version})`);
+    refresh();
+  } catch (e) { fail('set label', e); }
+}
 async function setState(device, to) {
   try {
     const r = await post(`/devices/${device}/state`, { state: to });
-    toast(r.changed ? `device ${short(device)} is now ${to} (document version ${r.document_version})` : `device ${short(device)} was already ${to}`);
+    toast(r.changed ? `device ${deviceText(device)} is now ${to} (document version ${r.document_version})` : `device ${deviceText(device)} was already ${to}`);
     refresh();
   } catch (e) { fail('set state', e); }
 }
@@ -445,7 +480,7 @@ async function removeDevice(device) {
   if (!confirm(`Remove device ${device} from the cluster?\n\nRefused while any object still has a shard on it. Afterwards take its path out of the node's configuration and restart that node.`)) return;
   try {
     const r = await post(`/devices/${device}/remove`);
-    toast(r.changed ? `device ${short(device)} removed (document version ${r.document_version})` : `device ${short(device)} was already removed`);
+    toast(r.changed ? `device ${deviceText(device)} removed (document version ${r.document_version})` : `device ${deviceText(device)} was already removed`);
     refresh();
   } catch (e) { fail('remove device', e); }
 }
@@ -505,13 +540,13 @@ function renderDetail(record) {
   const deviceNode = (id) => state.status?.devices.find((d) => d.device === id)?.node;
   const shardRows = record.shards.map((s) => {
     const info = state.status?.devices.find((d) => d.device === s.device);
-    return el('tr', {}, el('td', { class: 'num', text: s.index }), el('td', {}, idCell(s.device)),
+    return el('tr', {}, el('td', { class: 'num', text: s.index }), el('td', {}, deviceCell(s.device)),
       el('td', {}, deviceNode(s.device) ? idCell(deviceNode(s.device)) : el('span', { class: 'bad', text: 'not in cluster' })),
       el('td', {}, info ? el('span', { class: 'state ' + info.state, text: info.state }) : ''));
   });
   const shardSelect = el('select', { id: 'move-index' }, ...record.shards.map((s) => el('option', { value: s.index, text: `shard ${s.index}` })));
   const targetSelect = el('select', { id: 'move-to' }, el('option', { value: '', text: 'emptiest device' }),
-    ...(state.status?.devices || []).filter((d) => d.state === 'active').map((d) => el('option', { value: d.device, text: `${short(d.device)} on ${short(d.node)}` })));
+    ...(state.status?.devices || []).filter((d) => d.state === 'active').map((d) => el('option', { value: d.device, text: `${deviceText(d.device)} on ${short(d.node)}` })));
   $('object-detail').replaceChildren(
     el('div', { class: 'key', text: record.key, style: 'font-size:13.5px;margin-bottom:8px' }),
     el('dl', {},
@@ -582,7 +617,7 @@ async function repair(key) {
     const r = await post('/repair/' + encodeKey(key));
     const lines = r.shards.map((s) => {
       const c = s.condition === 'intact' ? 'intact' : typeof s.condition === 'string' ? s.condition : Object.entries(s.condition).map(([k, v]) => `${k} ${JSON.stringify(v)}`).join(' ');
-      return `shard ${s.index} on ${short(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${short(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
+      return `shard ${s.index} on ${deviceText(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${deviceText(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
     });
     const rewritten = r.shards.filter((s) => s.rewritten).length;
     toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
@@ -603,7 +638,7 @@ async function moveShard(key, index, to) {
   try {
     const r = await post('/move-shard/' + encodeKey(key), { shard_index: index, to });
     const destination = r.record.shards.find((s) => s.index === index)?.device;
-    toast(`moved shard ${index} of ${key} from ${short(r.source)} to ${short(destination)} (${r.rebuilt ? 'rebuilt' : 'copied'}); revision ${r.record.revision || 0}` +
+    toast(`moved shard ${index} of ${key} from ${deviceText(r.source)} to ${deviceText(destination)} (${r.rebuilt ? 'rebuilt' : 'copied'}); revision ${r.record.revision || 0}` +
       (r.source_cleaned ? '' : '; source copy not removed, the scrub will report it as stale'));
     select(key);
   } catch (e) { fail('move shard', e); }
@@ -703,8 +738,8 @@ $('scrub-go').addEventListener('click', async () => {
   try {
     await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
       switch (e.event) {
-        case 'node_finding': findings++; logLine(log, `node ${short(e.node)}  device ${short(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
-        case 'node_summary': logLine(log, `node ${short(e.node)}  device ${short(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_finding': findings++; logLine(log, `node ${short(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
+        case 'node_summary': logLine(log, `node ${short(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
         case 'node_failed': findings++; logLine(log, `node ${short(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
         case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
@@ -725,7 +760,7 @@ function renderDrainDevices() {
   const select = $('drain-device');
   const current = select.value;
   select.replaceChildren(...state.status.devices.filter((d) => d.state === 'draining').map((d) =>
-    el('option', { value: d.device, text: `${short(d.device)} on ${short(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
+    el('option', { value: d.device, text: `${deviceText(d.device)} on ${short(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
   if (select.options.length === 0) select.append(el('option', { value: '', text: 'no draining device; set one draining first' }));
   if (current) select.value = current;
   $('drain-go').disabled = !select.value;
@@ -741,8 +776,8 @@ $('drain-go').addEventListener('click', async () => {
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
       switch (e.event) {
-        case 'estimate': logLine(log, `draining ${short(e.device)} on node ${short(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
-        case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${short(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
+        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${short(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
         case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;
         case 'end':
