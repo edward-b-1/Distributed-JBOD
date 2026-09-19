@@ -50,6 +50,10 @@ pub enum TlsError {
     NoAuthority { path: PathBuf },
     #[error("TLS configuration rejected: {0}")]
     Rustls(String),
+    #[error(
+        "a client certificate and key must be given together, and with the certificate authority (--tls-ca, --tls-cert, --tls-key)"
+    )]
+    IncompleteClientIdentity,
 }
 
 /// Loaded material: how to accept and how to connect (SPEC 19.1.6.3).
@@ -130,6 +134,32 @@ pub struct ClientTlsPaths {
 }
 
 impl Connector {
+    /// The connector a client program builds from its three optional
+    /// settings (SPEC 19.1.6.2), the same way for `djbod` and `djbod-ui`:
+    /// plain when no authority is given; TLS presenting no certificate
+    /// when only the authority is; TLS with the client's identity when
+    /// all three are. A certificate without its key, or either without
+    /// the authority, is refused.
+    pub fn from_client_options(
+        ca: Option<&Path>,
+        cert: Option<&Path>,
+        key: Option<&Path>,
+    ) -> Result<Connector, TlsError> {
+        let identity = match (cert, key) {
+            (None, None) => None,
+            (Some(cert), Some(key)) => Some((cert.to_path_buf(), key.to_path_buf())),
+            _ => return Err(TlsError::IncompleteClientIdentity),
+        };
+        match ca {
+            None if identity.is_none() => Ok(Connector::plain()),
+            None => Err(TlsError::IncompleteClientIdentity),
+            Some(ca) => Connector::from_client_paths(&ClientTlsPaths {
+                ca: ca.to_path_buf(),
+                identity,
+            }),
+        }
+    }
+
     /// A client connector from paths. With an identity the client
     /// presents its certificate; without one it presents none.
     pub fn from_client_paths(paths: &ClientTlsPaths) -> Result<Connector, TlsError> {

@@ -29,7 +29,7 @@ use uuid::Uuid;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, DEFAULT_BODY_CHUNK};
-use djbod_node::transport::{ClientTlsPaths, Connector};
+use djbod_node::transport::Connector;
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
 
 #[derive(Parser)]
@@ -58,23 +58,15 @@ struct Cli {
     command: Command,
 }
 
-/// How this client connects (SPEC 19.1.6.2): TLS when a CA is given,
-/// with a certificate when one is given too, plain otherwise.
+/// How this client connects (SPEC 19.1.6.2), decided by the transport
+/// module so that every client program decides it the same way.
 fn connector(cli: &Cli) -> anyhow::Result<Connector> {
-    match &cli.tls_ca {
-        None => Ok(Connector::plain()),
-        Some(ca) => {
-            let identity = match (&cli.tls_cert, &cli.tls_key) {
-                (Some(cert), Some(key)) => Some((cert.clone(), key.clone())),
-                _ => None,
-            };
-            Connector::from_client_paths(&ClientTlsPaths {
-                ca: ca.clone(),
-                identity,
-            })
-            .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-    }
+    Connector::from_client_options(
+        cli.tls_ca.as_deref(),
+        cli.tls_cert.as_deref(),
+        cli.tls_key.as_deref(),
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 #[derive(Subcommand)]
