@@ -68,18 +68,33 @@ objects with no cluster running, and turning on TLS.
 ## What you get
 
 - **Any disks, any machines.** Devices are plain directories on ordinary
-  filesystems, of any size, on any number of machines. Add a disk or a
-  machine while the cluster runs; drain and remove one the same way.
+  filesystems, of any size, on any number of machines. Each object is
+  placed on the emptiest disks at the time it is written, one shard per
+  disk, so a pool of mismatched sizes fills evenly and a new disk starts
+  taking writes at once.
 - **Erasure coding you choose.** `k` data and `m` parity shards per
   object. `3+1` tolerates one lost disk for 33% overhead; `4+2` tolerates
-  two for 50%; `1+1` is plain mirroring. Change it later and re-encode at
-  your own pace.
-- **Bitrot found and fixed.** Every block and every object carries a
-  checksum. A read that meets a bad block says so, naming the disk, and
-  `djbod repair` rebuilds the shard from the others. A scrub checks every
-  disk on a schedule you set and can repair what it finds.
-- **Nothing hidden.** Objects live in one JSON record and one shard file
-  per disk, in a directory layout you can read. `djbod-recover` gets your
+  two for 50%; `1+1` is plain mirroring. Change it later: every object
+  records the scheme it was written with, so old and new objects coexist
+  and you re-encode at your own pace, or never.
+- **Bitrot found and fixed.** Every block, every object, and every
+  metadata record carries a checksum. A read that meets a bad block says
+  so, naming the disk, the shard, and the stripe, and `djbod repair`
+  rebuilds the shard from the others, onto another disk if its own is
+  gone. A scrub checks every disk on a schedule you set, then checks
+  across the cluster that every object's records agree and every shard is
+  where its record says, and can repair what it finds.
+- **Grow, shrink, and fix while running.** Add a disk or a machine, name
+  it, mark it draining so it takes no new data, move its shards off,
+  remove it; force out a machine that will never come back and rebuild
+  what it held; change the scheme or the size limits. Each is one
+  command, and each is a versioned change to one cluster document that
+  every node holds a copy of, so the cluster never depends on any one
+  node or disk for its own configuration.
+- **Nothing hidden.** Where each object's shards are is written down in a
+  small JSON record replicated to every disk that holds a shard, not
+  computed from a hash, and objects live as one record and one shard file
+  per disk in a directory layout you can read. `djbod-recover` gets your
   objects back from bare disks with no node running, needing only `k`
   intact shards.
 - **No special node.** Every node is the same program. Any node answers
