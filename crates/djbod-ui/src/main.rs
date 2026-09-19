@@ -19,7 +19,7 @@ use clap::Parser;
 use uuid::Uuid;
 
 use djbod_node::transport::Connector;
-use djbod_ui::{router, Target};
+use djbod_ui::{router_for_hosts, Target};
 
 #[derive(Parser)]
 #[command(
@@ -47,6 +47,12 @@ struct Cli {
     /// This client's PEM private key, readable only by its owner.
     #[arg(long, env = "DJBOD_TLS_KEY", requires_all = ["tls_cert", "tls_ca"])]
     tls_key: Option<PathBuf>,
+    /// A host name this server answers to, besides IP addresses and
+    /// localhost, for example the machine's DNS name. Repeatable. A
+    /// request for any other name is refused, since a name pointed at
+    /// this address by someone else would let their page act as this one.
+    #[arg(long = "host", value_name = "NAME")]
+    hosts: Vec<String>,
 }
 
 /// How the UI connects to the node (SPEC 19.1.6.2), decided by the
@@ -92,7 +98,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ""
         }
     );
-    axum::serve(listener, router(target))
+    axum::serve(listener, router_for_hosts(target, cli.hosts.clone()))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })
