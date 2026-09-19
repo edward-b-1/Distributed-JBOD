@@ -493,7 +493,7 @@ function renderDetail(record) {
       ...Object.entries(record.user_metadata || {}).flatMap(([k, v]) => [el('dt', { text: 'meta ' + k }), el('dd', { text: v })])),
     el('div', { class: 'actions', style: 'margin:10px 0' },
       el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download',
-        title: 'A download that stops short of the object\u2019s size failed the node\u2019s verification and delivered nothing wrong; Repair rebuilds what is damaged.' }),
+        title: 'A download that stops short of the object\u2019s size failed the node\u2019s verification.' }),
       el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
       el('button', { class: 'danger', text: 'Delete', onclick: () => remove(record.key) })),
     el('table', {}, el('thead', {}, el('tr', {}, el('th', { class: 'num', text: '#' }), el('th', { text: 'Device' }), el('th', { text: 'Node' }), el('th', { text: 'State' }))), el('tbody', {}, ...shardRows)),
