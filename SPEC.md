@@ -1823,12 +1823,41 @@ drain and repair, errors) is the `djbod-ui` binary (C.4.7). Every
 administrative action it performs must also be available as a
 command-line operation over the native protocol, and it is: the UI is a
 translation of HTTP calls onto the same native operations and membership
-procedures the `djbod` client uses, holds no state of its own, and can
-run beside it. Its HTTP side has no authentication, so it binds to
-localhost by default; towards the cluster it uses the client's TLS
-settings (19.1.6.2). Forced node removal (6.2.6.3), which needs a typed
-confirmation, and re-encode (18.9), a long client-driven migration, stay
-on the command line.
+procedures the `djbod` client uses, holds no durable state of its own,
+and can run beside it. Towards the cluster it is a client like `djbod`
+and uses the same TLS settings (19.1.6.2), so a `tls` cluster requires
+it to hold a client certificate. Forced node removal (6.2.6.3), which
+needs a typed confirmation, and re-encode (18.9), a long client-driven
+migration, stay on the command line.
+
+20.3.2 [D] **The browser link.** Between the browser and `djbod-ui` there
+is no authentication and no encryption: the server speaks plain HTTP and
+binds to localhost by default, and whoever reaches its port acts with
+the certificate the server holds. Two checks limit what a browser can
+be made to do from elsewhere, using the browser's own word about where
+a request came from, which is not authentication: a request with any
+method but GET or HEAD is refused unless `Sec-Fetch-Site` says
+`same-origin` or `none` (or, for a client without that header, `Origin`
+is absent or names this host), which stops a form or script on another
+site from posting to the body-less endpoints; and every request is
+refused unless `Host` is an IP literal, `localhost`, or a name given
+with `--host`, which stops a DNS name someone else points at the
+address from looking same-origin to the browser. The page warns while
+it is reached over plain HTTP from any address but the machine's own,
+and while the cluster's transport is not `tls`.
+
+20.3.3 [O] **Encrypting and authenticating the browser link.** Two
+routes are open: a TLS reverse proxy in front of the server, with the
+server bound to localhost and the proxy requiring a client certificate
+from the cluster's CA; or TLS terminated by `djbod-ui` itself from a
+certificate and key of its own, with an option to require a browser
+client certificate from the CA. The proxy is the more scrutinised front
+and a familiar tool but leaves a plain port to protect; the native
+route removes that port and reuses the PKI of 19.1.6.1 but adds code
+here. Either way the gain that matters is the client certificate, since
+encryption alone leaves every reader of the LAN able to administer the
+cluster. Deferred until users and permissions (22) are considered; until
+then the guide says to keep the server on localhost or behind a proxy.
 
 ### 20.4 Logging
 
@@ -1908,6 +1937,7 @@ future credential.
 | 21.1 | Listing at scale: streaming merge, pagination, or shard-0 reporting. | 15.2.1 | Collect, deduplicate, sort for v1; revisit at implementation. |
 | 21.2 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
 | 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. | 6.2.2, 9.1.5 | Settled in milestone 4 (e): both are fields of the cluster document, defaulted when absent, changed with `djbod cluster set-limits`. |
+| 21.4 | Encrypting and authenticating the browser link of the web UI: a TLS reverse proxy, or TLS terminated by `djbod-ui` with a browser client certificate. | 20.3.3 | Native TLS with a required client certificate for a LAN with its own CA; a proxy where the UI is reachable more widely. Decide with users and permissions (22). |
 
 ## 22. Deferred items
 
@@ -2251,10 +2281,23 @@ procedures (`set_device_state`, `remove_device`, `remove_node`, `sync`,
 `GetObject` stream the body through in both directions without holding
 it; `Scrub` and `Drain` are relayed as newline-delimited JSON events so
 the page shows progress as it happens. Node errors are returned with
-every field of 16.2. It connects to the node as the `djbod` client does,
-taking the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings
-(19.1.6.2). Tested against a node started in-process, including a
-damaged shard read through the UI and repaired from it.
+every field of 16.2, with the HTTP status saying whose fault a failure
+is: 502 for a node that could not be reached, 404 for a name that does
+not exist, 409 for a refusal by the store's state. It connects to the
+node as the `djbod` client does, taking the same `--tls-ca`,
+`--tls-cert`, and `--tls-key` settings (19.1.6.2). Since the first
+version it has gained: an upload checked against the devices' room
+before its bytes are sent, with progress and cancel, and a node's
+refusal delivered to the browser; a Verify action that reads an object
+through and names any damage; an in-memory note of reads the node
+stopped, shown until a read, verify, or repair succeeds, a stopgap until
+the store remembers damage itself (the damage-marks proposal); device
+labels shown first with the UUID following (6.2.5.1), and accepted in
+place of a UUID by the API; the cluster's transport in the header and a
+tile; the same-origin and host checks and the banners of 20.3.2. Tested
+against a node started in-process, including a damaged shard read
+through the UI and repaired from it, and a refused upload over a real
+socket.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure
