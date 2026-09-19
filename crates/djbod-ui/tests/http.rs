@@ -748,6 +748,97 @@ async fn verify_names_the_damage_a_download_would_meet() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_labels_are_set_shown_and_cleared() {
+    let test = start_node(4, 3, 1).await;
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let devices: Vec<String> = status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["device"].as_str().unwrap().to_string())
+        .collect();
+    assert!(status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|d| d.get("label").is_none()));
+
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/label", devices[0]),
+        serde_json::json!({ "label": "nas1-bay0" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    assert_eq!(json["label"], "nas1-bay0");
+
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let labelled: Vec<&serde_json::Value> = status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["label"] == "nas1-bay0")
+        .collect();
+    assert_eq!(labelled.len(), 1);
+    assert_eq!(labelled[0]["device"], devices[0]);
+    let (_, cluster) = get_json(&test, "/api/cluster").await;
+    assert!(cluster["document"]["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["id"] == devices[0] && d["label"] == "nas1-bay0"));
+
+    // The same label again is a no-op; on another device it is refused,
+    // as is a label with a space.
+    let (_, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/label", devices[0]),
+        serde_json::json!({ "label": "nas1-bay0" }),
+    )
+    .await;
+    assert_eq!(json["changed"], false, "{json}");
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/label", devices[1]),
+        serde_json::json!({ "label": "nas1-bay0" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("nas1-bay0"),
+        "{json}"
+    );
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/label", devices[1]),
+        serde_json::json!({ "label": "has space" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+
+    // Null, or an empty string, clears it.
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{}/label", devices[0]),
+        serde_json::json!({ "label": "" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    assert!(json["label"].is_null());
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    assert!(status_json["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|d| d.get("label").is_none()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_read_the_node_stopped_is_remembered_until_something_succeeds() {
     let test = start_node(4, 3, 1).await;
     let body = pattern_bytes(3 * 2 * 64 * 1024 + 5, 13);
