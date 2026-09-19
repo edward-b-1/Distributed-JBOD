@@ -104,6 +104,12 @@
   .meter .fill { height: 100%; border-radius: 4px; background: var(--accent); }
   .meter .fill.warning { background: var(--warning); }
   .meter .fill.critical { background: var(--critical); }
+  .meter .fill.working {
+    background-image: linear-gradient(135deg, rgba(255,255,255,.28) 25%, transparent 25%, transparent 50%, rgba(255,255,255,.28) 50%, rgba(255,255,255,.28) 75%, transparent 75%);
+    background-size: 24px 24px; animation: working 1s linear infinite;
+  }
+  @keyframes working { from { background-position: 0 0; } to { background-position: 24px 0; } }
+  @media (prefers-reduced-motion: reduce) { .meter .fill.working { animation: none; } }
   .meter .pct { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 12px; width: 3.5em; text-align: right; }
   .state { white-space: nowrap; }
   .state.active::before { content: "\25CF  "; color: var(--good); }
@@ -251,6 +257,10 @@
       <label><input type="checkbox" id="scrub-repair"> repair what is found</label>
       <button id="scrub-go" class="primary">Start scrub</button>
       <span id="scrub-summary" class="hint"></span>
+    </div>
+    <div class="row" id="scrub-progress" hidden>
+      <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill working" id="scrub-fill" style="width:0%"></div></div></div>
+      <span class="hint" id="scrub-progress-text"></span>
     </div>
     <p class="hint">Every node reads every record and block on its own devices against their checksums, then the coordinator checks that record copies agree and every holder has its shard.</p>
     <div class="log" id="scrub-log" hidden></div>
@@ -948,8 +958,33 @@ $('scrub-go').addEventListener('click', async () => {
   const repairing = $('scrub-repair').checked;
   let findings = 0, repairs = 0;
   $('scrub-summary').textContent = 'running…';
+  // The node reports each device once, when it has finished it, so the
+  // bar advances by devices: those a node has open, which is every device
+  // listed for it that is not removed (a removed device still open on a
+  // node counts too, so the total is a floor). Then the cross-node checks
+  // and any repairs run, which have no count in advance.
+  const devicesToScrub = (state.status?.devices || []).filter((d) => d.state !== 'removed').length || 1;
+  let devicesDone = 0, bytesRead = 0, phase = 'local';
+  const fill = $('scrub-fill'), text = $('scrub-progress-text'), started = performance.now();
+  const showProgress = () => {
+    const seconds = (performance.now() - started) / 1000;
+    if (phase === 'local') {
+      const fraction = Math.min(devicesDone / devicesToScrub, 1);
+      fill.style.width = `${Math.max(fraction * 100, 2).toFixed(1)}%`;
+      text.textContent = `checking devices: ${devicesDone} of ${devicesToScrub} done, ${human(bytesRead)} read` + (seconds > 2 && bytesRead ? `, ${human(bytesRead / seconds)}/s` : '');
+    } else {
+      fill.style.width = '100%';
+      text.textContent = `devices done (${human(bytesRead)} read); cross-node checks${repairing ? ' and repairs' : ''}…`;
+    }
+  };
+  $('scrub-progress').hidden = false; fill.classList.add('working'); showProgress();
   try {
     await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
+      if (e.event === 'node_summary') { devicesDone++; bytesRead += e.summary.bytes_read || 0; }
+      if (e.event === 'node_failed') devicesDone++;
+      if (e.event === 'cluster_finding' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${devicesDone} device(s), ${human(bytesRead)} read`; }
+      else showProgress();
       switch (e.event) {
         case 'node_finding': findings++; logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
         case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
@@ -965,7 +1000,7 @@ $('scrub-go').addEventListener('click', async () => {
       }
       $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
     });
-  } catch (e) { fail('scrub', e); }
+  } catch (e) { fail('scrub', e); fill.classList.remove('working'); $('scrub-progress').hidden = true; }
   finally { $('scrub-go').disabled = false; refresh(); }
 });
 
