@@ -167,6 +167,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(json["devices"][0]["state"], "active");
     assert_eq!(json["transport"], "plain");
     assert_eq!(json["ui_to_node_tls"], false);
+    assert_eq!(json["ui_build"], djbod_node::BUILD);
 
     let (status, json) = get_json(&test, "/api/cluster").await;
     assert_eq!(status, StatusCode::OK, "{json}");
@@ -176,6 +177,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["version"], json["document"]["version"]);
     assert!(nodes[0]["error"].is_null());
+    assert_eq!(nodes[0]["build"], djbod_node::BUILD);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
