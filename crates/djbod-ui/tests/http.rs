@@ -575,3 +575,102 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "node_unreachable");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_check_judges_room_as_the_coordinator_would() {
+    let test = start_node(4, 3, 1).await;
+    let (status, json) = get_json(&test, "/api/upload-check?size=1000").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["fits"], true);
+    assert_eq!(json["too_large"], false);
+    assert_eq!(json["required_devices"], 4);
+    assert_eq!(json["active_devices"], 4);
+    assert_eq!(json["devices_with_room"], 4);
+    let expected = djbod_core::shardfile::shard_file_length(
+        djbod_core::erasure::Scheme::new(3, 1).unwrap(),
+        64 * 1024,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(json["shard_bytes"], expected);
+
+    // Larger than the maximum object size (1 TiB by default) and than any
+    // device: refused on both counts, before a byte is sent.
+    let (status, json) = get_json(&test, &format!("/api/upload-check?size={}", 1u64 << 41)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["fits"], false);
+    assert_eq!(json["too_large"], true);
+    assert_eq!(json["devices_with_room"], 0);
+
+    // Under the size limit but over the room: the room is the reason.
+    let (_, json) = post_json(
+        &test,
+        "/api/cluster/limits",
+        serde_json::json!({ "max_object_bytes": 1u64 << 50 }),
+    )
+    .await;
+    assert_eq!(json["changed"], true, "{json}");
+    let (_, json) = get_json(&test, &format!("/api/upload-check?size={}", 1u64 << 45)).await;
+    assert_eq!(json["fits"], false, "{json}");
+    assert_eq!(json["too_large"], false);
+    assert_eq!(json["devices_with_room"], 0);
+    assert!(json["room_bytes"].as_u64().unwrap() > 0);
+
+    // A zero-length object needs no room.
+    let (_, json) = get_json(&test, "/api/upload-check?size=0").await;
+    assert_eq!(json["fits"], true, "{json}");
+    assert_eq!(json["shard_bytes"], 0);
+}
+
+/// Over a real socket, as a browser would do it: the node refuses the
+/// write at once, but the client keeps sending the body. The server must
+/// read the whole body before answering, or the client sees the
+/// connection closed mid-send and never learns why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusal_during_upload_is_delivered_after_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let test = start_node(4, 3, 1).await;
+    let (_, json) = post_json(
+        &test,
+        "/api/cluster/limits",
+        serde_json::json!({ "max_object_bytes": 4096 }),
+    )
+    .await;
+    assert_eq!(json["changed"], true, "{json}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = listener.local_addr().unwrap();
+    let router = app(&test);
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let size: usize = 64 * 1024 * 1024;
+    let mut socket = tokio::net::TcpStream::connect(http).await.unwrap();
+    socket
+        .write_all(
+            format!(
+                "PUT /api/objects/too/big HTTP/1.1\r\nHost: djbod\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // Every write must succeed: a server that closed early would reset
+    // the connection part way through.
+    let chunk = vec![0xabu8; 64 * 1024];
+    let mut sent = 0;
+    while sent < size {
+        socket
+            .write_all(&chunk)
+            .await
+            .expect("the server kept reading");
+        sent += chunk.len();
+    }
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await.unwrap();
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 400 "), "{text}");
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json: serde_json::Value = serde_json::from_str(body.trim()).expect("json body");
+    assert_eq!(json["error"]["code"], "object_too_large", "{json}");
+}
