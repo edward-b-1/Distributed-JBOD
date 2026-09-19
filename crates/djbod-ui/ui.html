@@ -621,7 +621,7 @@ function uploadWithProgress(file, key) {
 $('upload-cancel').addEventListener('click', () => {
   if (!activeUpload) return;
   activeUpload.abort();
-  toast('upload cancelled; the node discards what it received');
+  toast('Upload cancelled');
 });
 
 // ------------------------------------------------------------ maintenance
