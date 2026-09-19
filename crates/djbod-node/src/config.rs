@@ -4,7 +4,9 @@
 //! node_id = "2f1c6c3e-..."          # UUID, generated once per node
 //! listen = "0.0.0.0:5263"           # optional; default port 5263
 //! advertise = "10.0.0.1:5263"       # optional; the address other nodes use to reach
-//!                                   # this one; defaults to `listen`
+//!                                   # this one; defaults to `listen`. Changing it
+//!                                   # moves the node in the cluster document at
+//!                                   # the next start (SPEC 18.1.2.1)
 //! state_dir = "/var/lib/djbod"      # holds this node's copy of the cluster document
 //! devices = ["/mnt/disk0/data", "/mnt/disk1/data"]
 //! bootstrap_peers = ["10.0.0.2:5263"]   # optional; empty for the first node

@@ -85,6 +85,14 @@ pub enum MembershipError {
     PeerUnreachable { address: SocketAddr, reason: String },
     #[error("gave up after {0} attempts; another change kept winning")]
     TooManyRetries(u32),
+    #[error(
+        "the cluster document lists this node at {listed:?}, not at its configured address {configured}, and proposing the change failed: {reason}. Serving there would leave the node where no other node can find it, so it does not start; make every node reachable and start again, or configure the listed address"
+    )]
+    AddressChangeFailed {
+        configured: SocketAddr,
+        listed: Vec<String>,
+        reason: Box<MembershipError>,
+    },
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error(transparent)]
@@ -765,6 +773,53 @@ pub async fn set_node_label(
     Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
+/// Replace a node's address list (SPEC 6.2.5.2). Returns the document and
+/// whether anything changed; the validator refuses an empty list, an
+/// address that is not `ip:port`, or one already listed for a node. The
+/// node is reached at its currently listed address for the proposal, as
+/// every node is for every change.
+pub async fn set_node_addresses(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    node: NodeId,
+    addresses: Vec<String>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(connector, peer, cluster_id).await?;
+        let Some(entry) = current.node(node) else {
+            return Err(MembershipError::UnknownNode(node));
+        };
+        if entry.addresses == addresses {
+            return Ok((current, false));
+        }
+        let next = with_node_addresses(&current, node, addresses.clone());
+        match propose(connector, &current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+/// The successor of `current` in which `node` is listed at `addresses`.
+fn with_node_addresses(
+    current: &ClusterDocument,
+    node: NodeId,
+    addresses: Vec<String>,
+) -> ClusterDocument {
+    let mut next = current.clone();
+    next.version += 1;
+    for candidate in next.nodes.iter_mut() {
+        if candidate.id == node {
+            candidate.addresses = addresses.clone();
+        }
+    }
+    next
+}
+
 /// Set or clear a device's label (SPEC 6.2.5.1). Returns the document and
 /// whether anything changed; the validator refuses a duplicate or an
 /// unusable label.
@@ -1202,5 +1257,65 @@ pub async fn adopt_from_peers(config: &NodeConfig) -> Result<ClusterDocument, Me
             }
         }
     }
-    Ok(document)
+    adopt_configured_address(config, document).await
+}
+
+/// The startup case of SPEC 18.1.2.1: when the document's entry for this
+/// node does not list its configured advertised address, propose a
+/// document that lists that address alone. This node is not serving yet,
+/// so it is skipped in the proposal as a dead node would be (6.2.6.3 step
+/// 2) and saves the result itself. A node not in the document is left for
+/// `Node::open` to refuse.
+async fn adopt_configured_address(
+    config: &NodeConfig,
+    mut document: ClusterDocument,
+) -> Result<ClusterDocument, MembershipError> {
+    let node = NodeId(config.node_id);
+    let configured = config.advertised_address();
+    let connector = connector_for(config, &document)?;
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let Some(entry) = document.node(node) else {
+            return Ok(document);
+        };
+        if entry.addresses.contains(&configured.to_string()) {
+            return Ok(document);
+        }
+        let listed = entry.addresses.clone();
+        let next = with_node_addresses(&document, node, vec![configured.to_string()]);
+        match propose_skipping(&connector, &document, &next, Some(node)).await {
+            Ok(()) => {
+                Node::save_document_for(config, &next)?;
+                tracing::info!(
+                    from = document.version,
+                    to = next.version,
+                    listed = ?listed,
+                    %configured,
+                    "the cluster document now lists this node at its configured address"
+                );
+                return Ok(next);
+            }
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. })
+            | Err(MembershipError::VersionsDiffer(_)) => {
+                // Another change won; take the newest document any other
+                // node holds and try again from there.
+                for report in fetch_all_except(&connector, &document, Some(node)).await {
+                    if let Ok(theirs) = report.result {
+                        if theirs.version > document.version {
+                            Node::save_document_for(config, &theirs)?;
+                            document = theirs;
+                        }
+                    }
+                }
+            }
+            Err(reason) => {
+                return Err(MembershipError::AddressChangeFailed {
+                    configured,
+                    listed,
+                    reason: Box::new(reason),
+                })
+            }
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }

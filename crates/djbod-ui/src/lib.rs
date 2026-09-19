@@ -431,6 +431,8 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::LastNode => (StatusCode::CONFLICT, "last_node"),
         M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
         M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
+        // Only `djbod-node run` proposes its own address; not reachable here.
+        M::AddressChangeFailed { .. } => (StatusCode::BAD_GATEWAY, "address_change_failed"),
         M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
         // A document that fails validation: a bad or duplicate label, a
         // scheme the devices cannot carry, and the like.
