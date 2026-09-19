@@ -2,13 +2,13 @@
 
 A distributed, resilient, object store.
 
-It aggregates the mismatched disks of several commodity machines into one
-durable, bitrot-protected pool. Every node runs the same process; there is
-no master, and no metadata lives on any single device. Objects are split
-into stripes and erasure-coded with a systematic Reed-Solomon code, every
+Distributed-JBOD solves the problem of a user who requires a large pool of network connected storage, but who does not have access to datacenter grade server hardware. Connect a few commodity devices together, and run them with whatever storage devices are available. Storage devices and nodes are easy to add and remove, providing a way to extend or shrink the storage pool over time.
+
+Distributed-JBOD can aggregate a mismatched pool of disks (JBOD) from across multiple devices. It is intended to be used with low-cost commodity machines. A Distributed-JBOD system can combine multiple hosts together to create a durable, bitrot-protected pool of storage space. The parameters are configurable so that the balance between storage efficiency and durability can be adjusted.
+
+Every node runs the same process; there is no master, and no metadata lives on any single device. Objects are split into stripes and erasure-coded with a systematic Reed-Solomon code, every
 block carries a checksum, and every operation is fail-stop: damage is
-reported, never papered over, and the tools to find and repair it are part
-of the system.
+reported eagerly, and the tools to find and repair damage are provided.
 
 The design is in [SPEC.md](SPEC.md), written before the code and kept in
 step with it; every decision is numbered and marked as decided, proposed,
