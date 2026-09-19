@@ -382,7 +382,10 @@ for (const button of document.querySelectorAll('nav [role=tab]')) {
   button.addEventListener('click', () => {
     for (const b of document.querySelectorAll('nav [role=tab]')) b.setAttribute('aria-selected', b === button);
     for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== 'tab-' + button.dataset.tab;
-    location.hash = button.dataset.tab;
+    // Remember the section in the URL without navigating to it: a hash
+    // change scrolls the window to any element of that id, and the
+    // Objects table body is one.
+    history.replaceState(null, '', '#' + button.dataset.tab);
   });
 }
 if (location.hash) document.querySelector(`nav [data-tab="${location.hash.slice(1)}"]`)?.click();
