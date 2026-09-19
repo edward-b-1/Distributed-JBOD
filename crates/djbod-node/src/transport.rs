@@ -119,6 +119,49 @@ impl TlsMaterial {
     }
 }
 
+/// What a client needs (SPEC 19.1.6.2): the authority to verify servers
+/// against, and optionally its own certificate and key. Without them the
+/// client is encrypted but anonymous, which a `tls-optional` cluster
+/// accepts and a `tls` cluster refuses (19.1.6.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientTlsPaths {
+    pub ca: PathBuf,
+    pub identity: Option<(PathBuf, PathBuf)>,
+}
+
+impl Connector {
+    /// A client connector from paths. With an identity the client
+    /// presents its certificate; without one it presents none.
+    pub fn from_client_paths(paths: &ClientTlsPaths) -> Result<Connector, TlsError> {
+        if let Some((cert, key)) = &paths.identity {
+            let material = TlsMaterial::load(&TlsPaths {
+                cert: cert.clone(),
+                key: key.clone(),
+                ca: paths.ca.clone(),
+            })?;
+            return Ok(material.connector());
+        }
+        let authorities = read_certificates(&paths.ca)?;
+        let mut roots = RootCertStore::empty();
+        for authority in authorities {
+            roots
+                .add(authority)
+                .map_err(|e| TlsError::Rustls(e.to_string()))?;
+        }
+        if roots.is_empty() {
+            return Err(TlsError::NoAuthority {
+                path: paths.ca.clone(),
+            });
+        }
+        let client = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Ok(Connector {
+            tls: Some(Arc::new(client)),
+        })
+    }
+}
+
 fn io_error(path: &Path, source: io::Error) -> TlsError {
     TlsError::Io {
         path: path.to_path_buf(),

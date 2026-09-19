@@ -279,6 +279,7 @@ dependencies = [
  "djbod-core",
  "djbod-node",
  "djbod-proto",
+ "rcgen",
  "serde_json",
  "tempfile",
  "tokio",
