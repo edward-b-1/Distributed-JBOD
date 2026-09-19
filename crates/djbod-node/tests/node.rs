@@ -367,11 +367,12 @@ async fn shards_and_records_round_trip_through_the_protocol() {
     match conn
         .request(Request::LocalLookup {
             key_hash: record.key_hash,
+            after: None,
         })
         .await
         .expect("lookup")
     {
-        Response::LocalLookup { records } => {
+        Response::LocalLookup { records, .. } => {
             assert_eq!(records.len(), 4);
             for located in &records {
                 assert_eq!(located.record, record);
@@ -429,11 +430,12 @@ async fn shards_and_records_round_trip_through_the_protocol() {
     match conn
         .request(Request::LocalLookup {
             key_hash: record.key_hash,
+            after: None,
         })
         .await
         .expect("lookup")
     {
-        Response::LocalLookup { records } => {
+        Response::LocalLookup { records, .. } => {
             assert_eq!(records.len(), 3);
             assert!(records.iter().all(|r| r.device != device0));
         }

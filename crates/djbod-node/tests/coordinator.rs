@@ -1421,9 +1421,15 @@ async fn size_limits_come_from_the_cluster_document() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn oversized_metadata_is_refused_before_any_body_is_stored() {
-    use djbod_core::record::{MAX_CONTENT_TYPE_BYTES, MAX_USER_METADATA_BYTES};
+    use djbod_core::record::MAX_CONTENT_TYPE_BYTES;
+    const MAX_USER_METADATA_BYTES: usize = 4096;
     let test = start_node(2, 1, 1).await;
     let mut client = test.client().await;
+    // The user metadata limit is the document's; make it small here.
+    let mut next = test.node.document();
+    next.version += 1;
+    next.max_user_metadata_bytes = MAX_USER_METADATA_BYTES as u64;
+    test.node.apply_document(next).expect("apply");
     let body = [1u8; 10];
     let long_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES + 1));
     match client.put_object("k", &body, CHUNK, long_type).await {
@@ -1434,7 +1440,7 @@ async fn oversized_metadata_is_refused_before_any_body_is_stored() {
     }
     let mut client = test.client().await;
     let mut big = std::collections::BTreeMap::new();
-    big.insert("blob".to_string(), "y".repeat(MAX_USER_METADATA_BYTES));
+    big.insert("blob".to_string(), "y".repeat(MAX_USER_METADATA_BYTES - 3));
     let mut cursor: &[u8] = &body;
     match client
         .put_object_with_metadata("k", 10, &mut cursor, CHUNK, None, big)

@@ -16,9 +16,9 @@ use djbod_proto::frame::{
 };
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    MessageError, RecordCursor, RepairReport, Request, Response, ShardCondition, ShardRepair,
-    StreamEnd, DATA_PREFIX_LEN,
+    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
+    LookupCursor, Message, MessageError, RecordCursor, RepairReport, Request, Response,
+    ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -81,6 +81,7 @@ fn sample_document() -> ClusterDocument {
         headroom: 0.05,
         max_key_bytes: 16 * 1024,
         max_object_bytes: 1 << 40,
+        max_user_metadata_bytes: 10 * 1024 * 1024,
         nodes: vec![NodeEntry {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
@@ -346,7 +347,13 @@ fn every_request_round_trips() {
             partial: true,
         },
         Request::LocalStatus,
-        Request::LocalLookup { key_hash },
+        Request::LocalLookup {
+            key_hash,
+            after: Some(LookupCursor {
+                version: VersionId([1u8; 16]),
+                device: device(2),
+            }),
+        },
         Request::LocalRecords {
             device: device(4),
             after: Some(RecordCursor {
@@ -518,6 +525,7 @@ fn every_response_round_trips() {
                 device: device(1),
                 record: sample_record(),
             }],
+            truncated: false,
         },
         Response::LocalList {
             entries: vec![entry],

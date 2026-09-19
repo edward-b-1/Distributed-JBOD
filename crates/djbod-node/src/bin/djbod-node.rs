@@ -55,6 +55,10 @@ enum Command {
         /// Maximum object size, in bytes.
         #[arg(long, default_value_t = djbod_core::cluster::DEFAULT_MAX_OBJECT_BYTES)]
         max_object_bytes: u64,
+        /// Limit on an object's user metadata, keys and values together,
+        /// in bytes.
+        #[arg(long, default_value_t = djbod_core::cluster::DEFAULT_MAX_USER_METADATA_BYTES)]
+        max_user_metadata_bytes: u64,
         /// Erase devices that belonged to a cluster before. Destroys their
         /// data.
         #[arg(long)]
@@ -169,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
             headroom,
             max_key_bytes,
             max_object_bytes,
+            max_user_metadata_bytes,
             wipe_removed_device,
         } => {
             let config = NodeConfig::load(&config).context("loading node configuration")?;
@@ -193,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
                     headroom,
                     max_key_bytes,
                     max_object_bytes,
+                    max_user_metadata_bytes,
                 },
             )
             .context("initialising cluster")?;

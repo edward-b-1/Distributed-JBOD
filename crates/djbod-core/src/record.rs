@@ -89,11 +89,10 @@ pub struct MetadataRecord {
     pub user_metadata: BTreeMap<String, String>,
 }
 
-/// Longest content type a record may carry, in bytes (SPEC 9.4.2).
+/// Longest content type a record may carry, in bytes (SPEC 9.4.2). The
+/// user metadata map has no fixed bound here; the cluster document sets
+/// one (`max_user_metadata_bytes`) that the coordinator enforces on write.
 pub const MAX_CONTENT_TYPE_BYTES: usize = 1024;
-/// Largest user metadata map a record may carry, as the sum of its keys'
-/// and values' lengths in bytes (SPEC 9.4.2).
-pub const MAX_USER_METADATA_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RecordError {
@@ -101,10 +100,6 @@ pub enum RecordError {
     Json(String),
     #[error("content type is {0} bytes; the limit is {MAX_CONTENT_TYPE_BYTES}")]
     ContentTypeTooLong(usize),
-    #[error(
-        "user metadata is {0} bytes of keys and values; the limit is {MAX_USER_METADATA_BYTES}"
-    )]
-    UserMetadataTooLarge(usize),
     #[error(
         "record checksum {stored:?} does not match its contents, which checksum to {computed:?}"
     )]
@@ -273,10 +268,6 @@ impl MetadataRecord {
             if content_type.len() > MAX_CONTENT_TYPE_BYTES {
                 return Err(RecordError::ContentTypeTooLong(content_type.len()));
             }
-        }
-        let metadata_bytes = self.user_metadata_bytes();
-        if metadata_bytes > MAX_USER_METADATA_BYTES {
-            return Err(RecordError::UserMetadataTooLarge(metadata_bytes));
         }
         if self.format_version != RECORD_FORMAT_VERSION {
             return Err(RecordError::UnsupportedFormatVersion(self.format_version));

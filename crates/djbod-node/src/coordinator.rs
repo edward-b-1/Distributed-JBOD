@@ -21,16 +21,16 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
 use djbod_core::record::{
-    DeviceId, MetadataRecord, ShardLocation, MAX_CONTENT_TYPE_BYTES, MAX_USER_METADATA_BYTES,
-    RECORD_FORMAT_VERSION, SYSTEM_NAME,
+    DeviceId, MetadataRecord, ShardLocation, MAX_CONTENT_TYPE_BYTES, RECORD_FORMAT_VERSION,
+    SYSTEM_NAME,
 };
 use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry,
-    ListQuery, LocatedRecord, Message, RecordCursor, RepairReport, Request, Response, ScrubEvent,
-    ScrubItem, ShardCondition, ShardRepair, StreamEnd,
+    ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, RepairReport, Request, Response,
+    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::client::{ClientError, Connection, StreamItem};
@@ -240,12 +240,66 @@ async fn broadcast(node: &Arc<Node>, request: Request) -> Result<Vec<(NodeId, Re
 // ------------------------------------------------------------- lookups
 
 /// The broadcast lookup of section 13: every record copy for a key hash,
-/// from every node.
+/// from every node, asked concurrently and each read to the end of its
+/// pages (15.2.2).
 async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord>, Failure> {
+    let document = node.document();
+    let mut tasks = JoinSet::new();
+    for entry in &document.nodes {
+        let target = entry.id;
+        let node = node.clone();
+        tasks.spawn(async move { lookup_on(&node, target, key_hash).await });
+    }
     let mut located = Vec::new();
-    for (target, response) in broadcast(node, Request::LocalLookup { key_hash }).await? {
-        match response {
-            Response::LocalLookup { records } => located.extend(records),
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(records)) => located.extend(records),
+            Ok(Err(f)) => return Err(f),
+            Err(e) => {
+                return Err(error(
+                    ErrorCode::Internal,
+                    format!("lookup task failed: {e}"),
+                ))
+            }
+        }
+    }
+    located.sort_by(|a, b| {
+        a.record
+            .version
+            .cmp(&b.record.version)
+            .then(a.device.cmp(&b.device))
+    });
+    Ok(located)
+}
+
+/// One node's record copies under `key_hash`, page by page.
+async fn lookup_on(
+    node: &Arc<Node>,
+    target: NodeId,
+    key_hash: KeyHash,
+) -> Result<Vec<LocatedRecord>, Failure> {
+    let mut connection = connect_to(node, target).await?;
+    let mut all = Vec::new();
+    let mut after: Option<LookupCursor> = None;
+    loop {
+        let answer = connection
+            .request(Request::LocalLookup {
+                key_hash,
+                after: after.clone(),
+            })
+            .await
+            .map_err(|e| remote_failure(target, e))?;
+        match answer {
+            Response::LocalLookup { records, truncated } => {
+                after = records.last().map(|r| LookupCursor {
+                    version: r.record.version,
+                    device: r.device,
+                });
+                all.extend(records);
+                if !truncated || after.is_none() {
+                    return Ok(all);
+                }
+            }
             other => {
                 return Err(error(
                     ErrorCode::ProtocolViolation,
@@ -254,7 +308,6 @@ async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord
             }
         }
     }
-    Ok(located)
 }
 
 /// Group record copies by version, newest first, applying the read rule
@@ -1061,20 +1114,21 @@ async fn prepare_put(
             ));
         }
     }
-    let metadata_bytes: usize = params
+    let document = node.document();
+    let metadata_bytes: u64 = params
         .user_metadata
         .iter()
-        .map(|(k, v)| k.len() + v.len())
+        .map(|(k, v)| (k.len() + v.len()) as u64)
         .sum();
-    if metadata_bytes > MAX_USER_METADATA_BYTES {
+    if metadata_bytes > document.max_user_metadata_bytes {
         return Err(error(
             ErrorCode::MetadataTooLarge,
             format!(
-                "user metadata is {metadata_bytes} bytes of keys and values; the limit is {MAX_USER_METADATA_BYTES}"
+                "user metadata is {metadata_bytes} bytes of keys and values; the cluster's limit is {} (max_user_metadata_bytes)",
+                document.max_user_metadata_bytes
             ),
         ));
     }
-    let document = node.document();
     if params.size > document.max_object_bytes {
         return Err(error(
             ErrorCode::ObjectTooLarge,

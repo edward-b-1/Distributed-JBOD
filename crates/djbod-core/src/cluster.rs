@@ -19,6 +19,17 @@ pub const DEFAULT_MAX_KEY_BYTES: u64 = 16 * 1024;
 pub const LIMIT_MAX_KEY_BYTES: u64 = 1024 * 1024;
 /// Default maximum object size: 1 TiB (SPEC 9.3.1).
 pub const DEFAULT_MAX_OBJECT_BYTES: u64 = 1 << 40;
+/// Default limit on a record's user metadata, as the sum of its keys' and
+/// values' lengths: 10 MiB (SPEC 9.4.2).
+pub const DEFAULT_MAX_USER_METADATA_BYTES: u64 = 10 * 1024 * 1024;
+/// Largest user metadata limit a document may set: 48 MiB, so that one
+/// record always fits inside one protocol frame with room to spare
+/// (SPEC 6.2.4, 9.4.2.1.1).
+pub const LIMIT_MAX_USER_METADATA_BYTES: u64 = 48 * 1024 * 1024;
+
+fn default_max_user_metadata_bytes() -> u64 {
+    DEFAULT_MAX_USER_METADATA_BYTES
+}
 
 fn default_max_key_bytes() -> u64 {
     DEFAULT_MAX_KEY_BYTES
@@ -88,6 +99,10 @@ pub struct ClusterDocument {
     /// Maximum object size in bytes (9.3.1). Absent means the default.
     #[serde(default = "default_max_object_bytes")]
     pub max_object_bytes: u64,
+    /// Limit on a record's user metadata, keys and values together, in
+    /// bytes (9.4.2). Absent means the default.
+    #[serde(default = "default_max_user_metadata_bytes")]
+    pub max_user_metadata_bytes: u64,
     pub nodes: Vec<NodeEntry>,
     pub devices: Vec<DeviceEntry>,
 }
@@ -106,6 +121,8 @@ pub enum ClusterDocumentError {
     BadKeyLimit(u64),
     #[error("max_object_bytes must be at least 1")]
     BadObjectLimit,
+    #[error("max_user_metadata_bytes {0} must be between 1 and {LIMIT_MAX_USER_METADATA_BYTES}")]
+    BadMetadataLimit(u64),
     #[error("node {0:?} appears more than once")]
     DuplicateNode(NodeId),
     #[error("device {0:?} appears more than once")]
@@ -133,6 +150,11 @@ impl ClusterDocument {
         }
         if self.max_object_bytes == 0 {
             return Err(ClusterDocumentError::BadObjectLimit);
+        }
+        if !(1..=LIMIT_MAX_USER_METADATA_BYTES).contains(&self.max_user_metadata_bytes) {
+            return Err(ClusterDocumentError::BadMetadataLimit(
+                self.max_user_metadata_bytes,
+            ));
         }
         let mut node_ids: Vec<NodeId> = Vec::with_capacity(self.nodes.len());
         for node in &self.nodes {
@@ -187,6 +209,7 @@ mod tests {
             headroom: 0.05,
             max_key_bytes: DEFAULT_MAX_KEY_BYTES,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            max_user_metadata_bytes: DEFAULT_MAX_USER_METADATA_BYTES,
             nodes: vec![
                 NodeEntry {
                     id: node_a,
@@ -281,9 +304,14 @@ mod tests {
         let fields = value.as_object_mut().expect("object");
         fields.remove("max_key_bytes");
         fields.remove("max_object_bytes");
+        fields.remove("max_user_metadata_bytes");
         let parsed: ClusterDocument = serde_json::from_value(value).expect("parses without them");
         assert_eq!(parsed.max_key_bytes, DEFAULT_MAX_KEY_BYTES);
         assert_eq!(parsed.max_object_bytes, DEFAULT_MAX_OBJECT_BYTES);
+        assert_eq!(
+            parsed.max_user_metadata_bytes,
+            DEFAULT_MAX_USER_METADATA_BYTES
+        );
         parsed.validate().expect("valid");
 
         let mut doc = sample();
@@ -302,6 +330,12 @@ mod tests {
         assert!(matches!(
             doc.validate(),
             Err(ClusterDocumentError::BadObjectLimit)
+        ));
+        let mut doc = sample();
+        doc.max_user_metadata_bytes = LIMIT_MAX_USER_METADATA_BYTES + 1;
+        assert!(matches!(
+            doc.validate(),
+            Err(ClusterDocumentError::BadMetadataLimit(_))
         ));
     }
 

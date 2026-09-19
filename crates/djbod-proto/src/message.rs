@@ -127,6 +127,14 @@ pub struct RecordCursor {
     pub version: VersionId,
 }
 
+/// Where a paged lookup continues from: the last (version, device) of the
+/// previous page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupCursor {
+    pub version: VersionId,
+    pub device: DeviceId,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,8 +205,13 @@ pub enum Request {
 
     // ---- node to node
     LocalStatus,
+    /// Every record copy under a key hash on this node's devices, in pages
+    /// of at most `MAX_LIST_PAGE_BYTES` of encoded records sorted by
+    /// version then device (15.2.2).
     LocalLookup {
         key_hash: KeyHash,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<LookupCursor>,
     },
     LocalList(ListQuery),
     /// Every record on one local device, for the drain (18.2.1) and the
@@ -385,8 +398,11 @@ pub enum Response {
         document_version: u64,
         devices: Vec<DeviceStatus>,
     },
+    /// A page of record copies; `truncated` says whether more follow
+    /// after the last one.
     LocalLookup {
         records: Vec<LocatedRecord>,
+        truncated: bool,
     },
     /// A page of at most `MAX_LIST_PAGE_BYTES` of keys; `truncated` says
     /// whether more follow after the last entry.

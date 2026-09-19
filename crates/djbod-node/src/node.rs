@@ -33,6 +33,7 @@ pub struct ClusterParameters {
     pub headroom: f64,
     pub max_key_bytes: u64,
     pub max_object_bytes: u64,
+    pub max_user_metadata_bytes: u64,
 }
 
 impl Default for ClusterParameters {
@@ -44,6 +45,7 @@ impl Default for ClusterParameters {
             headroom: 0.05,
             max_key_bytes: djbod_core::cluster::DEFAULT_MAX_KEY_BYTES,
             max_object_bytes: djbod_core::cluster::DEFAULT_MAX_OBJECT_BYTES,
+            max_user_metadata_bytes: djbod_core::cluster::DEFAULT_MAX_USER_METADATA_BYTES,
         }
     }
 }
@@ -196,6 +198,7 @@ impl Node {
             headroom: parameters.headroom,
             max_key_bytes: parameters.max_key_bytes,
             max_object_bytes: parameters.max_object_bytes,
+            max_user_metadata_bytes: parameters.max_user_metadata_bytes,
             nodes: vec![NodeEntry {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],

@@ -277,12 +277,14 @@ It is safe to interrupt and rerun: a rerun re-encodes only what is left.
 Each re-encoded object gets a new version id, since to the store it is a
 new write of the same key.
 
-**Size limits.** The maximum key length (16 KiB by default) and object
-size (1 TiB) are fields of the cluster document, so they are the same on
-every node and need no rebuild to change:
+**Size limits.** The maximum key length (16 KiB by default), object size
+(1 TiB), and user metadata per object (10 MiB) are fields of the cluster
+document, so they are the same on every node and need no rebuild to
+change:
 
 ```sh
 target/release/djbod cluster set-limits --max-object-bytes 10737418240
+target/release/djbod cluster set-limits --max-user-metadata-bytes 1048576
 ```
 
 They apply to new requests only. `cluster-config` shows the current

@@ -260,11 +260,12 @@ bootstrap peer.
 
 6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
-the key length limit `max_key_bytes` (9.1.5) and the object size limit
-`max_object_bytes` (9.3.1), the node list (UUID, addresses), and the
-device list (UUID, owning node, state). The two limits were added after
-the first documents were written; a document without them means the
-defaults. `djbod cluster set-limits` changes them.
+the key length limit `max_key_bytes` (9.1.5), the object size limit
+`max_object_bytes` (9.3.1), the user metadata limit
+`max_user_metadata_bytes` (9.4.2), the node list (UUID, addresses), and
+the device list (UUID, owning node, state). The three limits were added
+after the first documents were written; a document without them means
+the defaults. `djbod cluster set-limits` changes them.
 
 The checksum algorithm and key hash algorithm are **not** configuration.
 They are fixed by the on-disk format version. Changing either is a format
@@ -278,7 +279,7 @@ operation that re-encodes existing objects (18.9).
 6.2.4 [D] Sanity limits, enforced when the document is applied:
 `1 <= k <= 32`, `0 <= m <= 8`, `k + m <= 64`, `B` a multiple of 4096 with
 `64 KiB <= B <= 64 MiB`, `1 <= max_key_bytes <= 1 MiB`,
-`max_object_bytes >= 1`. The bounds are generous and exist only to reject
+`max_object_bytes >= 1`, `1 <= max_user_metadata_bytes <= 48 MiB`. The bounds are generous and exist only to reject
 typos. The key bound keeps one key a small fraction of a protocol frame
 (19.1.2); messages that carry many keys or records are paged (15.2.1), so
 no message grows with the number of objects.
@@ -542,8 +543,10 @@ record. A disk can be searched for an object by name with ordinary tools.
 9.1.5 [D] There is no fixed maximum key length. A configurable sanity limit
 rejects absurd keys by accident: `max_key_bytes` in the cluster document
 (6.2.2), default 16 KiB, changed with `djbod cluster set-limits`. Likewise
-the maximum object size is `max_object_bytes`, default 1 TiB. Both apply
-to new requests only; objects already stored are untouched. The key is
+the maximum object size is `max_object_bytes`, default 1 TiB, and the
+limit on a record's user metadata is `max_user_metadata_bytes`, default
+10 MiB (9.4.2). All three apply to new requests only; objects already
+stored are untouched. The key is
 stored only inside the metadata record and in the wire protocol, so no
 filesystem limit applies to it.
 
@@ -724,7 +727,7 @@ revision            integer, the placement revision (18.8.1); 0 when the
 content_type        string, optional, at most 1 KiB
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer; keys and values together at
-                    most 64 KiB
+                    most `max_user_metadata_bytes` (6.2.2; default 10 MiB)
 checksum            16 hex characters, over the other fields (9.4.5);
                     a property of the file, not of the version
 ```
@@ -734,12 +737,17 @@ owning node is resolved through the cluster document at request time. A
 disk moved to another machine keeps its UUID (5.2) and every record that
 names it stays correct; a node UUID in the record would go stale.
 
-9.4.2.1.1 [D] The two bounds on `content_type` and `user_metadata` keep
-every record small enough that any message carrying one, or a page of
-them, fits a protocol frame with room to spare (15.2.1). A write that
-exceeds either is refused (`MetadataTooLarge`) before any shard is
-stored, and a record that exceeds either is invalid (9.4.2.2), so no
-such record can be written and later fail to travel.
+9.4.2.1.1 [D] The bounds on `content_type` and `user_metadata` keep
+every record small enough that any message carrying one fits a protocol
+frame with room to spare (15.2.2): the content type bound is a fixed 1
+KiB, a property of the format, since a media type is a short token; the
+user metadata bound is the document's `max_user_metadata_bytes`, which
+the document validator caps at 48 MiB so that one record always fits a
+64 MiB frame. A write that exceeds either is refused
+(`MetadataTooLarge`) before any shard is stored. A record over the
+content type bound is invalid (9.4.2.2); a record over the metadata bound
+is not, since the bound may have been lowered after it was written, and
+messages that carry several records are paged so it still travels.
 
 9.4.2.2 [D] A record is validated whenever it is read: system name and
 format version; the key hash must equal the hash of the key (9.1.6); the
@@ -952,12 +960,14 @@ simple collect, deduplicate, and sort is acceptable.
 message may grow with the number of keys, because a protocol frame has a
 fixed maximum size (19.1.2) and a message beyond it is a hard failure.
 Every listing is therefore paged: a `ListKeys` or `LocalList` page holds
-at most 8 MiB of key text, and a `LocalRecords` page at most 8 MiB of
-encoded records, each with a flag saying more follow and a cursor to
-continue from (the last key, or the last key and version). A client
-`limit` only makes a page smaller. Every internal walk of the key space
-(the listing coordinator over each node, the scrub's cross-node pass,
-the drain, the removal scan, `reencode`) follows the pages to the end.
+at most 8 MiB of key text, and a `LocalRecords` or `LocalLookup` page at
+most 8 MiB of encoded records, each with a flag saying more follow and a
+cursor to continue from (the last key; the last key and version; or the
+last version and device). A single record larger than a page travels
+alone in its own page. A client `limit` only makes a page smaller. Every
+internal walk (the listing coordinator over each node, the lookup behind
+every read, the scrub's cross-node pass, the drain, the removal scan,
+`reencode`) follows the pages to the end.
 
 15.3 [X] A sorted index to make listing fast is deferred.
 
@@ -1407,9 +1417,12 @@ coordinator, and those nodes send to each other. Every response is either
   local device: UUID, state, total bytes, free bytes (5.5).
 
 `LocalLookup`
-: Request: key hash. Response: every metadata record found under that
-  hash on any local device, each tagged with the device UUID it was read
-  from. Empty list if none.
+: Request: key hash, optional cursor (the last version and device of the
+  previous page). Response: the metadata records found under that hash on
+  any local device after the cursor, each tagged with the device UUID it
+  was read from, sorted by version then device, in pages of at most 8 MiB
+  of encoded records with a flag saying more follow (15.2.2). Empty list
+  if none.
 
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.

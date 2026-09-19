@@ -90,8 +90,8 @@ fn revision_is_omitted_when_zero_and_covered_by_the_checksum() {
 }
 
 #[test]
-fn content_type_and_user_metadata_are_bounded() {
-    use djbod_core::record::{RecordError, MAX_CONTENT_TYPE_BYTES, MAX_USER_METADATA_BYTES};
+fn content_type_is_bounded_and_user_metadata_is_measured() {
+    use djbod_core::record::{RecordError, MAX_CONTENT_TYPE_BYTES};
     let mut record = sample_record();
     record.content_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES));
     record.validate().expect("at the limit is fine");
@@ -102,16 +102,9 @@ fn content_type_and_user_metadata_are_bounded() {
     ));
 
     let mut record = sample_record();
-    record
-        .user_metadata
-        .insert("k".to_string(), "v".repeat(MAX_USER_METADATA_BYTES - 1));
-    assert_eq!(record.user_metadata_bytes(), MAX_USER_METADATA_BYTES);
-    record.validate().expect("at the limit is fine");
+    record.user_metadata.insert("k".to_string(), "v".repeat(99));
     record.user_metadata.insert("k2".to_string(), String::new());
-    assert!(matches!(
-        record.validate(),
-        Err(RecordError::UserMetadataTooLarge(_))
-    ));
+    assert_eq!(record.user_metadata_bytes(), 1 + 99 + 2);
 }
 
 #[test]

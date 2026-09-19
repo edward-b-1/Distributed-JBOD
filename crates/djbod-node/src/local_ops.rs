@@ -16,8 +16,9 @@ use djbod_core::shardfile::{ShardFileError, ShardFileHeader};
 use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, Message,
-    RecordCursor, Request, Response, ScrubItem, StreamEnd, MAX_LIST_PAGE_BYTES,
+    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
+    LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
+    MAX_LIST_PAGE_BYTES,
 };
 
 use crate::node::{Node, NodeError, ShardWriteKey};
@@ -35,8 +36,8 @@ pub async fn handle(
 ) -> Result<(), ConnectionEnd> {
     let outcome: Result<(), Failure> = match request {
         Request::LocalStatus => respond(writer, id, local_status(node).await).await,
-        Request::LocalLookup { key_hash } => {
-            respond(writer, id, local_lookup(node, key_hash).await).await
+        Request::LocalLookup { key_hash, after } => {
+            respond(writer, id, local_lookup(node, key_hash, after).await).await
         }
         Request::LocalList(query) => respond(writer, id, local_list(node, query).await).await,
         Request::LocalRecords { device, after } => {
@@ -311,7 +312,15 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
     })
 }
 
-async fn local_lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Response, Failure> {
+/// Every record copy under `key_hash` on this node's devices, sorted by
+/// version then device, in frame-sized pages (15.2.2): a record may be
+/// as large as the document's user metadata limit allows, and a node
+/// may hold many copies of one version.
+async fn local_lookup(
+    node: &Arc<Node>,
+    key_hash: KeyHash,
+    after: Option<LookupCursor>,
+) -> Result<Response, Failure> {
     let mut records = Vec::new();
     for device in node.devices() {
         let id = device.id();
@@ -325,7 +334,33 @@ async fn local_lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Response, F
             records.push(LocatedRecord { device: id, record });
         }
     }
-    Ok(Response::LocalLookup { records })
+    records.sort_by(|a, b| {
+        a.record
+            .version
+            .cmp(&b.record.version)
+            .then(a.device.cmp(&b.device))
+    });
+    if let Some(after) = after {
+        records.retain(|r| (r.record.version, r.device) > (after.version, after.device));
+    }
+    let mut page = Vec::new();
+    let mut bytes = 0usize;
+    let mut truncated = false;
+    for located in records {
+        let encoded = djbod_proto::codec::encode_cbor(&located)
+            .map_err(|e| Failure::Error(ErrorDetail::new(ErrorCode::Internal, e.to_string())))?
+            .len();
+        if !page.is_empty() && bytes + encoded > MAX_LIST_PAGE_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += encoded;
+        page.push(located);
+    }
+    Ok(Response::LocalLookup {
+        records: page,
+        truncated,
+    })
 }
 
 /// Every readable record on one device, sorted by key then version, for

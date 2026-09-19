@@ -440,7 +440,9 @@ async fn set_limits_from_the_command_line() {
     );
     assert!(ok, "{err}");
     assert!(
-        out.contains("max object size 4096 bytes (document version 2)"),
+        out.contains(
+            "max object size 4096 bytes, max user metadata 10485760 bytes (document version 2)"
+        ),
         "{out}"
     );
     let (ok, _, err) = djbod(&test, &["put", "big", big.to_str().unwrap()]);
@@ -464,9 +466,24 @@ async fn set_limits_from_the_command_line() {
         "{err}"
     );
     let (ok, _, _) = djbod(&test, &["cluster", "set-limits"]);
-    assert!(!ok, "one of the two flags is required");
+    assert!(!ok, "one of the three flags is required");
+    let (ok, out, err) = djbod(
+        &test,
+        &[
+            "cluster",
+            "set-limits",
+            "--max-user-metadata-bytes",
+            "1000000",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("max user metadata 1000000 bytes"), "{out}");
     let (ok, out, _) = djbod(&test, &["cluster-config"]);
     assert!(ok);
     assert!(out.contains("\"max_key_bytes\": 3"), "{out}");
     assert!(out.contains("\"max_object_bytes\": 4096"), "{out}");
+    assert!(
+        out.contains("\"max_user_metadata_bytes\": 1000000"),
+        "{out}"
+    );
 }
