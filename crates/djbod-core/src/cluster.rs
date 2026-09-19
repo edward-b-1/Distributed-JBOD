@@ -57,6 +57,43 @@ pub struct NodeEntry {
     pub addresses: Vec<String>,
 }
 
+/// How connections are made and accepted (SPEC 19.1.6.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Transport {
+    /// Plain TCP everywhere; no TLS material required.
+    #[default]
+    Plain,
+    /// Nodes speak mutual TLS to each other; clients may use either.
+    TlsOptional,
+    /// TLS only; clients must present a certificate.
+    Tls,
+}
+
+impl std::fmt::Display for Transport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Transport::Plain => "plain",
+            Transport::TlsOptional => "tls-optional",
+            Transport::Tls => "tls",
+        })
+    }
+}
+
+impl std::str::FromStr for Transport {
+    type Err = String;
+    fn from_str(text: &str) -> Result<Transport, String> {
+        match text {
+            "plain" => Ok(Transport::Plain),
+            "tls-optional" => Ok(Transport::TlsOptional),
+            "tls" => Ok(Transport::Tls),
+            other => Err(format!(
+                "{other:?} is not a transport; use plain, tls-optional, or tls"
+            )),
+        }
+    }
+}
+
 /// SPEC 6.2.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,6 +140,9 @@ pub struct ClusterDocument {
     /// bytes (9.4.2). Absent means the default.
     #[serde(default = "default_max_user_metadata_bytes")]
     pub max_user_metadata_bytes: u64,
+    /// Plain or TLS (19.1.6.4). Absent means `plain`.
+    #[serde(default)]
+    pub transport: Transport,
     pub nodes: Vec<NodeEntry>,
     pub devices: Vec<DeviceEntry>,
 }
@@ -210,6 +250,7 @@ mod tests {
             max_key_bytes: DEFAULT_MAX_KEY_BYTES,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
             max_user_metadata_bytes: DEFAULT_MAX_USER_METADATA_BYTES,
+            transport: Transport::Plain,
             nodes: vec![
                 NodeEntry {
                     id: node_a,
@@ -337,6 +378,22 @@ mod tests {
             doc.validate(),
             Err(ClusterDocumentError::BadMetadataLimit(_))
         ));
+    }
+
+    #[test]
+    fn transport_defaults_to_plain_and_uses_kebab_case_names() {
+        let mut value: serde_json::Value =
+            serde_json::to_value(sample()).expect("document serializes");
+        value.as_object_mut().expect("object").remove("transport");
+        let parsed: ClusterDocument = serde_json::from_value(value).expect("parses without it");
+        assert_eq!(parsed.transport, Transport::Plain);
+        let mut doc = sample();
+        doc.transport = Transport::TlsOptional;
+        let json = serde_json::to_string(&doc).expect("serializes");
+        assert!(json.contains("\"transport\":\"tls-optional\""), "{json}");
+        assert_eq!("tls".parse::<Transport>(), Ok(Transport::Tls));
+        assert!("optional".parse::<Transport>().is_err());
+        assert_eq!(Transport::TlsOptional.to_string(), "tls-optional");
     }
 
     #[test]

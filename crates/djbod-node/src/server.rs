@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use tokio::io::BufReader;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
@@ -13,6 +12,7 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, Message, Response};
 use crate::coordinator;
 use crate::local_ops;
 use crate::node::Node;
+use crate::transport::{self, Accepted};
 use crate::wire::{read_message, write_message, WireError};
 
 /// Why a connection was closed. Every connection ends with one of these;
@@ -34,8 +34,8 @@ impl From<WireError> for ConnectionEnd {
     }
 }
 
-pub type Reader = BufReader<OwnedReadHalf>;
-pub type Writer = OwnedWriteHalf;
+pub type Reader = BufReader<tokio::io::ReadHalf<transport::Stream>>;
+pub type Writer = tokio::io::WriteHalf<transport::Stream>;
 
 /// Accept connections forever, one task each.
 /// Accept connections until the node is removed from the cluster
@@ -59,7 +59,8 @@ pub async fn serve(node: Arc<Node>, listener: TcpListener) {
                     "connection",
                     %peer,
                     kind = tracing::field::Empty,
-                    node = tracing::field::Empty
+                    node = tracing::field::Empty,
+                    tls = tracing::field::Empty
                 );
                 tokio::spawn(
                     async move {
@@ -91,10 +92,33 @@ pub fn our_hello(node: &Node) -> Hello {
 }
 
 async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd {
-    if let Err(e) = stream.set_nodelay(true) {
-        return ConnectionEnd::Wire(WireError::Io(e));
-    }
-    let (read_half, write_half) = stream.into_split();
+    // Plain or TLS, by the first byte (SPEC 19.1.6.4).
+    let transport = node.document().transport;
+    let stream = match transport::accept(stream, node.tls().map(|m| m.as_ref()), transport).await {
+        Ok(Accepted::Stream(stream)) => stream,
+        Ok(Accepted::PlainRefused(mut tcp)) => {
+            let detail = ErrorDetail {
+                node: Some(node.id()),
+                ..ErrorDetail::new(
+                    ErrorCode::TlsRequired,
+                    "this cluster's transport is tls; plain connections are refused (SPEC 19.1.6.4)",
+                )
+            };
+            let _ = write_message(
+                &mut tcp,
+                &Message::Response {
+                    id: 0,
+                    response: Response::Error(detail),
+                },
+            )
+            .await;
+            return ConnectionEnd::HelloRefused("plain connection under transport tls".to_string());
+        }
+        Err(e) => return ConnectionEnd::Wire(WireError::Io(e)),
+    };
+    node.count_accepted(stream.is_tls());
+    tracing::Span::current().record("tls", stream.is_tls());
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut writer = write_half;
 

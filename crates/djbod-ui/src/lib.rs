@@ -33,8 +33,10 @@
 //! node refused, so the administrator sees the same identifying detail
 //! the command line prints.
 //!
-//! There is no authentication, as there is none on the native protocol
-//! yet (19.1.6); the server binds to localhost by default.
+//! The HTTP side has no authentication of its own, so the server binds
+//! to localhost by default. Towards the cluster it connects as the
+//! `djbod` client does: plain, or TLS with the same `--tls-ca`,
+//! `--tls-cert`, and `--tls-key` settings (19.1.6.2).
 
 use std::io;
 use std::net::SocketAddr;
@@ -57,17 +59,20 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_node::membership::{self, MembershipError};
+use djbod_node::transport::Connector;
 use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response as Reply};
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
 
-/// Which cluster the UI administers: any node's address and the cluster
-/// id, the same two values the command-line client needs.
-#[derive(Debug, Clone, Copy)]
+/// Which cluster the UI administers and how to reach it: any node's
+/// address, the cluster id, and the connector (plain or TLS), the same
+/// values the command-line client needs.
+#[derive(Clone)]
 pub struct Target {
     pub node: SocketAddr,
     pub cluster: Uuid,
+    pub connector: Connector,
 }
 
 /// The whole application: the page at `/` and the API under `/api`.
@@ -179,7 +184,12 @@ impl IntoResponse for ApiError {
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
 async fn connect(target: &Target) -> ApiResult<Connection> {
-    Ok(Connection::connect(target.node, Connection::client_hello(target.cluster)).await?)
+    Ok(Connection::connect_with(
+        &target.connector,
+        target.node,
+        Connection::client_hello(target.cluster),
+    )
+    .await?)
 }
 
 fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
@@ -212,8 +222,9 @@ async fn status(State(target): State<Arc<Target>>) -> ApiResult {
 /// The document as the target node holds it, and what every node listed
 /// in it answers when asked for its own version (`djbod cluster show`).
 async fn cluster(State(target): State<Arc<Target>>) -> ApiResult {
-    let document = membership::fetch_document(target.node, target.cluster).await?;
-    let reports = membership::fetch_all(&document).await;
+    let document =
+        membership::fetch_document(&target.connector, target.node, target.cluster).await?;
+    let reports = membership::fetch_all(&target.connector, &document).await;
     let nodes: Vec<Value> = reports
         .iter()
         .map(|r| {
@@ -229,7 +240,7 @@ async fn cluster(State(target): State<Arc<Target>>) -> ApiResult {
 }
 
 async fn cluster_sync(State(target): State<Arc<Target>>) -> ApiResult {
-    let report = membership::sync(target.node, target.cluster).await?;
+    let report = membership::sync(&target.connector, target.node, target.cluster).await?;
     Ok(Json(json!({
         "highest_version": report.highest_version,
         "updated": report.updated,
@@ -249,9 +260,15 @@ async fn cluster_scheme(
     State(target): State<Arc<Target>>,
     Json(body): Json<SchemeBody>,
 ) -> ApiResult {
-    let (document, changed) =
-        membership::set_scheme(target.node, target.cluster, body.k, body.m, body.block_size)
-            .await?;
+    let (document, changed) = membership::set_scheme(
+        &target.connector,
+        target.node,
+        target.cluster,
+        body.k,
+        body.m,
+        body.block_size,
+    )
+    .await?;
     Ok(Json(json!({
         "k": document.k,
         "m": document.m,
@@ -279,6 +296,7 @@ async fn cluster_limits(
         return Err(ApiError::BadRequest("no limit given".to_string()));
     }
     let (document, changed) = membership::set_limits(
+        &target.connector,
         target.node,
         target.cluster,
         body.max_key_bytes,
@@ -612,8 +630,14 @@ async fn set_device_state(
             "a device is removed with the remove action, after draining".to_string(),
         ));
     }
-    let (document, changed) =
-        membership::set_device_state(target.node, target.cluster, device, body.state).await?;
+    let (document, changed) = membership::set_device_state(
+        &target.connector,
+        target.node,
+        target.cluster,
+        device,
+        body.state,
+    )
+    .await?;
     Ok(Json(json!({
         "device": device,
         "state": body.state,
@@ -625,7 +649,7 @@ async fn set_device_state(
 async fn remove_device(State(target): State<Arc<Target>>, Path(id): Path<String>) -> ApiResult {
     let device = DeviceId(parse_id(&id, "device")?);
     let (document, changed) =
-        membership::remove_device(target.node, target.cluster, device).await?;
+        membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
     Ok(Json(json!({
         "device": device,
         "document_version": document.version,
@@ -635,7 +659,8 @@ async fn remove_device(State(target): State<Arc<Target>>, Path(id): Path<String>
 
 async fn remove_node(State(target): State<Arc<Target>>, Path(id): Path<String>) -> ApiResult {
     let node = NodeId(parse_id(&id, "node")?);
-    let document = membership::remove_node(target.node, target.cluster, node).await?;
+    let document =
+        membership::remove_node(&target.connector, target.node, target.cluster, node).await?;
     Ok(Json(json!({
         "node": node,
         "document_version": document.version,

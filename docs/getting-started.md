@@ -171,9 +171,12 @@ Two things stay on the command line: `cluster remove-node --force`, which
 asks for a typed confirmation after showing what will be lost, and
 `cluster reencode`, which streams every object through the client.
 
-The server has no authentication and no TLS, like the native protocol in
-this version, so keep it on localhost and reach it from another machine
-through an SSH tunnel: `ssh -L 5264:127.0.0.1:5264 <host>`. The JSON API
+Towards the cluster it connects as the client does, so a `tls` cluster
+needs the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings, or
+their `DJBOD_TLS_*` variables. The HTTP side has no authentication and
+no TLS, so keep it on localhost and reach it from another machine through
+an SSH tunnel, `ssh -L 5264:127.0.0.1:5264 <host>`, or bind it to a LAN
+address with `--listen` only on a network you trust. The JSON API
 it serves under `/api/` is documented at the top of
 `crates/djbod-ui/src/lib.rs`.
 

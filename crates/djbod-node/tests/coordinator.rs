@@ -17,6 +17,7 @@ use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
+use djbod_node::transport::Connector;
 use djbod_proto::message::{
     ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent, ShardCondition,
 };
@@ -61,6 +62,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: true,
+        tls: None,
     };
     let parameters = ClusterParameters {
         k,
@@ -1033,10 +1035,15 @@ async fn move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged() 
 }
 
 async fn set_state(test: &TestNode, device: DeviceId, state: DeviceState) -> bool {
-    let (_, changed) =
-        membership::set_device_state(test.addr, test.node.cluster_id(), device, state)
-            .await
-            .expect("set state");
+    let (_, changed) = membership::set_device_state(
+        &Connector::plain(),
+        test.addr,
+        test.node.cluster_id(),
+        device,
+        state,
+    )
+    .await
+    .expect("set state");
     changed
 }
 
@@ -1123,6 +1130,7 @@ async fn set_state_changes_placement_and_nothing_else() {
         DeviceState::Active
     );
     match membership::set_device_state(
+        &Connector::plain(),
         test.addr,
         test.node.cluster_id(),
         DeviceId(Uuid::new_v4()),

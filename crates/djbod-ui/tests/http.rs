@@ -12,6 +12,7 @@ use uuid::Uuid;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
+use djbod_node::transport::Connector;
 use djbod_ui::{router, Target};
 use tokio::net::TcpListener;
 
@@ -38,6 +39,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: true,
+        tls: None,
     };
     let parameters = ClusterParameters {
         k,
@@ -60,6 +62,7 @@ fn app(test: &TestNode) -> axum::Router {
     router(Target {
         node: test.addr,
         cluster: test.node.cluster_id(),
+        connector: Connector::plain(),
     })
 }
 
@@ -561,6 +564,7 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let target = Target {
         node: "127.0.0.1:1".parse().unwrap(),
         cluster: Uuid::new_v4(),
+        connector: Connector::plain(),
     };
     let response = router(target)
         .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())

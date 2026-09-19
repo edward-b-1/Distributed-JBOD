@@ -5,17 +5,20 @@
 //! djbod-ui --node 10.0.0.1:5263 --cluster <uuid> [--listen 127.0.0.1:5264]
 //! ```
 //!
-//! `--node` and `--cluster` may also come from `DJBOD_NODE` and
-//! `DJBOD_CLUSTER`, as for the `djbod` client. The server has no
-//! authentication and listens on localhost unless told otherwise.
+//! `--node`, `--cluster`, and the `--tls-*` settings may also come from
+//! the same environment variables as for the `djbod` client, and mean
+//! the same. The HTTP side has no authentication and listens on
+//! localhost unless told otherwise.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::Context;
 use clap::Parser;
 use uuid::Uuid;
 
+use djbod_node::transport::{ClientTlsPaths, Connector};
 use djbod_ui::{router, Target};
 
 #[derive(Parser)]
@@ -34,6 +37,36 @@ struct Cli {
     /// Address to serve the UI on.
     #[arg(long, default_value = "127.0.0.1:5264")]
     listen: SocketAddr,
+    /// The cluster's PEM certificate authority (or bundle). Given alone,
+    /// connections to the node are encrypted but present no certificate.
+    #[arg(long, env = "DJBOD_TLS_CA")]
+    tls_ca: Option<PathBuf>,
+    /// This client's PEM certificate; needs --tls-key and --tls-ca.
+    #[arg(long, env = "DJBOD_TLS_CERT", requires_all = ["tls_key", "tls_ca"])]
+    tls_cert: Option<PathBuf>,
+    /// This client's PEM private key, readable only by its owner.
+    #[arg(long, env = "DJBOD_TLS_KEY", requires_all = ["tls_cert", "tls_ca"])]
+    tls_key: Option<PathBuf>,
+}
+
+/// How the UI connects to the node (SPEC 19.1.6.2), exactly as the
+/// `djbod` client decides it: TLS when a CA is given, with a certificate
+/// when one is given too, plain otherwise.
+fn connector(cli: &Cli) -> anyhow::Result<Connector> {
+    match &cli.tls_ca {
+        None => Ok(Connector::plain()),
+        Some(ca) => {
+            let identity = match (&cli.tls_cert, &cli.tls_key) {
+                (Some(cert), Some(key)) => Some((cert.clone(), key.clone())),
+                _ => None,
+            };
+            Connector::from_client_paths(&ClientTlsPaths {
+                ca: ca.clone(),
+                identity,
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
 }
 
 #[tokio::main]
@@ -52,14 +85,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     let target = Target {
         node: cli.node,
         cluster: cli.cluster,
+        connector: connector(&cli)?,
     };
     let listener = tokio::net::TcpListener::bind(cli.listen)
         .await
         .with_context(|| format!("listening on {}", cli.listen))?;
     let address = listener.local_addr()?;
     eprintln!(
-        "djbod-ui serving http://{address}/ for cluster {} via node {}",
-        target.cluster, target.node
+        "djbod-ui serving http://{address}/ for cluster {} via node {}{}",
+        target.cluster,
+        target.node,
+        if cli.tls_ca.is_some() {
+            " over TLS"
+        } else {
+            ""
+        }
     );
     axum::serve(listener, router(target))
         .with_graceful_shutdown(async {

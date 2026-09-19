@@ -1785,13 +1785,13 @@ each stripe it had to reconstruct.
 ### 20.3 Administration
 
 20.3.1 [D] A web UI for administration (cluster status, device states,
-drain and repair, errors) is the `djbod-ui` binary (C.4.5). Every
+drain and repair, errors) is the `djbod-ui` binary (C.4.6). Every
 administrative action it performs must also be available as a command-line
 operation over the native protocol, and it is: the UI is a translation of
 HTTP calls onto the same native operations and membership procedures the
 `djbod` client uses, holds no state of its own, and can run beside it.
-It has no authentication until the protocol has (19.1.6), so it binds to
-localhost by default. Forced node removal (6.2.6.3), which needs a typed
+Its HTTP side has no authentication, so it binds to localhost by
+default; towards the cluster it uses the client's TLS settings (19.1.6.2). Forced node removal (6.2.6.3), which needs a typed
 confirmation, and re-encode (18.9), a long client-driven migration, stay
 on the command line.
 
@@ -2120,6 +2120,9 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    sources rule of 20.6 applied to the existing settings; (d) the
    getting-started walkthrough for issuing a CA and certificates with
    `openssl`.
+6. **Administration web UI** (20.3.1). One page and a JSON API in a
+   separate binary, each call one native operation or membership
+   procedure; connects to the cluster as the client does, including TLS.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
@@ -2191,7 +2194,7 @@ streamed GET into a PUT per version. Step (e): `max_key_bytes` and
 init-cluster --max-key-bytes --max-object-bytes`, and `djbod cluster
 set-limits`; settles 21.3. Every step of C.4 is built.
 
-C.4.5 **Milestone 5 status, 19 September 2026: the administration web
+C.4.6 **Milestone 6 status, 19 September 2026: the administration web
 UI (20.3.1) is built.** The `djbod-ui` crate serves one page and a JSON
 API with `axum` on a local HTTP port; `Status`, `ListKeys`, `HeadObject`,
 `DeleteObject`, `RepairObject`, `MoveShard`, and the membership
@@ -2200,8 +2203,10 @@ procedures (`set_device_state`, `remove_device`, `remove_node`, `sync`,
 `GetObject` stream the body through in both directions without holding
 it; `Scrub` and `Drain` are relayed as newline-delimited JSON events so
 the page shows progress as it happens. Node errors are returned with
-every field of 16.2. Tested against a node started in-process, including
-a damaged shard read through the UI and repaired from it.
+every field of 16.2. It connects to the node as the `djbod` client does,
+taking the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings
+(19.1.6.2). Tested against a node started in-process, including a
+damaged shard read through the UI and repaired from it.
 
 C.5 [P] **Testing stance.** Devices in tests are ordinary directories.
 Multi-node tests run real node processes on one machine. Every failure

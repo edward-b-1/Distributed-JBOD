@@ -162,7 +162,10 @@ fn node_address(node: &Node, target: NodeId) -> Result<SocketAddr, Failure> {
 /// Open a node-to-node connection to `target`, which may be this node.
 async fn connect_to(node: &Node, target: NodeId) -> Result<Connection, Failure> {
     let address = node_address(node, target)?;
-    Connection::connect(address, our_hello(node))
+    let connector = node
+        .connector()
+        .map_err(|e| error(ErrorCode::TlsRequired, e.to_string()))?;
+    Connection::connect_with(&connector, address, our_hello(node))
         .await
         .map_err(|e| match e {
             // The peer answered and refused our Hello: it holds a different
@@ -454,6 +457,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
         cluster_id: document.cluster_id,
         document_version: document.version,
         coordinator: node.id(),
+        transport: document.transport,
         devices,
     })
 }

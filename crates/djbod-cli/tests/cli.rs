@@ -7,6 +7,7 @@ use std::sync::Arc;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
+use djbod_node::transport::TlsPaths;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -30,6 +31,10 @@ struct TestNode {
 }
 
 async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
+    start_node_with_tls(device_count, k, m, None).await
+}
+
+async fn start_node_with_tls(device_count: usize, k: u8, m: u8, tls: Option<TlsPaths>) -> TestNode {
     let dirs: Vec<tempfile::TempDir> = (0..device_count)
         .map(|_| tempfile::tempdir().expect("temp dir"))
         .collect();
@@ -45,6 +50,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
         bootstrap_peers: vec![],
         temporary_max_age_secs: 3600,
         allow_shared_filesystem: true,
+        tls,
     };
     let parameters = ClusterParameters {
         k,
@@ -492,4 +498,165 @@ async fn set_limits_from_the_command_line() {
         out.contains("\"max_user_metadata_bytes\": 1000000"),
         "{out}"
     );
+}
+
+/// A certificate authority for the TLS test, issuing PEM files the way an
+/// administrator would with openssl (SPEC 19.1.6.1).
+struct Authority {
+    dir: tempfile::TempDir,
+    ca_cert: rcgen::Certificate,
+    ca_key: rcgen::KeyPair,
+    issued: usize,
+}
+
+impl Authority {
+    fn new() -> Authority {
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
+        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "djbod cli test CA");
+        let ca_key = KeyPair::generate().expect("key");
+        let ca_cert = params.self_signed(&ca_key).expect("self-signed");
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("ca.crt"), ca_cert.pem()).expect("write");
+        Authority {
+            dir,
+            ca_cert,
+            ca_key,
+            issued: 0,
+        }
+    }
+
+    fn ca(&self) -> String {
+        self.dir.path().join("ca.crt").to_str().unwrap().to_string()
+    }
+
+    fn issue(&mut self, host: &str) -> TlsPaths {
+        use std::os::unix::fs::PermissionsExt;
+        self.issued += 1;
+        let params = rcgen::CertificateParams::new(vec![host.to_string()]).expect("params");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = params
+            .signed_by(&key, &self.ca_cert, &self.ca_key)
+            .expect("signed");
+        let cert_path = self.dir.path().join(format!("{}.crt", self.issued));
+        let key_path = self.dir.path().join(format!("{}.key", self.issued));
+        std::fs::write(&cert_path, cert.pem()).expect("write");
+        std::fs::write(&key_path, key.serialize_pem()).expect("write");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        TlsPaths {
+            cert: cert_path,
+            key: key_path,
+            ca: self.dir.path().join("ca.crt"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_client_speaks_tls_with_flags_or_environment() {
+    let mut authority = Authority::new();
+    let test = start_node_with_tls(2, 1, 1, Some(authority.issue("127.0.0.1"))).await;
+    let admin = authority.issue("admin-laptop");
+    let ca = authority.ca();
+    let cert = admin.cert.to_str().unwrap();
+    let key = admin.key.to_str().unwrap();
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("in.bin");
+    std::fs::write(&input, xorshift64_bytes(100_000, 8)).expect("write");
+
+    // Plain cluster: plain and TLS clients both work.
+    let (ok, out, err) = djbod(&test, &["status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("transport plain"), "{out}");
+    let (ok, _, err) = djbod(
+        &test,
+        &[
+            "--tls-ca",
+            &ca,
+            "--tls-cert",
+            cert,
+            "--tls-key",
+            key,
+            "put",
+            "k",
+            input.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "{err}");
+
+    // tls: the plain client is told why it was refused; --tls-ca alone
+    // (no client certificate) is refused too; the full identity works,
+    // as flags and as environment variables.
+    let (ok, _, err) = djbod(&test, &["cluster", "set-transport", "tls"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = djbod(&test, &["status"]);
+    assert!(!ok);
+    assert!(err.contains("TlsRequired"), "{err}");
+    let (ok, _, err) = djbod(&test, &["--tls-ca", &ca, "status"]);
+    assert!(
+        !ok,
+        "an anonymous TLS client must be refused under transport tls"
+    );
+    assert!(!err.is_empty());
+    let (ok, out, err) = djbod(
+        &test,
+        &[
+            "--tls-ca",
+            &ca,
+            "--tls-cert",
+            cert,
+            "--tls-key",
+            key,
+            "status",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("transport tls"), "{out}");
+    let copy = dir.path().join("copy.bin");
+    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        .env("DJBOD_NODE", test.addr.to_string())
+        .env("DJBOD_CLUSTER", test.node.cluster_id().to_string())
+        .env("DJBOD_TLS_CA", &ca)
+        .env("DJBOD_TLS_CERT", cert)
+        .env("DJBOD_TLS_KEY", key)
+        .args(["get", "k", copy.to_str().unwrap()])
+        .output()
+        .expect("run djbod");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&copy).expect("read"),
+        std::fs::read(&input).expect("read")
+    );
+    // --tls-cert without --tls-key is a usage error.
+    let (ok, _, err) = djbod(&test, &["--tls-ca", &ca, "--tls-cert", cert, "status"]);
+    assert!(!ok);
+    assert!(err.contains("--tls-key"), "{err}");
+
+    // tls-optional: an anonymous TLS client is accepted, and so is plain.
+    let (ok, _, err) = djbod(
+        &test,
+        &[
+            "--tls-ca",
+            &ca,
+            "--tls-cert",
+            cert,
+            "--tls-key",
+            key,
+            "cluster",
+            "set-transport",
+            "tls-optional",
+        ],
+    );
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["--tls-ca", &ca, "status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("transport tls-optional"), "{out}");
+    let (ok, _, err) = djbod(&test, &["head", "k"]);
+    assert!(ok, "{err}");
 }

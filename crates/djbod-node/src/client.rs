@@ -4,9 +4,9 @@
 use std::net::SocketAddr;
 
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpStream;
+use tokio::io::{
+    AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf,
+};
 use uuid::Uuid;
 
 use djbod_core::checksum::checksum_block;
@@ -16,6 +16,7 @@ use djbod_core::stripe::ShardBlock;
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{DataFrame, ErrorDetail, Message, Request, Response, StreamEnd};
 
+use crate::transport::{Connector, Stream};
 use crate::wire::{read_message, write_message, WireError};
 
 #[derive(Debug, Error)]
@@ -42,25 +43,38 @@ pub enum StreamItem {
 }
 
 pub struct Connection {
-    reader: BufReader<OwnedReadHalf>,
-    writer: OwnedWriteHalf,
+    reader: BufReader<ReadHalf<Stream>>,
+    writer: WriteHalf<Stream>,
     peer_hello: Hello,
     next_request_id: u32,
+    tls: bool,
 }
 
 impl Connection {
-    /// Connect, send our `Hello`, and read the peer's. The peer's `Hello`
-    /// is checked against the cluster id we expect; a node peer's document
-    /// version is not checked here, since a client has none to compare.
+    /// Connect over plain TCP, send our `Hello`, and read the peer's. See
+    /// `connect_with` for TLS.
     pub async fn connect(addr: SocketAddr, our_hello: Hello) -> Result<Connection, ClientError> {
-        let stream = TcpStream::connect(addr).await.map_err(WireError::Io)?;
-        stream.set_nodelay(true).map_err(WireError::Io)?;
-        let (read_half, write_half) = stream.into_split();
+        Connection::connect_with(&Connector::plain(), addr, our_hello).await
+    }
+
+    /// Connect as `connector` says (plain or TLS, SPEC 19.1.6), send our
+    /// `Hello`, and read the peer's. The peer's `Hello` is checked against
+    /// the cluster id we expect; a node peer's document version is not
+    /// checked here, since a client has none to compare.
+    pub async fn connect_with(
+        connector: &Connector,
+        addr: SocketAddr,
+        our_hello: Hello,
+    ) -> Result<Connection, ClientError> {
+        let stream = connector.connect(addr).await.map_err(WireError::Io)?;
+        let tls = stream.is_tls();
+        let (read_half, write_half) = tokio::io::split(stream);
         let mut connection = Connection {
             reader: BufReader::new(read_half),
             writer: write_half,
             peer_hello: our_hello.clone(),
             next_request_id: 1,
+            tls,
         };
         write_message(&mut connection.writer, &Message::Hello(our_hello.clone())).await?;
         match read_message(&mut connection.reader).await? {
@@ -89,6 +103,11 @@ impl Connection {
 
     pub fn peer_hello(&self) -> &Hello {
         &self.peer_hello
+    }
+
+    /// Whether this connection is encrypted.
+    pub fn is_tls(&self) -> bool {
+        self.tls
     }
 
     /// The `Hello` a client (not a node) sends.

@@ -29,6 +29,7 @@ use uuid::Uuid;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, DEFAULT_BODY_CHUNK};
+use djbod_node::transport::{ClientTlsPaths, Connector};
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
 
 #[derive(Parser)]
@@ -43,8 +44,37 @@ struct Cli {
     /// Print results as JSON.
     #[arg(long, global = true)]
     json: bool,
+    /// The cluster's PEM certificate authority (or bundle). Given alone,
+    /// connections are encrypted but present no client certificate.
+    #[arg(long, env = "DJBOD_TLS_CA", global = true)]
+    tls_ca: Option<PathBuf>,
+    /// This client's PEM certificate; needs --tls-key and --tls-ca.
+    #[arg(long, env = "DJBOD_TLS_CERT", global = true, requires_all = ["tls_key", "tls_ca"])]
+    tls_cert: Option<PathBuf>,
+    /// This client's PEM private key, readable only by its owner.
+    #[arg(long, env = "DJBOD_TLS_KEY", global = true, requires_all = ["tls_cert", "tls_ca"])]
+    tls_key: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
+}
+
+/// How this client connects (SPEC 19.1.6.2): TLS when a CA is given,
+/// with a certificate when one is given too, plain otherwise.
+fn connector(cli: &Cli) -> anyhow::Result<Connector> {
+    match &cli.tls_ca {
+        None => Ok(Connector::plain()),
+        Some(ca) => {
+            let identity = match (&cli.tls_cert, &cli.tls_key) {
+                (Some(cert), Some(key)) => Some((cert.clone(), key.clone())),
+                _ => None,
+            };
+            Connector::from_client_paths(&ClientTlsPaths {
+                ca: ca.clone(),
+                identity,
+            })
+            .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -146,6 +176,10 @@ enum ClusterCommand {
     /// Rewrite every object still at a scheme or block size other than
     /// the document's, one at a time. Safe to interrupt and rerun.
     Reencode,
+    /// Change how connections are made: plain, tls-optional, or tls
+    /// (SPEC 19.1.6.4). Moving off plain needs every node to have TLS
+    /// material loaded.
+    SetTransport { transport: DeviceTransport },
     /// Change the key length, object size, or user metadata limit.
     /// Applies to new writes; existing objects are untouched.
     SetLimits {
@@ -185,6 +219,13 @@ enum StateArg {
     Active,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum DeviceTransport {
+    Plain,
+    TlsOptional,
+    Tls,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -204,7 +245,7 @@ async fn connect(cli: &Cli) -> anyhow::Result<Connection> {
     let cluster = cli
         .cluster
         .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
-    Connection::connect(node, Connection::client_hello(cluster))
+    Connection::connect_with(&connector(cli)?, node, Connection::client_hello(cluster))
         .await
         .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
         .with_context(|| format!("connecting to {node}"))
@@ -256,6 +297,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     cluster_id,
                     document_version,
                     coordinator,
+                    transport,
                     devices,
                 } => {
                     if cli.json {
@@ -265,6 +307,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 "cluster_id": cluster_id,
                                 "document_version": document_version,
                                 "coordinator": coordinator,
+                                "transport": transport.to_string(),
                                 "devices": devices,
                             }))?
                         );
@@ -272,6 +315,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("cluster   {cluster_id}");
                         println!("document  version {document_version}");
                         println!("answered  by node {}", coordinator.0);
+                        println!("transport {transport}");
                         println!();
                         println!(
                             "{:<36}  {:<36}  {:<9}  {:>12}  {:>12}",
@@ -630,10 +674,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
             match command {
                 ClusterCommand::Show => {
-                    let document = djbod_node::membership::fetch_document(node, cluster)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
-                    let reports = djbod_node::membership::fetch_all(&document).await;
+                    let document =
+                        djbod_node::membership::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let reports =
+                        djbod_node::membership::fetch_all(&connector(&cli)?, &document).await;
                     if cli.json {
                         let rows: Vec<serde_json::Value> = reports
                             .iter()
@@ -667,6 +713,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         StateArg::Active => DeviceState::Active,
                     };
                     let (document, changed) = djbod_node::membership::set_device_state(
+                        &connector(&cli)?,
                         node,
                         cluster,
                         DeviceId(*device),
@@ -702,9 +749,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     let devices: Vec<Uuid> = match (device, node_id) {
                         (Some(device), _) => vec![*device],
                         (None, Some(node_id)) => {
-                            let document = djbod_node::membership::fetch_document(node, cluster)
-                                .await
-                                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                            let document = djbod_node::membership::fetch_document(
+                                &connector(&cli)?,
+                                node,
+                                cluster,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                             let found: Vec<Uuid> = document
                                 .devices
                                 .iter()
@@ -729,10 +780,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 ClusterCommand::SetScheme { k, m, block_size } => {
-                    let (document, changed) =
-                        djbod_node::membership::set_scheme(node, cluster, *k, *m, *block_size)
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let (document, changed) = djbod_node::membership::set_scheme(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        *k,
+                        *m,
+                        *block_size,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let behind = count_versions_behind(&cli, &document).await?;
                     if cli.json {
                         println!(
@@ -767,12 +824,48 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
+                ClusterCommand::SetTransport { transport } => {
+                    let transport = match transport {
+                        DeviceTransport::Plain => djbod_core::cluster::Transport::Plain,
+                        DeviceTransport::TlsOptional => djbod_core::cluster::Transport::TlsOptional,
+                        DeviceTransport::Tls => djbod_core::cluster::Transport::Tls,
+                    };
+                    let (document, changed) = djbod_node::membership::set_transport(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        transport,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "transport": document.transport.to_string(),
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if changed {
+                        println!(
+                            "transport is now {} (document version {})",
+                            document.transport, document.version
+                        );
+                    } else {
+                        println!(
+                            "transport was already {}; nothing changed",
+                            document.transport
+                        );
+                    }
+                }
                 ClusterCommand::SetLimits {
                     max_key_bytes,
                     max_object_bytes,
                     max_user_metadata_bytes,
                 } => {
                     let (document, changed) = djbod_node::membership::set_limits(
+                        &connector(&cli)?,
                         node,
                         cluster,
                         *max_key_bytes,
@@ -804,19 +897,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 ClusterCommand::Reencode => {
-                    let document = djbod_node::membership::fetch_document(node, cluster)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let document =
+                        djbod_node::membership::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let failures = reencode_all(&cli, &document).await?;
                     if failures > 0 {
                         std::process::exit(2);
                     }
                 }
                 ClusterCommand::RemoveDevice { device } => {
-                    let (document, changed) =
-                        djbod_node::membership::remove_device(node, cluster, DeviceId(*device))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let (document, changed) = djbod_node::membership::remove_device(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        DeviceId(*device),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
                         println!(
                             "{}",
@@ -840,10 +938,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     force: false,
                     ..
                 } => {
-                    let document =
-                        djbod_node::membership::remove_node(node, cluster, NodeId(*node_id))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let document = djbod_node::membership::remove_node(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        NodeId(*node_id),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
                         println!(
                             "{}",
@@ -865,7 +967,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     yes,
                 } => force_remove_node(&cli, node, cluster, NodeId(*node_id), *yes).await?,
                 ClusterCommand::Sync => {
-                    let report = djbod_node::membership::sync(node, cluster)
+                    let report = djbod_node::membership::sync(&connector(&cli)?, node, cluster)
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
@@ -1090,7 +1192,7 @@ async fn force_remove_node(
     yes: bool,
 ) -> anyhow::Result<()> {
     use djbod_node::membership;
-    let plan = membership::plan_forced_removal(peer, cluster, node_id)
+    let plan = membership::plan_forced_removal(&connector(cli)?, peer, cluster, node_id)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let unrecoverable = plan.unrecoverable();
@@ -1137,7 +1239,7 @@ async fn force_remove_node(
             bail!("confirmation did not match; nothing changed");
         }
     }
-    let document = membership::execute_forced_removal(&plan)
+    let document = membership::execute_forced_removal(&connector(cli)?, &plan)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !cli.json {
