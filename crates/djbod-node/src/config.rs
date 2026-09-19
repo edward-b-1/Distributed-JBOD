@@ -16,9 +16,17 @@
 //! ca = "/etc/djbod/ca.crt"          # the cluster's authority, or a bundle
 //! ```
 //!
-//! The `[tls]` paths can also be given as `--tls-cert`, `--tls-key`,
-//! `--tls-ca` or `DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`, `DJBOD_TLS_CA`, which
-//! take precedence in that order (SPEC 20.6).
+//! Every setting can also be given to `djbod-node` as an argument or an
+//! environment variable, which take precedence in that order over the
+//! file (SPEC 20.6): `--node-id`/`DJBOD_NODE_ID`, `--listen`/`DJBOD_LISTEN`,
+//! `--advertise`/`DJBOD_ADVERTISE`, `--state-dir`/`DJBOD_STATE_DIR`,
+//! `--device` (repeatable)/`DJBOD_DEVICES` (comma-separated),
+//! `--bootstrap-peer`/`DJBOD_BOOTSTRAP_PEERS`,
+//! `--temporary-max-age-secs`/`DJBOD_TEMPORARY_MAX_AGE_SECS`,
+//! `--allow-shared-filesystem`/`DJBOD_ALLOW_SHARED_FILESYSTEM`, and
+//! `--tls-cert`, `--tls-key`, `--tls-ca`/`DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`,
+//! `DJBOD_TLS_CA`. The file itself is `--config`/`DJBOD_CONFIG` and may be
+//! omitted when the required settings come from elsewhere.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -90,16 +98,22 @@ pub enum ConfigError {
 
 impl NodeConfig {
     pub fn load(path: &Path) -> Result<NodeConfig, ConfigError> {
+        let config = NodeConfig::read(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Parse the file without validating it, for a caller that will
+    /// overlay arguments and environment variables first (SPEC 20.6).
+    pub fn read(path: &Path) -> Result<NodeConfig, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
-        let config: NodeConfig = toml::from_str(&text).map_err(|e| ConfigError::Parse {
+        toml::from_str(&text).map_err(|e| ConfigError::Parse {
             path: path.to_path_buf(),
             reason: e.to_string(),
-        })?;
-        config.validate()?;
-        Ok(config)
+        })
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -115,6 +129,11 @@ impl NodeConfig {
     }
 
     /// The address other nodes, and this node itself, connect to.
+    /// The listen address when none is given: every interface, port 5263.
+    pub fn default_listen() -> SocketAddr {
+        default_listen()
+    }
+
     pub fn advertised_address(&self) -> SocketAddr {
         self.advertise.unwrap_or(self.listen)
     }
