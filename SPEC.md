@@ -120,11 +120,13 @@ inline.
 
 3.11 [D] Fast listing. Listing is a cluster-wide scan.
 
-3.12 [D] Authentication and encryption. v1 assumes a LAN whose members
-are all trusted: nothing on the wire is authenticated or encrypted, and
-anyone who can reach a node's port can issue any request. Securing the
-network is one piece of later work, TLS (19.1.6), and must remain optional
-for LAN deployments.
+3.12 [D] Authentication and encryption. The default assumes a LAN whose
+members are all trusted: nothing on the wire is authenticated or
+encrypted, and anyone who can reach a node's port can issue any request.
+TLS (19.1.6) is the optional alternative: mutual authentication between
+nodes, client certificates, and encryption of every connection, with the
+certificates issued and managed by the administrator using standard tools.
+Authorisation (which client may do what) is separate and deferred (22).
 
 3.13 [D] S3 compatibility. Planned as a separate stream of work (19.2).
 
@@ -262,10 +264,13 @@ bootstrap peer.
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
 the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
-`max_user_metadata_bytes` (9.4.2), the node list (UUID, addresses), and
-the device list (UUID, owning node, state). The three limits were added
-after the first documents were written; a document without them means
-the defaults. `djbod cluster set-limits` changes them.
+`max_user_metadata_bytes` (9.4.2), the transport mode `transport` (19.1.6:
+`plain`, `tls-optional`, or `tls`; absent means `plain`), the node list
+(UUID, addresses), and the device list (UUID, owning node, state). The
+three limits and the transport were added after the first documents were
+written; a document without them means the defaults. `djbod cluster
+set-limits` and `djbod cluster set-transport` change them. The document
+never holds key material (20.6).
 
 The checksum algorithm and key hash algorithm are **not** configuration.
 They are fixed by the on-disk format version. Changing either is a format
@@ -1596,15 +1601,89 @@ differs (6.2.7), with an error naming which. This catches a node or client
 pointed at the wrong cluster and a node running stale software or
 configuration. It authenticates nothing; see 6.1.2 and 19.1.6.
 
-19.1.6 [X] **TLS.** Deferred, but the intended design is fixed so nothing
-built now conflicts with it. Each node generates a self-signed certificate
-at initialisation; the cluster document lists each node's certificate
-fingerprint beside its id, so a node's identity is its key and trust flows
-from the document the administrator already controls, with no certificate
-authority. Node-to-node connections use mutual TLS; clients present a
-certificate or token issued by the administrator. TLS wraps the byte
-stream beneath the frames, so `djbod-proto` is unchanged. It must remain
-optional for trusted-LAN deployments. Until it exists, 3.12 applies.
+19.1.6 [P] **TLS.** Optional; when enabled it authenticates nodes to each
+other, authenticates clients, and encrypts every connection. TLS wraps
+the byte stream beneath the frames, so `djbod-proto` is unchanged.
+
+19.1.6.1 [P] **One certificate authority per cluster, managed with
+standard tools.** The administrator creates a CA and issues one
+certificate per node and one per client with `openssl` or any tool that
+produces PEM files; djbod generates no keys and signs nothing. A node's
+certificate names the host at which the document lists it, as a DNS or IP
+subject alternative name, so that the ordinary server-name check applies
+when a peer or client connects to it. Certificates carry no djbod-specific
+fields. The getting-started guide gives the commands.
+
+19.1.6.2 [P] **Material lives in files, never in configuration or the
+document.** A node needs three files: its certificate, its private key,
+and the CA certificate (which may be a bundle of several roots, see
+19.1.6.6). Each is named by path, following 20.6: a `djbod-node run` flag
+(`--tls-cert`, `--tls-key`, `--tls-ca`), an environment variable
+(`DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`, `DJBOD_TLS_CA`), or a `[tls]` table in
+the configuration file, in that order of precedence. `djbod` takes the
+same three for the client's certificate, key, and CA, as flags or
+environment variables. The private key file must be readable only by its
+owner; the node refuses to start otherwise.
+
+19.1.6.3 [P] **Verification.** A connecting side verifies the server's
+certificate against the CA and against the host it dialled, as any TLS
+client does. A node verifies a connecting node's or client's certificate
+against the CA; possession of a certificate the cluster's CA issued is
+what makes a peer trusted, for nodes and clients alike. The node id a
+node peer claims in its `Hello` is not bound to its certificate: a node
+presenting another node's id is an administrative setup error, caught by
+the cluster id and document version checks of 19.1.5 as far as they go,
+not an attack the design defends against. Likewise the design does not
+distinguish node certificates from client certificates; a node could act
+as a client, and nodes are already trusted with everything.
+
+19.1.6.4 [P] **Three transport modes**, set in the cluster document
+(`transport`, 6.2.2) and changed with `djbod cluster set-transport`:
+
+- `plain`: the default and what exists today. Nodes speak plain to each
+  other; no TLS material is required; a node without it starts.
+- `tls-optional`: nodes speak mutual TLS to each other. The listener
+  accepts both, telling a TLS handshake from a plain frame by the first
+  byte. A client may connect plain, or over TLS with or without a client
+  certificate; a certificate, if presented, must verify. Encryption for
+  those who want it, nobody locked out.
+- `tls`: TLS only, client certificate required. A plain connection is
+  refused with a message saying so.
+
+Node-to-node traffic is encrypted in both TLS modes; they differ only in
+what clients may do. Each node reports in `LocalStatus` whether it has
+TLS material loaded, and a proposal moving from `plain` to either TLS
+mode is refused until every node reports that it has, so the change
+cannot leave a node unable to reach its peers. A node started in a TLS
+mode without material refuses to start rather than serve plain. During
+the apply phase of the change (6.2.6) a node that has applied speaks TLS
+to one that has not, which accepts it, so there is no window of failure
+in that direction; the reverse direction is plain into a listener that
+still accepts plain. Moving back to `plain` is a proposal like any other.
+
+19.1.6.5 [P] **Joining under TLS.** A joining node already holds a
+certificate the CA issued, so `djbod-node join` authenticates with it
+like any node connection; nothing is registered in advance and nothing
+is added to the document beyond the node's entry.
+
+19.1.6.6 [P] **Revocation is CA rotation.** A certificate is valid until
+it expires, and a CA cannot withdraw one it has signed; the standard
+remedies (revocation lists, online status checks, short-lived
+certificates) each need machinery this system does not want. Instead, to
+withdraw trust from a node or client the administrator issues a new CA,
+reissues certificates to everyone who should remain, and retires the old
+CA. Because the CA file may hold several roots, this is staged without
+interruption: add the new root to every node's and client's bundle,
+reissue at leisure, then remove the old root. Certificate expiry and
+renewal are handled the same way, by files and restarts, with no protocol
+involvement. Removing a node from the document (18.2.1) does not by itself
+withdraw its certificate; rotate if that matters.
+
+19.1.6.7 [P] **Implementation.** `rustls` with `tokio-rustls`, pure Rust
+with no OpenSSL dependency at run time; the node and client crates gain a
+transport layer that yields a byte stream, plain or TLS, over which the
+existing frame code runs unchanged. `djbod-recover` and the offline
+`djbod-node scrub` do not use the network and are unaffected.
 
 ### 19.2 S3 translation layer
 
@@ -1766,6 +1845,21 @@ everything else.
 20.5.3 [D] Filename limit is 255 bytes and path limit is 4096 bytes. The
 layout in section 9 uses fixed-length names and stays well within both.
 
+### 20.6 Configuration sources
+
+20.6.1 [D] Wherever it makes sense, a setting can be given as a program
+argument, as an environment variable, or in the configuration file, and
+they take precedence in that order: an argument overrides a variable,
+which overrides the file. Environment variables are named `DJBOD_` plus
+the setting in upper case. Existing settings are brought under this rule
+as they are touched; `djbod` already takes `--node` and `--cluster` from
+`DJBOD_NODE` and `DJBOD_CLUSTER`.
+
+20.6.2 [D] Secrets never live in a configuration file or in the cluster
+document. A private key is its own file, with owner-only permissions, and
+the configuration or argument names its path. The same applies to any
+future credential.
+
 ## 21. Open questions
 
 | # | Question | Where | Recommendation |
@@ -1809,8 +1903,6 @@ layout in section 9 uses fixed-length names and stays well within both.
 - Unknown content length on PUT, via a trailer checksum table (10.1).
 - In-memory cache of metadata records and object data.
 - Administration web UI (20.3).
-- TLS with per-node certificates listed in the cluster document, and
-  client authentication (19.1.6). Optional for trusted-LAN deployments.
 - Users and permissions: who may read or write which keys, once clients
   are authenticated. Distinct from authentication and may be dropped.
 - S3 translation layer (19.2). Separate stream of work.
@@ -2015,6 +2107,13 @@ C.4 [P] **Milestones.** Each ends with something that runs and is tested.
    `remove-node --force` (6.2.6.3); (c) `djbod-recover` (20.2.2); (d)
    re-encode (18.9); (e) the size limits into the cluster document (21.4).
    Rebalance stays deferred.
+5. **TLS** (19.1.6). In order: (a) the transport layer, node certificates,
+   mutual TLS between nodes, and the three modes with `set-transport`,
+   tested by migrating a running cluster from `plain` to `tls`; (b) client
+   certificates in `djbod`, and `join` under TLS; (c) the configuration
+   sources rule of 20.6 applied to the existing settings; (d) the
+   getting-started walkthrough for issuing a CA and certificates with
+   `openssl`.
 
 C.4.1 **Milestone 1 status, 17 September 2026: complete.** `djbod-core`
 holds `checksum` (XXH3-64), `erasure` (`Scheme`, `ShardIndex`,
