@@ -12,7 +12,9 @@ Description=Distributed-JBOD node
 Documentation=https://github.com/edward-b-1/Distributed-JBOD
 After=network-online.target local-fs.target
 Wants=network-online.target
-RequiresMountsFor=/var/lib/djbod
+# Add every device mount here, so the node never starts against an
+# unmounted disk and writes into the empty mount point instead.
+RequiresMountsFor=/var/lib/djbod /srv/djbod/disk0 /srv/djbod/disk1
 
 [Service]
 Type=simple

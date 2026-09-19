@@ -57,7 +57,9 @@ One machine, one node, started at boot and restarted if it fails.
 
    The unit runs the node as `djbod`, restarts it on failure, and confines
    it to its state directory and `/srv/djbod` for writing; edit
-   `ReadWritePaths=` if your disks are mounted elsewhere. A node that has
+   `ReadWritePaths=` and `RequiresMountsFor=` if your disks are mounted
+   elsewhere; the second keeps the node from starting against an unmounted
+   disk and writing into the empty mount point. A node that has
    been removed from the cluster (`djbod cluster remove-node`) exits
    cleanly and is not restarted, which is the intended outcome.
 
@@ -133,13 +135,24 @@ docker run -d --name djbod --network host --restart unless-stopped \
   -e DJBOD_CLUSTER_ID=<the cluster id> \
   -e DJBOD_JOIN_PEER=10.0.0.2:5263 \          # omit on the first machine
   -v /var/lib/djbod:/var/lib/djbod \
-  -v /mnt/disk0:/data/d0 -v /mnt/disk1:/data/d1 \
+  -v /mnt/disk0/djbod:/data/d0 -v /mnt/disk1/djbod:/data/d1 \
   djbod
 ```
 
 The state directory and the disks are bind mounts owned by uid 5263 (the
-`djbod` user in the image); `chown -R 5263:5263` them once. The image's
-`djbod` client works from inside the container:
+`djbod` user in the image); `chown -R 5263:5263` them once. Bind a
+directory *inside* each disk's mount point rather than the mount point
+itself, as `/mnt/disk0/djbod` above would be if the disk is mounted at
+`/mnt/disk0`: if the disk is ever not mounted, the directory does not
+exist, Docker refuses to start the container, and the node cannot write
+into the root filesystem by mistake. The systemd unit gets the same
+protection from its `RequiresMountsFor=` line, which lists the device
+mounts.
+
+The image has a health check: every 30 seconds it asks the node in the
+container for `status`, reading the cluster id from the saved document,
+so `docker ps` shows `healthy` once the node answers. The image's `djbod`
+client works from inside the container:
 
 ```sh
 docker exec djbod djbod --node 10.0.0.1:5263 --cluster <id> status
@@ -162,8 +175,17 @@ docker compose -f deploy/docker-compose.yml down -v     # deletes the data too
 
 Node 1 creates the cluster with the id written in the file; nodes 2 and 3
 join it, retrying until node 1 answers, so the order the containers
-start in does not matter. Stop and start the stack and every node comes
-back with its state. If port 5264 is already in use on the host, publish
+start in does not matter, and `docker compose ps` shows each node healthy
+once it serves. Stop and start the stack and every node comes back with
+its state; every node lists the others as bootstrap peers, so one that
+missed a document change while down adopts it at startup.
+
+For a closer simulation of real machines, give each device its own
+filesystem: a fixed-size file with `mkfs.ext4 -m 0` on it, loop-mounted,
+with the volume bound to a directory inside the mount. Then free space is
+real, the same-filesystem check passes without
+`DJBOD_ALLOW_SHARED_FILESYSTEM`, and a missing mount stops the container.
+That needs root for the mounts and is left out of this compose file. If port 5264 is already in use on the host, publish
 the UI elsewhere with `DJBOD_UI_PORT=15264 docker compose ... up -d`.
 
 Everything in the file is ordinary Compose: the fixed addresses exist
