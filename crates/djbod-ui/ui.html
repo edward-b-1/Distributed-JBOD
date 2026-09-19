@@ -98,6 +98,12 @@
   .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); }
   .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
   @media (min-width: 900px) { .split { grid-template-columns: 3fr 2fr; } }
+  /* A grid column will not shrink below its widest unbreakable content,
+     so a long line in the record JSON or a long key would widen the
+     detail column and squeeze the list. Let both columns shrink; wide
+     content then scrolls inside its own box. */
+  .split > * { min-width: 0; }
+  #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
   .log {
     font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 360px; overflow: auto; margin-top: 8px;
