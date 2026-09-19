@@ -25,10 +25,12 @@ cd Distributed-JBOD
 cargo build --release
 ```
 
-This produces three binaries:
+This produces four binaries:
 
 - `target/release/djbod-node`: the node process.
 - `target/release/djbod`: the client.
+- `target/release/djbod-ui`: the administration web UI, a small HTTP
+  server that talks to the cluster the way `djbod` does.
 - `target/release/djbod-recover`: the offline recovery tool, which reads
   device directories with no node running.
 
@@ -143,6 +145,40 @@ target/release/djbod head notes/hello.txt         # NotFound, exit code 1
 
 Add `--json` before the subcommand for machine-readable output, for
 example `djbod --json head photos/cat.jpg`.
+
+## The web UI
+
+`djbod-ui` is the administration page of SPEC.md 20.3: cluster status,
+device states and free space, drain, scrub, repair, and object upload and
+download, in a browser. It takes the same two settings as the client and
+serves on localhost:
+
+```sh
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_NODE and DJBOD_CLUSTER as above
+```
+
+Open <http://127.0.0.1:5264/>. Each action the page offers is one
+`djbod` command underneath, and it holds no state of its own, so the two
+can be used side by side. The Overview tab shows every node's document
+version and every device with a used-space meter and its state; a device
+is marked draining, drained, and removed from there and from the
+Maintenance tab, where scrubs and drains show their events as they
+happen. The Objects tab lists keys by prefix and shows a record, its
+shard placement, and repair, move-shard, download, upload, and delete.
+The Settings tab changes the scheme and the limits.
+
+Two things stay on the command line: `cluster remove-node --force`, which
+asks for a typed confirmation after showing what will be lost, and
+`cluster reencode`, which streams every object through the client.
+
+Towards the cluster it connects as the client does, so a `tls` cluster
+needs the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings, or
+their `DJBOD_TLS_*` variables. The HTTP side has no authentication and
+no TLS, so keep it on localhost and reach it from another machine through
+an SSH tunnel, `ssh -L 5264:127.0.0.1:5264 <host>`, or bind it to a LAN
+address with `--listen` only on a network you trust. The JSON API
+it serves under `/api/` is documented at the top of
+`crates/djbod-ui/src/lib.rs`.
 
 ## What is on disk
 

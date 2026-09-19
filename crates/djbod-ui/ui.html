@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed-JBOD</title>
+<style>
+  :root {
+    --bg: #f5f5f3;
+    --surface: #fcfcfb;
+    --line: #e2e1dc;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --muted: #8a8984;
+    --accent: #2a78d6;
+    --accent-track: #d6e6f9;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --serious: #ec835a;
+    --critical: #d03b3b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #121211;
+      --surface: #1a1a19;
+      --line: #2e2e2c;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --muted: #8a8984;
+      --accent: #3987e5;
+      --accent-track: #1d3a5e;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+  a { color: var(--accent); }
+  header {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
+    padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--text-2); font-size: 13px; }
+  header .meta code { font-family: var(--mono); }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--line); background: var(--surface); }
+  nav button {
+    background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px;
+    font: inherit; color: var(--text-2); cursor: pointer;
+  }
+  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  section[hidden] { display: none; }
+  h2 { font-size: 15px; margin: 22px 0 8px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .tile .label { color: var(--text-2); font-size: 12px; }
+  .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
+  .tile .sub { color: var(--muted); font-size: 12px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-weight: 600; color: var(--text-2); font-size: 12px; }
+  tr:last-child td { border-bottom: none; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .id { font-family: var(--mono); font-size: 12.5px; cursor: copy; }
+  .key { font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  .meter { display: flex; align-items: center; gap: 8px; min-width: 160px; }
+  .meter .track { flex: 1; height: 8px; border-radius: 4px; background: var(--accent-track); overflow: hidden; }
+  .meter .fill { height: 100%; border-radius: 4px; background: var(--accent); }
+  .meter .fill.warning { background: var(--warning); }
+  .meter .fill.critical { background: var(--critical); }
+  .meter .pct { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 12px; width: 3.5em; text-align: right; }
+  .state { white-space: nowrap; }
+  .state.active::before { content: "\25CF  "; color: var(--good); }
+  .state.draining::before { content: "\25D0  "; color: var(--warning); }
+  .state.removed::before { content: "\25CB  "; color: var(--muted); }
+  .ok::before { content: "\2713 "; color: var(--good); }
+  .bad::before { content: "\2717 "; color: var(--critical); }
+  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  button, input, select {
+    font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px;
+  }
+  button, a.btn { cursor: pointer; }
+  a.btn { display: inline-block; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); text-decoration: none; background: var(--surface); }
+  button:hover, a.btn:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--critical); }
+  button.danger:hover { border-color: var(--critical); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=number] { width: 9em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); }
+  .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  @media (min-width: 900px) { .split { grid-template-columns: 3fr 2fr; } }
+  .log {
+    font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 360px; overflow: auto; margin-top: 8px;
+  }
+  .log .finding { color: var(--critical); }
+  .log .repaired { color: var(--good); }
+  .log .muted { color: var(--muted); }
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; max-width: 460px; z-index: 10; }
+  .toast { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+  .toast.error { border-left-color: var(--critical); }
+  .toast .detail { font-family: var(--mono); font-size: 12px; color: var(--text-2); white-space: pre-wrap; margin-top: 4px; }
+  .toast button { float: right; border: none; background: none; padding: 0 0 0 8px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; }
+  dt { color: var(--text-2); }
+  dd { margin: 0; font-family: var(--mono); font-size: 12.5px; word-break: break-all; }
+  details summary { cursor: pointer; color: var(--text-2); }
+  pre { font-family: var(--mono); font-size: 12px; overflow: auto; }
+  .empty { color: var(--muted); padding: 12px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0; }
+  tr.selected td { background: var(--accent-track); }
+  tr.clickable { cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Distributed-JBOD</h1>
+  <span class="meta">cluster <code id="h-cluster">…</code></span>
+  <span class="meta">document version <code id="h-version">…</code></span>
+  <span class="meta">via node <code id="h-node">…</code></span>
+  <span class="meta" id="h-refreshed"></span>
+  <button id="refresh" style="margin-left:auto">Refresh</button>
+</header>
+<nav role="tablist">
+  <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
+  <button role="tab" data-tab="objects">Objects</button>
+  <button role="tab" data-tab="maintenance">Maintenance</button>
+  <button role="tab" data-tab="settings">Settings</button>
+</nav>
+<main>
+
+<section id="tab-overview">
+  <div class="tiles" id="tiles"></div>
+  <h2>Nodes</h2>
+  <table>
+    <thead><tr><th>Node</th><th>Address</th><th>Document version</th><th class="num">Devices</th><th></th></tr></thead>
+    <tbody id="nodes"></tbody>
+  </table>
+  <div class="row">
+    <button id="sync">Sync documents</button>
+    <span class="hint">Brings every reachable node up to the highest document version any holds. Removing a dead node needs the command line: <code>djbod cluster remove-node &lt;id&gt; --force</code>.</span>
+  </div>
+  <h2>Devices</h2>
+  <table>
+    <thead><tr><th>Device</th><th>Node</th><th>State</th><th>Used</th><th class="num">Free</th><th class="num">Total</th><th></th></tr></thead>
+    <tbody id="devices"></tbody>
+  </table>
+  <p class="hint">A device is full for writes when its free space falls under the headroom fraction of the cluster document. Draining stops new shards landing on a device; the Maintenance tab moves what it holds.</p>
+</section>
+
+<section id="tab-objects" hidden>
+  <div class="row">
+    <label>Prefix <input id="prefix" placeholder="photos/" size="30"></label>
+    <button id="list-go" class="primary">List</button>
+    <span style="flex:1"></span>
+    <label>Upload <input type="file" id="upload-file"></label>
+    <label>as key <input id="upload-key" placeholder="photos/cat.jpg" size="30"></label>
+    <button id="upload-go">Upload</button>
+  </div>
+  <div class="split">
+    <div>
+      <table>
+        <thead><tr><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
+        <tbody id="objects"></tbody>
+      </table>
+      <div class="row"><button id="list-more" hidden>More</button><span class="hint" id="list-count"></span></div>
+    </div>
+    <div class="card" id="object-detail"><div class="empty">Select an object to see its record.</div></div>
+  </div>
+</section>
+
+<section id="tab-maintenance" hidden>
+  <h2>Scrub</h2>
+  <div class="card">
+    <div class="row">
+      <label>Rate cap <input type="number" id="scrub-rate" min="1" placeholder="none"> MiB/s per node</label>
+      <label><input type="checkbox" id="scrub-repair"> repair what is found</label>
+      <button id="scrub-go" class="primary">Start scrub</button>
+      <span id="scrub-summary" class="hint"></span>
+    </div>
+    <p class="hint">Every node reads every record and block on its own devices against their checksums, then the coordinator checks that record copies agree and every holder has its shard.</p>
+    <div class="log" id="scrub-log" hidden></div>
+  </div>
+  <h2>Drain</h2>
+  <div class="card">
+    <div class="row">
+      <label>Device <select id="drain-device"></select></label>
+      <label><input type="checkbox" id="drain-partial"> start even if not everything will fit</label>
+      <button id="drain-go" class="primary">Start drain</button>
+      <span id="drain-summary" class="hint"></span>
+    </div>
+    <p class="hint">One pass over every version on a draining device, moving each shard to another device. Mark the device draining on the Overview tab first. Rerun after fixing whatever was skipped, then remove the device.</p>
+    <div class="log" id="drain-log" hidden></div>
+  </div>
+</section>
+
+<section id="tab-settings" hidden>
+  <h2>Erasure coding scheme</h2>
+  <div class="card">
+    <div class="row">
+      <label>k <input type="number" id="scheme-k" min="1" max="255"></label>
+      <label>m <input type="number" id="scheme-m" min="0" max="255"></label>
+      <label>block size <input type="number" id="scheme-block" min="4096" step="4096"> bytes</label>
+      <button id="scheme-go" class="primary">Set scheme</button>
+    </div>
+    <p class="hint">New writes use the new scheme; existing objects keep theirs and stay readable. <code>djbod cluster reencode</code> rewrites them. Refused if fewer devices are active than k+m.</p>
+  </div>
+  <h2>Limits</h2>
+  <div class="card">
+    <div class="row">
+      <label>max key <input type="number" id="limit-key" min="1"> bytes</label>
+      <label>max object <input type="number" id="limit-object" min="1"> bytes</label>
+      <label>max user metadata <input type="number" id="limit-meta" min="1"> bytes</label>
+      <button id="limits-go" class="primary">Set limits</button>
+    </div>
+    <p class="hint">Apply to new requests only.</p>
+  </div>
+  <h2>Cluster document</h2>
+  <div class="card"><pre id="document"></pre></div>
+</section>
+
+</main>
+<div id="toasts"></div>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false }, selectedKey: null };
+
+// ------------------------------------------------------------ helpers
+
+function human(bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+  let value = Number(bytes), unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
+}
+function short(id) { return String(id).slice(0, 8); }
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const c of children.flat()) if (c !== null && c !== undefined) node.append(c);
+  return node;
+}
+function idCell(id) {
+  return el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => {
+    navigator.clipboard?.writeText(String(id)); toast(`copied ${id}`);
+  } }, short(id));
+}
+function encodeKey(key) { return key.split('/').map(encodeURIComponent).join('/'); }
+
+function toast(message, detail, isError = false) {
+  const box = el('div', { class: 'toast' + (isError ? ' error' : '') },
+    el('button', { text: '×', onclick: () => box.remove(), 'aria-label': 'dismiss' }),
+    el('div', { text: message }),
+    detail ? el('div', { class: 'detail', text: detail }) : null);
+  $('toasts').append(box);
+  if (!isError) setTimeout(() => box.remove(), 6000);
+}
+function describeError(error) {
+  const lines = [];
+  for (const f of ['node', 'device', 'key', 'version', 'shard_index', 'stripe'])
+    if (error[f] !== undefined && error[f] !== null) lines.push(`${f}: ${error[f]}`);
+  return lines.join('\n');
+}
+function fail(context, e) {
+  if (e && e.error) toast(`${context}: ${e.error.code}: ${e.error.message}`, describeError(e.error), true);
+  else toast(`${context}: ${e?.message || e}`, '', true);
+}
+
+async function api(path, options = {}) {
+  const response = await fetch('/api' + path, options);
+  if (response.status === 204) return null;
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch (_) { body = { error: { code: 'http', message: text || response.statusText } }; }
+  if (!response.ok) throw body || { error: { code: 'http', message: response.statusText } };
+  return body;
+}
+function post(path, body) {
+  return api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+}
+/// POST and read a stream of JSON lines; `onLine` gets each parsed line.
+async function streamLines(path, body, onLine) {
+  const response = await fetch('/api' + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) });
+  if (!response.ok) throw JSON.parse(await response.text());
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffered += decoder.decode(value, { stream: true });
+    let cut;
+    while ((cut = buffered.indexOf('\n')) >= 0) {
+      const line = buffered.slice(0, cut); buffered = buffered.slice(cut + 1);
+      if (line.trim()) onLine(JSON.parse(line));
+    }
+  }
+  if (buffered.trim()) onLine(JSON.parse(buffered));
+}
+function logLine(log, text, cls) {
+  log.hidden = false;
+  log.append(el('div', { class: cls || '', text }));
+  log.scrollTop = log.scrollHeight;
+}
+
+// ------------------------------------------------------------ tabs
+
+for (const button of document.querySelectorAll('nav [role=tab]')) {
+  button.addEventListener('click', () => {
+    for (const b of document.querySelectorAll('nav [role=tab]')) b.setAttribute('aria-selected', b === button);
+    for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== 'tab-' + button.dataset.tab;
+    location.hash = button.dataset.tab;
+  });
+}
+if (location.hash) document.querySelector(`nav [data-tab="${location.hash.slice(1)}"]`)?.click();
+
+// ------------------------------------------------------------ overview
+
+async function refresh() {
+  try {
+    const [status, cluster] = await Promise.all([api('/status'), api('/cluster')]);
+    state.status = status; state.cluster = cluster;
+    renderHeader(); renderOverview(); renderSettings(); renderDrainDevices();
+  } catch (e) { fail('refresh', e); }
+}
+function renderHeader() {
+  const { status, cluster } = state;
+  $('h-cluster').textContent = status.cluster_id;
+  $('h-version').textContent = status.document_version;
+  $('h-node').textContent = short(status.coordinator);
+  $('h-node').title = status.coordinator;
+  $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
+  document.title = `Distributed-JBOD ${short(status.cluster_id)}`;
+}
+function nodeAddress(nodeId) {
+  return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
+}
+function renderOverview() {
+  const { status, cluster } = state;
+  const doc = cluster.document;
+  const devices = status.devices;
+  const counts = { active: 0, draining: 0, removed: 0 };
+  let total = 0, free = 0;
+  for (const d of devices) { counts[d.state]++; if (d.state !== 'removed') { total += d.total_bytes; free += d.free_bytes; } }
+  const unreachable = cluster.nodes.filter((n) => n.error).length;
+  const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
+  const tiles = [
+    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : 'all answering'],
+    ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed`],
+    ['Used', human(total - free), `of ${human(total)}`],
+    ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
+    ['Scheme', `${doc.k}+${doc.m}`, `${human(doc.block_size)} blocks, any ${doc.m} of ${doc.k + doc.m} may fail`],
+  ];
+  $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
+    el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));
+
+  $('nodes').replaceChildren(...cluster.nodes.map((n) => {
+    const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
+    const version = n.error
+      ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
+      : el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` });
+    return el('tr', {}, el('td', {}, idCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
+      el('td', { class: 'num', text: deviceCount }),
+      el('td', {}, el('div', { class: 'actions' },
+        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
+          title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
+  }));
+
+  $('devices').replaceChildren(...devices.map((d) => {
+    const used = d.total_bytes - d.free_bytes;
+    const fraction = d.total_bytes ? used / d.total_bytes : 0;
+    const freeFraction = d.total_bytes ? d.free_bytes / d.total_bytes : 0;
+    const severity = freeFraction <= doc.headroom ? 'critical' : freeFraction < doc.headroom + 0.05 ? 'warning' : '';
+    const meter = el('div', { class: 'meter', title: severity === 'critical' ? 'full: no room within headroom for new shards' : severity === 'warning' ? 'nearly full' : `${human(used)} used` },
+      el('div', { class: 'track' }, el('div', { class: 'fill ' + severity, style: `width:${(fraction * 100).toFixed(1)}%` })),
+      el('span', { class: 'pct', text: `${(fraction * 100).toFixed(0)}%` }));
+    const actions = el('div', { class: 'actions' });
+    if (d.state === 'active') actions.append(el('button', { text: 'Set draining', onclick: () => setState(d.device, 'draining'), title: 'stop new shards landing here; moves nothing' }));
+    if (d.state === 'draining') {
+      actions.append(el('button', { text: 'Drain…', onclick: () => { $('drain-device').value = d.device; document.querySelector('[data-tab=maintenance]').click(); } }));
+      actions.append(el('button', { text: 'Set active', onclick: () => setState(d.device, 'active') }));
+      actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
+    }
+    return el('tr', {}, el('td', {}, idCell(d.device)),
+      el('td', {}, idCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
+      el('td', {}, el('span', { class: 'state ' + d.state, text: d.state })),
+      el('td', {}, d.state === 'removed' ? el('span', { class: 'hint', text: '—' }) : meter),
+      el('td', { class: 'num', text: human(d.free_bytes) }), el('td', { class: 'num', text: human(d.total_bytes) }),
+      el('td', {}, actions));
+  }));
+}
+async function setState(device, to) {
+  try {
+    const r = await post(`/devices/${device}/state`, { state: to });
+    toast(r.changed ? `device ${short(device)} is now ${to} (document version ${r.document_version})` : `device ${short(device)} was already ${to}`);
+    refresh();
+  } catch (e) { fail('set state', e); }
+}
+async function removeDevice(device) {
+  if (!confirm(`Remove device ${device} from the cluster?\n\nRefused while any object still has a shard on it. Afterwards take its path out of the node's configuration and restart that node.`)) return;
+  try {
+    const r = await post(`/devices/${device}/remove`);
+    toast(r.changed ? `device ${short(device)} removed (document version ${r.document_version})` : `device ${short(device)} was already removed`);
+    refresh();
+  } catch (e) { fail('remove device', e); }
+}
+async function removeNode(node) {
+  if (!confirm(`Remove node ${node} from the cluster?\n\nRefused while any object still has a shard on its devices. The node acknowledges the change, then stops serving and exits.`)) return;
+  try {
+    const r = await post(`/nodes/${node}/remove`);
+    toast(`node ${short(node)} removed (document version ${r.document_version})`);
+    refresh();
+  } catch (e) { fail('remove node', e); }
+}
+$('sync').addEventListener('click', async () => {
+  try {
+    const r = await post('/cluster/sync');
+    const lines = [`highest version ${r.highest_version}`, ...r.updated.map((n) => `updated ${n}`), ...r.already_current.map((n) => `already current ${n}`), ...r.unreachable.map(([n, why]) => `unreachable ${n}: ${why}`)];
+    toast('sync finished', lines.join('\n'), r.unreachable.length > 0);
+    refresh();
+  } catch (e) { fail('sync', e); }
+});
+$('refresh').addEventListener('click', refresh);
+
+// ------------------------------------------------------------ objects
+
+async function list(startAfter) {
+  const prefix = $('prefix').value;
+  try {
+    const params = new URLSearchParams({ limit: '200' });
+    if (prefix) params.set('prefix', prefix);
+    if (startAfter) params.set('start_after', startAfter);
+    const r = await api('/objects?' + params);
+    if (startAfter) state.listing.keys.push(...r.keys); else state.listing = { prefix, keys: r.keys, truncated: false };
+    state.listing.truncated = r.truncated;
+    renderListing();
+  } catch (e) { fail('list', e); }
+}
+function renderListing() {
+  const { keys, truncated } = state.listing;
+  $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
+    el('td', { class: 'key', text: k.key }), el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
+  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 3, class: 'empty', text: 'no objects' })));
+  $('list-more').hidden = !truncated;
+  $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
+}
+$('list-go').addEventListener('click', () => list());
+$('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
+$('list-more').addEventListener('click', () => list(state.listing.keys.at(-1)?.key));
+
+async function select(key) {
+  state.selectedKey = key;
+  renderListing();
+  try {
+    const record = await api('/objects/' + encodeKey(key));
+    renderDetail(record);
+  } catch (e) { fail('head', e); }
+}
+function renderDetail(record) {
+  const deviceNode = (id) => state.status?.devices.find((d) => d.device === id)?.node;
+  const shardRows = record.shards.map((s) => {
+    const info = state.status?.devices.find((d) => d.device === s.device);
+    return el('tr', {}, el('td', { class: 'num', text: s.index }), el('td', {}, idCell(s.device)),
+      el('td', {}, deviceNode(s.device) ? idCell(deviceNode(s.device)) : el('span', { class: 'bad', text: 'not in cluster' })),
+      el('td', {}, info ? el('span', { class: 'state ' + info.state, text: info.state }) : ''));
+  });
+  const shardSelect = el('select', { id: 'move-index' }, ...record.shards.map((s) => el('option', { value: s.index, text: `shard ${s.index}` })));
+  const targetSelect = el('select', { id: 'move-to' }, el('option', { value: '', text: 'emptiest device' }),
+    ...(state.status?.devices || []).filter((d) => d.state === 'active').map((d) => el('option', { value: d.device, text: `${short(d.device)} on ${short(d.node)}` })));
+  $('object-detail').replaceChildren(
+    el('div', { class: 'key', text: record.key, style: 'font-size:13.5px;margin-bottom:8px' }),
+    el('dl', {},
+      el('dt', { text: 'version' }), el('dd', { text: record.version }),
+      el('dt', { text: 'size' }), el('dd', { text: `${human(record.size)} (${record.size} bytes)` }),
+      el('dt', { text: 'created' }), el('dd', { text: record.created }),
+      el('dt', { text: 'checksum' }), el('dd', { text: String(record.object_checksum) }),
+      el('dt', { text: 'scheme' }), el('dd', { text: `${record.k}+${record.m}, block ${human(record.block_size)}` }),
+      el('dt', { text: 'revision' }), el('dd', { text: record.revision || 0 }),
+      el('dt', { text: 'content type' }), el('dd', { text: record.content_type || '—' }),
+      ...Object.entries(record.user_metadata || {}).flatMap(([k, v]) => [el('dt', { text: 'meta ' + k }), el('dd', { text: v })])),
+    el('div', { class: 'actions', style: 'margin:10px 0' },
+      el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download' }),
+      el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
+      el('button', { class: 'danger', text: 'Delete', onclick: () => remove(record.key) })),
+    el('table', {}, el('thead', {}, el('tr', {}, el('th', { class: 'num', text: '#' }), el('th', { text: 'Device' }), el('th', { text: 'Node' }), el('th', { text: 'State' }))), el('tbody', {}, ...shardRows)),
+    el('div', { class: 'row' }, el('label', {}, 'Move ', shardSelect), el('label', {}, 'to ', targetSelect),
+      el('button', { text: 'Move shard', onclick: () => moveShard(record.key, Number($('move-index').value), $('move-to').value || null) })),
+    el('details', {}, el('summary', { text: 'record as JSON' }), el('pre', { text: JSON.stringify(record, null, 2) })));
+}
+async function repair(key) {
+  try {
+    const r = await post('/repair/' + encodeKey(key));
+    const lines = r.shards.map((s) => {
+      const c = s.condition === 'intact' ? 'intact' : typeof s.condition === 'string' ? s.condition : Object.entries(s.condition).map(([k, v]) => `${k} ${JSON.stringify(v)}`).join(' ');
+      return `shard ${s.index} on ${short(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${short(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
+    });
+    const rewritten = r.shards.filter((s) => s.rewritten).length;
+    toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
+    select(key);
+  } catch (e) { fail('repair', e); }
+}
+async function remove(key) {
+  if (!confirm(`Delete ${key}?`)) return;
+  try {
+    await api('/objects/' + encodeKey(key), { method: 'DELETE' });
+    toast(`deleted ${key}`);
+    state.selectedKey = null;
+    $('object-detail').replaceChildren(el('div', { class: 'empty', text: 'Select an object to see its record.' }));
+    list();
+  } catch (e) { fail('delete', e); }
+}
+async function moveShard(key, index, to) {
+  try {
+    const r = await post('/move-shard/' + encodeKey(key), { shard_index: index, to });
+    const destination = r.record.shards.find((s) => s.index === index)?.device;
+    toast(`moved shard ${index} of ${key} from ${short(r.source)} to ${short(destination)} (${r.rebuilt ? 'rebuilt' : 'copied'}); revision ${r.record.revision || 0}` +
+      (r.source_cleaned ? '' : '; source copy not removed, the scrub will report it as stale'));
+    select(key);
+  } catch (e) { fail('move shard', e); }
+}
+$('upload-file').addEventListener('change', () => {
+  const file = $('upload-file').files[0];
+  if (file && !$('upload-key').value) $('upload-key').value = ($('prefix').value || '') + file.name;
+});
+$('upload-go').addEventListener('click', async () => {
+  const file = $('upload-file').files[0];
+  const key = $('upload-key').value.trim();
+  if (!file) return toast('choose a file to upload', '', true);
+  if (!key) return toast('give the object a key', '', true);
+  $('upload-go').disabled = true;
+  try {
+    const headers = {};
+    if (file.type) headers['content-type'] = file.type;
+    const response = await fetch('/api/objects/' + encodeKey(key), { method: 'PUT', headers, body: file });
+    const body = JSON.parse(await response.text());
+    if (!response.ok) throw body;
+    toast(`stored ${key} as version ${body.version}`);
+    $('upload-key').value = '';
+    list();
+    select(key);
+  } catch (e) { fail('upload', e); }
+  finally { $('upload-go').disabled = false; }
+});
+
+// ------------------------------------------------------------ maintenance
+
+function describeFinding(f) {
+  const skip = new Set(['kind', 'event']);
+  return `${f.kind}: ${Object.entries(f).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')}`;
+}
+$('scrub-go').addEventListener('click', async () => {
+  const log = $('scrub-log'); log.replaceChildren(); log.hidden = false;
+  $('scrub-go').disabled = true;
+  const rate = $('scrub-rate').value ? Number($('scrub-rate').value) : null;
+  const repairing = $('scrub-repair').checked;
+  let findings = 0, repairs = 0;
+  $('scrub-summary').textContent = 'running…';
+  try {
+    await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
+      switch (e.event) {
+        case 'node_finding': findings++; logLine(log, `node ${short(e.node)}  device ${short(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
+        case 'node_summary': logLine(log, `node ${short(e.node)}  device ${short(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_failed': findings++; logLine(log, `node ${short(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
+        case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
+        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
+        case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
+        case 'end':
+          if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
+          else logLine(log, `scrub finished: ${findings} finding(s), ${repairs} repair(s)`, findings && !repairing ? 'finding' : 'repaired');
+          break;
+        default: logLine(log, JSON.stringify(e));
+      }
+      $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
+    });
+  } catch (e) { fail('scrub', e); }
+  finally { $('scrub-go').disabled = false; refresh(); }
+});
+
+function renderDrainDevices() {
+  const select = $('drain-device');
+  const current = select.value;
+  select.replaceChildren(...state.status.devices.filter((d) => d.state === 'draining').map((d) =>
+    el('option', { value: d.device, text: `${short(d.device)} on ${short(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
+  if (select.options.length === 0) select.append(el('option', { value: '', text: 'no draining device; set one draining first' }));
+  if (current) select.value = current;
+  $('drain-go').disabled = !select.value;
+}
+$('drain-device').addEventListener('change', () => { $('drain-go').disabled = !$('drain-device').value; });
+$('drain-go').addEventListener('click', async () => {
+  const device = $('drain-device').value;
+  if (!device) return;
+  const log = $('drain-log'); log.replaceChildren(); log.hidden = false;
+  $('drain-go').disabled = true;
+  let moved = 0, skipped = 0, deleted = 0;
+  $('drain-summary').textContent = 'running…';
+  try {
+    await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
+      switch (e.event) {
+        case 'estimate': logLine(log, `draining ${short(e.device)} on node ${short(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${short(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
+        case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
+        case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;
+        case 'end':
+          if (e.error) logLine(log, `drain incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
+          else logLine(log, `drain finished: ${moved} moved, ${skipped} skipped, ${deleted} deleted meanwhile`, skipped ? 'finding' : 'repaired');
+          break;
+        default: logLine(log, JSON.stringify(e));
+      }
+      $('drain-summary').textContent = `${moved} moved, ${skipped} skipped`;
+    });
+  } catch (e) { fail('drain', e); }
+  finally { $('drain-go').disabled = false; refresh(); }
+});
+
+// ------------------------------------------------------------ settings
+
+function renderSettings() {
+  const doc = state.cluster.document;
+  // Leave the fields alone while one of them is being edited.
+  const editing = document.activeElement && document.activeElement.closest('#tab-settings');
+  if (!editing) {
+    $('scheme-k').value = doc.k; $('scheme-m').value = doc.m; $('scheme-block').value = doc.block_size;
+    $('limit-key').value = doc.max_key_bytes; $('limit-object').value = doc.max_object_bytes; $('limit-meta').value = doc.max_user_metadata_bytes;
+  }
+  $('document').textContent = JSON.stringify(doc, null, 2);
+}
+$('scheme-go').addEventListener('click', async () => {
+  try {
+    const r = await post('/cluster/scheme', { k: Number($('scheme-k').value), m: Number($('scheme-m').value), block_size: Number($('scheme-block').value) || null });
+    toast(r.changed ? `scheme is now ${r.k}+${r.m} with ${human(r.block_size)} blocks (document version ${r.document_version}); new writes use it, run djbod cluster reencode for the rest` : `scheme was already ${r.k}+${r.m}; nothing changed`);
+    refresh();
+  } catch (e) { fail('set scheme', e); }
+});
+$('limits-go').addEventListener('click', async () => {
+  try {
+    const r = await post('/cluster/limits', { max_key_bytes: Number($('limit-key').value) || null, max_object_bytes: Number($('limit-object').value) || null, max_user_metadata_bytes: Number($('limit-meta').value) || null });
+    toast(r.changed ? `limits set (document version ${r.document_version})` : 'limits unchanged');
+    refresh();
+  } catch (e) { fail('set limits', e); }
+});
+
+refresh();
+list();
+setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+[package]
+name = "djbod-ui"
+description = "Administration web UI for Distributed-JBOD"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "djbod-ui"
+path = "src/main.rs"
+
+[dependencies]
+djbod-core = { workspace = true }
+djbod-proto = { workspace = true }
+djbod-node = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true, features = ["env"] }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+
+[lints]
+workspace = true

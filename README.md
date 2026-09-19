@@ -11,8 +11,9 @@ Appendix C of the specification for the crate layout and milestones.
 
 [docs/getting-started.md](docs/getting-started.md) walks through building
 the binaries, creating a cluster of one node with directories as devices,
-storing and fetching objects with the `djbod` client, and breaking things
-on purpose to see the fail-stop behaviour.
+storing and fetching objects with the `djbod` client, administering the
+cluster from a browser with `djbod-ui`, and breaking things on purpose to
+see the fail-stop behaviour.
 
 ## Default port
 
