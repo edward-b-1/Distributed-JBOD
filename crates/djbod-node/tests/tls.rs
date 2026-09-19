@@ -441,3 +441,32 @@ async fn a_node_joins_a_tls_cluster_with_its_own_certificate() {
     let (_, got) = secure.get_object("k").await.expect("get");
     assert_eq!(got, body);
 }
+
+#[test]
+fn a_client_connector_comes_from_three_optional_settings() {
+    let mut authority = Authority::new();
+    let paths = authority.issue("admin");
+    let plain = Connector::from_client_options(None, None, None).expect("plain");
+    assert!(!plain.is_tls());
+    let anonymous =
+        Connector::from_client_options(Some(&paths.ca), None, None).expect("authority alone");
+    assert!(anonymous.is_tls());
+    let identified =
+        Connector::from_client_options(Some(&paths.ca), Some(&paths.cert), Some(&paths.key))
+            .expect("full identity");
+    assert!(identified.is_tls());
+    for (ca, cert, key) in [
+        (Some(&paths.ca), Some(&paths.cert), None),
+        (Some(&paths.ca), None, Some(&paths.key)),
+        (None, Some(&paths.cert), Some(&paths.key)),
+    ] {
+        assert!(matches!(
+            Connector::from_client_options(
+                ca.map(|p| p.as_path()),
+                cert.map(|p| p.as_path()),
+                key.map(|p| p.as_path())
+            ),
+            Err(TlsError::IncompleteClientIdentity)
+        ));
+    }
+}
