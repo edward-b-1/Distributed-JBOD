@@ -58,6 +58,20 @@ struct Cli {
     command: Command,
 }
 
+/// The device a UUID or label names (SPEC 6.2.5.1), looked up in the
+/// cluster document.
+async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
+    let node = cli
+        .node
+        .context("no node address: pass --node or set DJBOD_NODE")?;
+    let cluster = cli
+        .cluster
+        .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+    djbod_node::membership::resolve_device(&connector(cli)?, node, cluster, name)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
 /// How this client connects (SPEC 19.1.6.2), decided by the transport
 /// module so that every client program decides it the same way.
 fn connector(cli: &Cli) -> anyhow::Result<Connector> {
@@ -114,9 +128,10 @@ enum Command {
     MoveShard {
         key: String,
         shard_index: u8,
-        /// Destination device id; chosen like a write if omitted.
+        /// Destination device, by UUID or label; chosen like a write if
+        /// omitted.
         #[arg(long)]
-        to: Option<Uuid>,
+        to: Option<String>,
     },
     /// Scrub the whole cluster: every node checks its own disks, then the
     /// cross-node checks run; with --repair, damaged objects are rebuilt.
@@ -136,13 +151,24 @@ enum ClusterCommand {
     /// Bring every node up to the highest document version any holds.
     Sync,
     /// Mark a device draining (it receives no new shards) or active again.
-    /// Moves no data.
-    SetState { device: Uuid, state: StateArg },
+    /// Moves no data. The device is named by UUID or label.
+    SetState { device: String, state: StateArg },
+    /// Give a device a short name shown beside its UUID, or clear it with
+    /// --clear. Labels are unique within the cluster.
+    SetLabel {
+        /// The device, by UUID or current label.
+        device: String,
+        /// The new label: 1 to 128 characters, no whitespace.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        label: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Move every shard off a draining device in one pass.
     Drain {
-        /// The draining device to empty.
+        /// The draining device to empty, by UUID or label.
         #[arg(required_unless_present = "node_id", conflicts_with = "node_id")]
-        device: Option<Uuid>,
+        device: Option<String>,
         /// Drain every draining device of this node in turn.
         #[arg(long = "node-id", value_name = "NODE")]
         node_id: Option<Uuid>,
@@ -187,8 +213,8 @@ enum ClusterCommand {
         max_user_metadata_bytes: Option<u64>,
     },
     /// Mark a device removed. Refused while any object still has a shard
-    /// on it: drain it first.
-    RemoveDevice { device: Uuid },
+    /// on it: drain it first. The device is named by UUID or label.
+    RemoveDevice { device: String },
     /// Drop a node and its devices from the cluster. Refused while any
     /// object still has a shard on them: drain them first. The node stops
     /// serving once it has acknowledged.
@@ -310,13 +336,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         println!(
-                            "{:<36}  {:<36}  {:<9}  {:>12}  {:>12}",
-                            "DEVICE", "NODE", "STATE", "TOTAL", "FREE"
+                            "{:<36}  {:<16}  {:<36}  {:<9}  {:>12}  {:>12}",
+                            "DEVICE", "LABEL", "NODE", "STATE", "TOTAL", "FREE"
                         );
                         for d in devices {
                             println!(
-                                "{:<36}  {:<36}  {:<9}  {:>12}  {:>12}",
+                                "{:<36}  {:<16}  {:<36}  {:<9}  {:>12}  {:>12}",
                                 d.device.0,
+                                d.label.as_deref().unwrap_or("-"),
                                 d.node.0,
                                 format!("{:?}", d.state).to_lowercase(),
                                 human_bytes(d.total_bytes),
@@ -569,12 +596,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             shard_index,
             to,
         } => {
+            let target = match to {
+                Some(name) => Some(resolve_device(&cli, name).await?),
+                None => None,
+            };
             let mut conn = connect(&cli).await?;
             match conn
                 .request(Request::MoveShard {
                     key: key.clone(),
                     shard_index: *shard_index,
-                    target: to.map(djbod_core::record::DeviceId),
+                    target,
                 })
                 .await
                 .map_err(remote)?
@@ -704,11 +735,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         StateArg::Draining => DeviceState::Draining,
                         StateArg::Active => DeviceState::Active,
                     };
+                    let device_id = resolve_device(&cli, device).await?;
                     let (document, changed) = djbod_node::membership::set_device_state(
                         &connector(&cli)?,
                         node,
                         cluster,
-                        DeviceId(*device),
+                        device_id,
                         state,
                     )
                     .await
@@ -726,11 +758,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     } else if changed {
                         println!(
-                            "device {device} is now {state_name} (document version {})",
-                            document.version
+                            "device {} is now {state_name} (document version {})",
+                            device_id.0, document.version
                         );
                     } else {
-                        println!("device {device} was already {state_name}; nothing changed");
+                        println!(
+                            "device {} was already {state_name}; nothing changed",
+                            device_id.0
+                        );
                     }
                 }
                 ClusterCommand::Drain {
@@ -739,7 +774,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     partial,
                 } => {
                     let devices: Vec<Uuid> = match (device, node_id) {
-                        (Some(device), _) => vec![*device],
+                        (Some(device), _) => vec![resolve_device(&cli, device).await?.0],
                         (None, Some(node_id)) => {
                             let document = djbod_node::membership::fetch_document(
                                 &connector(&cli)?,
@@ -898,12 +933,52 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
+                ClusterCommand::SetLabel {
+                    device,
+                    label,
+                    clear: _,
+                } => {
+                    let device_id = resolve_device(&cli, device).await?;
+                    let (document, changed) = djbod_node::membership::set_device_label(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        device_id,
+                        label.clone(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "device": device_id,
+                                "label": label,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if !changed {
+                        println!("nothing changed");
+                    } else if let Some(label) = label {
+                        println!(
+                            "device {} is now labelled {label} (document version {})",
+                            device_id.0, document.version
+                        );
+                    } else {
+                        println!(
+                            "label cleared from device {} (document version {})",
+                            device_id.0, document.version
+                        );
+                    }
+                }
                 ClusterCommand::RemoveDevice { device } => {
+                    let device_id = resolve_device(&cli, device).await?;
                     let (document, changed) = djbod_node::membership::remove_device(
                         &connector(&cli)?,
                         node,
                         cluster,
-                        DeviceId(*device),
+                        device_id,
                     )
                     .await
                     .map_err(|e| anyhow::anyhow!("{e}"))?;

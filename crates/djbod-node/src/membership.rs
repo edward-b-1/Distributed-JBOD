@@ -91,6 +91,8 @@ pub enum MembershipError {
     AlreadyMember { path: PathBuf },
     #[error("{0} is not in the cluster document")]
     UnknownDevice(DeviceId),
+    #[error("no device is named {0:?}, as a UUID or a label")]
+    UnknownDeviceName(String),
     #[error("{0} is not in the cluster document")]
     UnknownNode(NodeId),
     #[error(
@@ -686,6 +688,55 @@ pub async fn set_limits(
             return Ok((current, false));
         }
         next.version += 1;
+        match propose(connector, &current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
+/// The device a UUID or label names, in the current document.
+pub async fn resolve_device(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    name: &str,
+) -> Result<DeviceId, MembershipError> {
+    let document = fetch_document(connector, peer, cluster_id).await?;
+    document
+        .device_by_name(name)
+        .map(|d| d.id)
+        .ok_or_else(|| MembershipError::UnknownDeviceName(name.to_string()))
+}
+
+/// Set or clear a device's label (SPEC 6.2.5.1). Returns the document and
+/// whether anything changed; the validator refuses a duplicate or an
+/// unusable label.
+pub async fn set_device_label(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    device: DeviceId,
+    label: Option<String>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(connector, peer, cluster_id).await?;
+        let Some(entry) = current.device(device) else {
+            return Err(MembershipError::UnknownDevice(device));
+        };
+        if entry.label == label {
+            return Ok((current, false));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        for candidate in next.devices.iter_mut() {
+            if candidate.id == device {
+                candidate.label = label.clone();
+            }
+        }
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
             Err(MembershipError::Superseded { .. })

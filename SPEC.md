@@ -292,6 +292,16 @@ no message grows with the number of objects.
 6.2.5 [D] Device states are `active`, `draining`, and `removed`. Only
 `active` devices receive new shards.
 
+6.2.5.1 [D] **Device labels.** A device entry may carry a `label`, an
+administrator-chosen name of 1 to 128 bytes with no whitespace, unique
+within the document and not shaped like a UUID, set or cleared with
+`djbod cluster set-label` as a document change like any other. `status`
+shows it beside the UUID, and every `djbod` command that takes a device
+accepts either the UUID or the label. Paths are still not recorded (5.2);
+the label is the administrator's name for the disk, for example
+`nas1-bay3`, and survives the disk moving to another machine as the UUID
+does. Errors from nodes carry the UUID; `status` maps it.
+
 6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's
 command, or a joining node. The procedure:
@@ -1904,12 +1914,6 @@ future credential.
 - Object versioning (9.2). Planned; may be a client-side wrapper; may be
   dropped.
 - Buckets beyond `default` (2, 9.1.9).
-- **Human-readable device labels.** A short administrator-chosen name for
-  each device beside its UUID in the cluster document, for example
-  `nas1-bay3`, shown by `status` and in errors. Paths are deliberately
-  not recorded (5.2), so today a cluster-wide listing can show only UUIDs
-  and a node's own configuration order. To settle with the join procedure
-  (milestone 3), since the label is set when a device enters the document.
 - Failure domain hierarchy and configurable independence level (7).
 - Coordinator coding limit and refusal (6.1.3, 17.3, 17.4, 17.5).
 - Randomised or round-robin placement for load spreading (10.5).

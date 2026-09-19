@@ -108,6 +108,36 @@ pub struct DeviceEntry {
     pub id: DeviceId,
     pub node: NodeId,
     pub state: DeviceState,
+    /// An administrator-chosen name shown beside the UUID (SPEC 6.2.5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// Longest device label, in bytes (SPEC 6.2.5.1).
+pub const MAX_LABEL_BYTES: usize = 128;
+
+/// Whether `label` may name a device: 1 to 128 bytes of printable text
+/// with no whitespace, and not something a UUID could be mistaken for.
+pub fn validate_label(label: &str) -> Result<(), ClusterDocumentError> {
+    if label.is_empty() || label.len() > MAX_LABEL_BYTES {
+        return Err(ClusterDocumentError::BadLabel {
+            label: label.to_string(),
+            reason: format!("must be 1 to {MAX_LABEL_BYTES} bytes"),
+        });
+    }
+    if label.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(ClusterDocumentError::BadLabel {
+            label: label.to_string(),
+            reason: "must not contain whitespace or control characters".to_string(),
+        });
+    }
+    if Uuid::parse_str(label).is_ok() {
+        return Err(ClusterDocumentError::BadLabel {
+            label: label.to_string(),
+            reason: "looks like a UUID".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// The only independence level v1 accepts (SPEC 7.2).
@@ -167,6 +197,10 @@ pub enum ClusterDocumentError {
     DuplicateNode(NodeId),
     #[error("device {0:?} appears more than once")]
     DuplicateDevice(DeviceId),
+    #[error("label {label:?} is not usable: {reason}")]
+    BadLabel { label: String, reason: String },
+    #[error("label {label:?} is used by more than one device")]
+    DuplicateLabel { label: String },
     #[error("device {device:?} names node {node:?}, which is not in the document")]
     UnknownNode { device: DeviceId, node: NodeId },
 }
@@ -216,6 +250,19 @@ impl ClusterDocument {
                 });
             }
         }
+        // Labels, once every device is known to be listed once.
+        let mut labels: Vec<&str> = Vec::new();
+        for device in &self.devices {
+            if let Some(label) = &device.label {
+                validate_label(label)?;
+                if labels.contains(&label.as_str()) {
+                    return Err(ClusterDocumentError::DuplicateLabel {
+                        label: label.clone(),
+                    });
+                }
+                labels.push(label);
+            }
+        }
         Ok(())
     }
 
@@ -225,6 +272,29 @@ impl ClusterDocument {
 
     pub fn node(&self, id: NodeId) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The device with this label, if any (labels are unique).
+    pub fn device_by_label(&self, label: &str) -> Option<&DeviceEntry> {
+        self.devices
+            .iter()
+            .find(|d| d.label.as_deref() == Some(label))
+    }
+
+    /// The device named by a UUID or by a label.
+    pub fn device_by_name(&self, name: &str) -> Option<&DeviceEntry> {
+        match Uuid::parse_str(name) {
+            Ok(uuid) => self.device(DeviceId(uuid)),
+            Err(_) => self.device_by_label(name),
+        }
+    }
+
+    /// A device's label if it has one, else its UUID, for messages.
+    pub fn device_name(&self, id: DeviceId) -> String {
+        match self.device(id).and_then(|d| d.label.as_deref()) {
+            Some(label) => label.to_string(),
+            None => id.0.to_string(),
+        }
     }
 
     pub fn device(&self, id: DeviceId) -> Option<&DeviceEntry> {
@@ -266,11 +336,13 @@ mod tests {
                     id: DeviceId(Uuid::from_u128(1)),
                     node: node_a,
                     state: DeviceState::Active,
+                    label: Some("nas1-bay0".to_string()),
                 },
                 DeviceEntry {
                     id: DeviceId(Uuid::from_u128(2)),
                     node: node_b,
                     state: DeviceState::Draining,
+                    label: None,
                 },
             ],
         }
@@ -394,6 +466,56 @@ mod tests {
         assert_eq!("tls".parse::<Transport>(), Ok(Transport::Tls));
         assert!("optional".parse::<Transport>().is_err());
         assert_eq!(Transport::TlsOptional.to_string(), "tls-optional");
+    }
+
+    #[test]
+    fn labels_are_optional_unique_and_checked() {
+        let doc = sample();
+        doc.validate().expect("valid");
+        assert_eq!(
+            doc.device_by_label("nas1-bay0").map(|d| d.id),
+            Some(DeviceId(Uuid::from_u128(1)))
+        );
+        assert_eq!(
+            doc.device_by_name("nas1-bay0").map(|d| d.id),
+            Some(DeviceId(Uuid::from_u128(1)))
+        );
+        assert_eq!(
+            doc.device_by_name(&Uuid::from_u128(2).to_string())
+                .map(|d| d.id),
+            Some(DeviceId(Uuid::from_u128(2)))
+        );
+        assert_eq!(doc.device_name(DeviceId(Uuid::from_u128(1))), "nas1-bay0");
+        assert_eq!(
+            doc.device_name(DeviceId(Uuid::from_u128(2))),
+            Uuid::from_u128(2).to_string()
+        );
+        let json = serde_json::to_string(&doc).expect("serializes");
+        assert_eq!(
+            json.matches("\"label\"").count(),
+            1,
+            "absent labels are omitted"
+        );
+
+        let mut doc = sample();
+        doc.devices[1].label = Some("nas1-bay0".to_string());
+        assert!(matches!(
+            doc.validate(),
+            Err(ClusterDocumentError::DuplicateLabel { .. })
+        ));
+        for bad in [
+            "",
+            "has space",
+            &"x".repeat(129),
+            &Uuid::from_u128(9).to_string(),
+        ] {
+            let mut doc = sample();
+            doc.devices[1].label = Some(bad.to_string());
+            assert!(
+                matches!(doc.validate(), Err(ClusterDocumentError::BadLabel { .. })),
+                "{bad:?} should be refused"
+            );
+        }
     }
 
     #[test]

@@ -91,6 +91,7 @@ fn sample_document() -> ClusterDocument {
             id: device(1),
             node: node(1),
             state: DeviceState::Active,
+            label: Some("nas1-bay0".to_string()),
         }],
     }
 }
@@ -424,6 +425,7 @@ fn every_response_round_trips() {
     let status = DeviceStatus {
         device: device(1),
         node: node(1),
+        label: Some("nas1-bay0".to_string()),
         state: DeviceState::Active,
         total_bytes: 4 << 40,
         free_bytes: 3 << 40,

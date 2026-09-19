@@ -262,6 +262,20 @@ usable, and changes nothing.
 with `RecordsInconsistent`, because the record's own checksum no longer
 matches (SPEC.md 9.4.5).
 
+**Naming devices.** Every device is a UUID, which is hard to read in a
+`status` listing of a dozen disks. Give each a label once and use the
+label wherever a command takes a device:
+
+```sh
+target/release/djbod cluster set-label <device-uuid> nas1-bay0
+target/release/djbod status                       # LABEL column
+target/release/djbod cluster set-state nas1-bay0 draining
+```
+
+Labels are unique, up to 128 characters with no spaces, and live in the
+cluster document, so they follow the disk if it moves to another machine.
+`set-label <label> --clear` removes one.
+
 **Moving a shard.** Any shard can be moved to another device while the
 cluster is running, which is the building block of draining a disk:
 
