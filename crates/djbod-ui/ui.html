@@ -133,6 +133,8 @@
      detail column and squeeze the list. Let both columns shrink; wide
      content then scrolls inside its own box. */
   .split > * { min-width: 0; }
+  .filter-spacer { display: none; }
+  @media (min-width: 900px) { .filter-spacer { display: block; } }
   #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
   .log {
     font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
@@ -208,11 +210,9 @@
 
 <section id="tab-objects" hidden>
   <div class="row">
-    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
-    <button id="list-go" class="primary">List</button>
     <label class="grow">Upload <input type="file" id="upload-file"></label>
     <label class="grow">as key <input id="upload-key" placeholder="photos/cat.jpg"></label>
-    <button id="upload-go">Upload</button>
+    <button id="upload-go" class="primary">Upload</button>
   </div>
   <div class="row" id="upload-progress" hidden>
     <span class="key" id="upload-progress-name"></span>
@@ -221,6 +221,14 @@
     <button id="upload-cancel">Cancel</button>
   </div>
   <div class="split">
+    <!-- Two grid rows: the filter over the list, an empty cell over the
+         panel, so the panel's top lines up with the table's. -->
+    <div class="row" style="margin:0">
+      <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
+      <button id="list-go">List</button>
+      <button id="list-clear" title="empty the prefix and list every key">Clear</button>
+    </div>
+    <div class="filter-spacer"></div>
     <div>
       <table>
         <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
@@ -630,6 +638,7 @@ function renderListing() {
   $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
 }
 $('list-go').addEventListener('click', () => list());
+$('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
 $('list-more').addEventListener('click', () => list(state.listing.keys.at(-1)?.key));
 
