@@ -348,7 +348,7 @@ async function refresh() {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
-    renderHeader(); renderOverview(); renderSettings(); renderDrainDevices();
+    renderHeader(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
 function renderHeader() {
@@ -483,6 +483,7 @@ async function select(key) {
   try {
     const [record, failures] = await Promise.all([api('/objects/' + encodeKey(key)), api('/read-failures')]);
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
+    renderListing();
     if (state.selectedKey === key) renderDetail(record);
   } catch (e) { fail('head', e); }
 }
