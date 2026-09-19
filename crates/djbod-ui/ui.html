@@ -469,7 +469,6 @@ async function refresh() {
   try {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
-    $('h-build').textContent = status.ui_build || '?';
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
     renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
@@ -482,6 +481,7 @@ function renderHeader() {
   $('h-node').title = status.coordinator;
   $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
   $('h-transport').textContent = status.transport || 'plain';
+  $('h-build').textContent = status.ui_build || '?';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
   document.title = `Distributed-JBOD ${short(status.cluster_id)}`;
 }
