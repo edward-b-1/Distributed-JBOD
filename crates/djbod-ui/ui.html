@@ -39,6 +39,11 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+  /* The page is a column that fills the window; the frame takes what the
+     header (and any banners) leave, so the rail reaches the bottom on a
+     short page without the page ever being taller than the window. */
+  body { min-height: 100vh; display: flex; flex-direction: column; }
+  body > * { flex: none; }
   a { color: var(--accent); }
   header {
     display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
@@ -47,13 +52,32 @@
   header h1 { font-size: 17px; margin: 0; font-weight: 600; }
   header .meta { color: var(--text-2); font-size: 13px; }
   header .meta code { font-family: var(--mono); }
-  nav { display: flex; gap: 4px; padding: 8px 16px 0; border-bottom: 1px solid var(--line); background: var(--surface); }
-  nav button {
-    background: none; border: none; border-bottom: 2px solid transparent; padding: 8px 12px;
-    font: inherit; color: var(--text-2); cursor: pointer;
+  /* Navigation is a left rail: one button per section with an icon and,
+     where it means something, a live count; the selected one sits on a
+     tinted background. On a narrow screen the rail becomes a row above
+     the content. */
+  .frame { display: grid; grid-template-columns: 184px minmax(0, 1fr); flex: 1 1 auto; }
+  aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 8px; }
+  aside.rail nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .rail button {
+    display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+    background: none; border: 1px solid transparent; border-radius: 7px; padding: 8px 10px;
+    font: inherit; font-weight: 500; color: var(--text-2); cursor: pointer; white-space: nowrap;
   }
-  nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
-  main { padding: 16px; max-width: 1200px; margin: 0 auto; }
+  .rail button:hover { color: var(--text); background: var(--bg); }
+  .rail button[aria-selected="true"] { color: var(--text); font-weight: 600; background: var(--accent-track); }
+  .rail button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .rail svg { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .rail .count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .rail button[aria-selected="true"] .count { color: var(--text-2); }
+  @media (max-width: 760px) {
+    .frame { grid-template-columns: 1fr; }
+    aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; }
+    aside.rail nav { position: static; flex-direction: row; }
+    .rail button { width: auto; }
+    .rail .count { margin-left: 4px; }
+  }
+  main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
   [hidden] { display: none !important; }
@@ -100,8 +124,16 @@
   input[type=number] { width: 9em; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
   .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); }
+  .row label.grow { flex: 1 1 14em; }
+  .row label.grow input { flex: 1; min-width: 6em; }
   .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
-  @media (min-width: 900px) { .split { grid-template-columns: 3fr 2fr; } }
+  @media (min-width: 900px) { .split { grid-template-columns: minmax(0, 1fr) minmax(360px, 1fr); } }
+  /* A grid column will not shrink below its widest unbreakable content,
+     so a long line in the record JSON or a long key would widen the
+     detail column and squeeze the list. Let both columns shrink; wide
+     content then scrolls inside its own box. */
+  .split > * { min-width: 0; }
+  #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
   .log {
     font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 360px; overflow: auto; margin-top: 8px;
@@ -144,12 +176,15 @@
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
 <div id="banners"></div>
-<nav role="tablist">
-  <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
-  <button role="tab" data-tab="objects">Objects</button>
-  <button role="tab" data-tab="maintenance">Maintenance</button>
-  <button role="tab" data-tab="settings">Settings</button>
-</nav>
+<div class="frame">
+<aside class="rail">
+  <nav role="tablist" aria-label="Sections">
+    <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview<span class="count" id="count-overview"></span></button>
+    <button role="tab" data-tab="objects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count" id="count-objects"></span></button>
+    <button role="tab" data-tab="maintenance"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 2.3"/><path d="M3 21l8.5-8.5"/></svg>Maintenance<span class="count" id="count-maintenance"></span></button>
+    <button role="tab" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+  </nav>
+</aside>
 <main>
 
 <section id="tab-overview">
@@ -173,11 +208,10 @@
 
 <section id="tab-objects" hidden>
   <div class="row">
-    <label>Prefix <input id="prefix" placeholder="photos/" size="30"></label>
+    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
     <button id="list-go" class="primary">List</button>
-    <span style="flex:1"></span>
-    <label>Upload <input type="file" id="upload-file"></label>
-    <label>as key <input id="upload-key" placeholder="photos/cat.jpg" size="30"></label>
+    <label class="grow">Upload <input type="file" id="upload-file"></label>
+    <label class="grow">as key <input id="upload-key" placeholder="photos/cat.jpg"></label>
     <button id="upload-go">Upload</button>
   </div>
   <div class="row" id="upload-progress" hidden>
@@ -249,6 +283,7 @@
 </section>
 
 </main>
+</div>
 <div id="toasts"></div>
 
 <script>
@@ -395,7 +430,10 @@ for (const button of document.querySelectorAll('nav [role=tab]')) {
   button.addEventListener('click', () => {
     for (const b of document.querySelectorAll('nav [role=tab]')) b.setAttribute('aria-selected', b === button);
     for (const s of document.querySelectorAll('main > section')) s.hidden = s.id !== 'tab-' + button.dataset.tab;
-    location.hash = button.dataset.tab;
+    // Remember the section in the URL without navigating to it: a hash
+    // change scrolls the window to any element of that id, and the
+    // Objects table body is one.
+    history.replaceState(null, '', '#' + button.dataset.tab);
   });
 }
 if (location.hash) document.querySelector(`nav [data-tab="${location.hash.slice(1)}"]`)?.click();
@@ -480,6 +518,9 @@ function renderOverview() {
       tls: 'every connection uses TLS and a certificate',
     }[status.transport || 'plain'] || ''],
   ];
+  $('count-overview').textContent = `${counts.active + counts.draining} dev`;
+  const damaged = Object.keys(state.failures || {}).length;
+  $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
   $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
     el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));
 
@@ -584,6 +625,7 @@ function renderListing() {
     el('td', { class: 'key', text: k.key }),
     el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
   if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
+  $('count-objects').textContent = keys.length ? `${keys.length}${truncated ? '+' : ''}` : '';
   $('list-more').hidden = !truncated;
   $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
 }
