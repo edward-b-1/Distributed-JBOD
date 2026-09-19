@@ -163,6 +163,12 @@
     <label>as key <input id="upload-key" placeholder="photos/cat.jpg" size="30"></label>
     <button id="upload-go">Upload</button>
   </div>
+  <div class="row" id="upload-progress" hidden>
+    <span class="key" id="upload-progress-name"></span>
+    <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill" id="upload-progress-fill" style="width:0%"></div></div></div>
+    <span class="hint" id="upload-progress-text"></span>
+    <button id="upload-cancel">Cancel</button>
+  </div>
   <div class="split">
     <div>
       <table>
@@ -242,6 +248,11 @@ function human(bytes) {
   return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
 }
 function short(id) { return String(id).slice(0, 8); }
+function humanTime(seconds) {
+  if (seconds < 60) return `${Math.ceil(seconds)} s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${Math.floor(seconds / 3600)} h ${Math.round((seconds % 3600) / 60)} min`;
+}
 function ordinal(n) { const r = n % 100; if (r >= 11 && r <= 13) return 'th'; return ['th', 'st', 'nd', 'rd'][n % 10] || 'th'; }
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
@@ -557,17 +568,58 @@ $('upload-go').addEventListener('click', async () => {
         '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
       return;
     }
-    const headers = {};
-    if (file.type) headers['content-type'] = file.type;
-    const response = await fetch('/api/objects/' + encodeKey(key), { method: 'PUT', headers, body: file });
-    const body = JSON.parse(await response.text());
-    if (!response.ok) throw body;
-    toast(`stored ${key} as version ${body.version}`);
+    const version = await uploadWithProgress(file, key);
+    toast(`stored ${key} as version ${version}`);
     $('upload-key').value = '';
     list();
     select(key);
-  } catch (e) { fail('upload', e); }
-  finally { $('upload-go').disabled = false; }
+  } catch (e) { if (e !== 'cancelled') fail('upload', e); }
+  finally { $('upload-go').disabled = false; $('upload-progress').hidden = true; activeUpload = null; }
+});
+
+let activeUpload = null;
+
+/// Send the file with XMLHttpRequest, which reports the bytes sent as
+/// they go; fetch cannot. Resolves to the version id, rejects with the
+/// server's JSON error, or with 'cancelled' after Cancel.
+function uploadWithProgress(file, key) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeUpload = xhr;
+    const started = performance.now();
+    $('upload-progress-name').textContent = key;
+    $('upload-progress').hidden = false;
+    const update = (sent, total) => {
+      const fraction = total ? sent / total : 1;
+      $('upload-progress-fill').style.width = `${(fraction * 100).toFixed(1)}%`;
+      const seconds = (performance.now() - started) / 1000;
+      const rate = seconds > 0 ? sent / seconds : 0;
+      let text = `${human(sent)} of ${human(total)} (${(fraction * 100).toFixed(0)}%)`;
+      if (rate > 0 && sent < total) text += `, ${human(rate)}/s, about ${humanTime((total - sent) / rate)} left`;
+      $('upload-progress-text').textContent = text;
+    };
+    update(0, file.size);
+    xhr.upload.addEventListener('progress', (e) => update(e.loaded, e.lengthComputable ? e.total : file.size));
+    xhr.upload.addEventListener('load', () => {
+      update(file.size, file.size);
+      $('upload-progress-text').textContent += ', waiting for the node to finish writing';
+    });
+    xhr.addEventListener('load', () => {
+      let body;
+      try { body = JSON.parse(xhr.responseText); } catch (_) { body = { error: { code: 'http', message: xhr.statusText || `status ${xhr.status}` } }; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body.version); else reject(body);
+    });
+    xhr.addEventListener('error', () => reject({ error: { code: 'network', message: 'the connection failed before the node answered' } }));
+    xhr.addEventListener('abort', () => reject('cancelled'));
+    xhr.open('PUT', '/api/objects/' + encodeKey(key));
+    if (file.type) xhr.setRequestHeader('content-type', file.type);
+    xhr.send(file);
+  });
+}
+$('upload-cancel').addEventListener('click', () => {
+  if (!activeUpload) return;
+  activeUpload.abort();
+  toast('upload cancelled; the node discards what it received');
 });
 
 // ------------------------------------------------------------ maintenance
