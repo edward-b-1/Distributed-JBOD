@@ -28,6 +28,7 @@
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
 //! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
+//! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
@@ -35,10 +36,18 @@
 //! Errors are JSON: `{"error": {"code", "message", ...}}`, where the
 //! fields are those of the node's `ErrorDetail` (SPEC 16.2) when the
 //! node refused, so the administrator sees the same identifying detail
-//! the command line prints.
+//! the command line prints. The status says whose fault it is: 502 when
+//! a node could not be reached, 404 for something that does not exist,
+//! 409 when the store refused a well-formed request because of its
+//! state, 400 for a malformed request (see `membership_status`).
 //!
 //! The HTTP side has no authentication of its own, so the server binds
-//! to localhost by default. Towards the cluster it connects as the
+//! to localhost by default, and it refuses two things a browser could
+//! otherwise be made to do from another site: a request that changes
+//! anything (any method but GET) whose `Sec-Fetch-Site` or `Origin`
+//! says it came from another origin, and any request whose `Host` is a
+//! name this server was not told it answers to, which is how a hostile
+//! DNS name pointed at this address would look (see `same_origin_only`). Towards the cluster it connects as the
 //! `djbod` client does: plain, or TLS with the same `--tls-ca`,
 //! `--tls-cert`, and `--tls-key` settings (19.1.6.2).
 
@@ -47,8 +56,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request as HttpRequest, State};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -93,11 +103,14 @@ pub struct ReadFailure {
     pub error: ErrorDetail,
 }
 
-/// Everything the handlers share: which cluster, and the recent read
-/// failures.
+/// Everything the handlers share: which cluster, the recent read
+/// failures, and the host names this server answers to.
 pub struct App {
     pub target: Target,
     failures: std::sync::Mutex<std::collections::HashMap<String, ReadFailure>>,
+    /// Host names, without port, accepted in `Host` besides IP literals
+    /// and `localhost`.
+    hosts: Vec<String>,
 }
 
 /// At most this many keys are remembered; the oldest go first.
@@ -156,8 +169,17 @@ pub struct Target {
     pub connector: Connector,
 }
 
-/// The whole application: the page at `/` and the API under `/api`.
+/// The whole application: the page at `/` and the API under `/api`,
+/// answering to IP-literal and `localhost` hosts only.
 pub fn router(target: Target) -> Router {
+    router_for_hosts(target, Vec::new())
+}
+
+/// As `router`, also answering to the given host names (SPEC 20.3): a
+/// request whose `Host` is any other name is refused, because a name an
+/// attacker controls can be pointed at this address and then looks, to
+/// the browser, like the attacker's own origin.
+pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
     let api = Router::new()
         .route("/status", get(status))
         .route("/cluster", get(cluster))
@@ -184,13 +206,116 @@ pub fn router(target: Target) -> Router {
         // Object bodies are as large as the cluster allows, not as large
         // as axum's default two megabytes.
         .layer(DefaultBodyLimit::disable());
+    let app = Arc::new(App {
+        target,
+        failures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        hosts: hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect(),
+    });
     Router::new()
         .route("/", get(page))
         .nest("/api", api)
-        .with_state(Arc::new(App {
-            target,
-            failures: std::sync::Mutex::new(std::collections::HashMap::new()),
-        }))
+        .layer(middleware::from_fn_with_state(
+            app.clone(),
+            same_origin_only,
+        ))
+        .with_state(app)
+}
+
+/// Refuse what a browser could be made to send from another site.
+///
+/// Two checks. First, `Host` must be an IP literal, `localhost`, or a
+/// name this server was told it answers to; anything else is a DNS name
+/// pointed here by someone else, and is refused whatever the method.
+/// Second, a request with any method but GET or HEAD must come from this
+/// page: `Sec-Fetch-Site` is `same-origin` or `none` (typed or a
+/// bookmark), or, when a client sends no such header, `Origin` is absent
+/// (not a browser) or names this host. A form on another site posts
+/// with `Sec-Fetch-Site: cross-site` and is refused; the page's own
+/// requests pass. This is not authentication (there is none, 19.1.6),
+/// only the browser's own word about where a request came from.
+async fn same_origin_only(
+    State(app): State<Arc<App>>,
+    request: HttpRequest,
+    next: Next,
+) -> Response {
+    let headers = request.headers();
+    let host = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(host_name)
+        .unwrap_or_default();
+    if !app.host_allowed(&host) {
+        return refuse(
+            "unknown_host",
+            format!("this server does not answer to the host name {host:?}; use its address, or start it with --host {host}"),
+        );
+    }
+    if request.method() != Method::GET && request.method() != Method::HEAD {
+        let site = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok());
+        let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+        let same_origin = match (site, origin) {
+            (Some("same-origin"), _) | (Some("none"), _) => true,
+            (Some(_), _) => false,
+            (None, None) => true,
+            (None, Some(origin)) => {
+                let origin_host = origin
+                    .split_once("://")
+                    .map(|(_, rest)| rest)
+                    .unwrap_or(origin);
+                host_name(origin_host) == host
+            }
+        };
+        if !same_origin {
+            return refuse(
+                "cross_site",
+                "refused: this request did not come from the page itself",
+            );
+        }
+    }
+    next.run(request).await
+}
+
+/// The name part of `host[:port]`, lower-cased; an IPv6 literal keeps
+/// its brackets.
+fn host_name(authority: &str) -> String {
+    let authority = authority.trim();
+    let without_port = if authority.starts_with('[') {
+        authority
+            .split_once(']')
+            .map(|(h, _)| format!("{h}]"))
+            .unwrap_or(authority.to_string())
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h.to_string())
+            .unwrap_or(authority.to_string())
+    };
+    without_port.to_ascii_lowercase()
+}
+
+impl App {
+    fn host_allowed(&self, host: &str) -> bool {
+        if host.is_empty() {
+            // HTTP/1.0, or a client that sent none: not a browser.
+            return true;
+        }
+        if host == "localhost" || host.ends_with(".localhost") {
+            return true;
+        }
+        let literal = host.trim_start_matches('[').trim_end_matches(']');
+        if literal.parse::<std::net::IpAddr>().is_ok() {
+            return true;
+        }
+        self.hosts.iter().any(|h| h == host)
+    }
+}
+
+fn refuse(code: &str, message: impl Into<String>) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({ "error": { "code": code, "message": message.into() } })),
+    )
+        .into_response()
 }
 
 async fn page() -> Html<&'static str> {
@@ -256,16 +381,64 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_GATEWAY,
                 json!({ "error": { "code": "node_unreachable", "message": e.to_string() } }),
             ),
-            ApiError::Membership(e) => (
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": { "code": "membership", "message": e.to_string() } }),
-            ),
+            ApiError::Membership(e) => {
+                let (status, code) = membership_status(&e);
+                (
+                    status,
+                    json!({ "error": { "code": code, "message": e.to_string() } }),
+                )
+            }
             ApiError::BadRequest(message) => (
                 StatusCode::BAD_REQUEST,
                 json!({ "error": { "code": "bad_request", "message": message } }),
             ),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+/// Whose fault a failed document change is, so the page can tell a
+/// refusal from an outage: 502 when a node could not be reached or the
+/// change only got part way round; 404 when the request named something
+/// that does not exist; 409 when the store refused a well-formed request
+/// because of its current state, or another change won the race, which
+/// a retry settles; 500 for a fault in this server's own configuration.
+/// The code is the error's name, for scripts.
+fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
+    use MembershipError as M;
+    match e {
+        M::BadAddress { .. } => (StatusCode::BAD_GATEWAY, "bad_address"),
+        M::Unreachable { .. } => (StatusCode::BAD_GATEWAY, "unreachable"),
+        M::PeerUnreachable { .. } => (StatusCode::BAD_GATEWAY, "peer_unreachable"),
+        M::Partial { .. } => (StatusCode::BAD_GATEWAY, "partial"),
+        M::UnexpectedResponse { .. } => (StatusCode::BAD_GATEWAY, "unexpected_response"),
+        M::TooManyRetries(_) => (StatusCode::BAD_GATEWAY, "too_many_retries"),
+        M::WrongCluster { .. } => (StatusCode::BAD_GATEWAY, "wrong_cluster"),
+        M::Diverged { .. } => (StatusCode::BAD_GATEWAY, "diverged"),
+        M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
+        M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
+        M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
+        M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
+        M::Superseded { .. } => (StatusCode::CONFLICT, "superseded"),
+        M::AlreadyMember { .. } => (StatusCode::CONFLICT, "already_member"),
+        M::RemovedDevice { .. } => (StatusCode::CONFLICT, "removed_device"),
+        M::StillReferenced { .. } => (StatusCode::CONFLICT, "still_referenced"),
+        M::DeviceActive(_) => (StatusCode::CONFLICT, "device_active"),
+        M::NodeHasActiveDevices { .. } => (StatusCode::CONFLICT, "node_has_active_devices"),
+        M::NodeIsAlive { .. } => (StatusCode::CONFLICT, "node_is_alive"),
+        M::LastNode => (StatusCode::CONFLICT, "last_node"),
+        M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
+        M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
+        M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
+        // A document that fails validation: a bad or duplicate label, a
+        // scheme the devices cannot carry, and the like.
+        M::Node(djbod_node::node::NodeError::InvalidDocument(_)) => {
+            (StatusCode::CONFLICT, "invalid_document")
+        }
+        M::Node(_) => (StatusCode::INTERNAL_SERVER_ERROR, "node"),
+        M::Device(_) => (StatusCode::INTERNAL_SERVER_ERROR, "device"),
+        M::Tls(_) => (StatusCode::INTERNAL_SERVER_ERROR, "tls"),
     }
 }
 
@@ -280,6 +453,22 @@ async fn connect(target: &Target) -> ApiResult<Connection> {
     .await?)
 }
 
+/// The device a path parameter names: a UUID, or a label looked up in
+/// the cluster document (SPEC 6.2.5.1), as every `djbod` command that
+/// takes a device accepts either. A label costs one document fetch.
+async fn device_param(app: &App, name: &str) -> ApiResult<DeviceId> {
+    match Uuid::parse_str(name) {
+        Ok(uuid) => Ok(DeviceId(uuid)),
+        Err(_) => Ok(membership::resolve_device(
+            &app.target.connector,
+            app.target.node,
+            app.target.cluster,
+            name,
+        )
+        .await?),
+    }
+}
+
 fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
     Uuid::parse_str(id).map_err(|_| ApiError::BadRequest(format!("{what} id {id:?} is not a UUID")))
 }
@@ -290,18 +479,21 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
     let mut conn = connect(target).await?;
     match conn.request(Request::Status).await? {
-        // `..`: the status gains fields as the protocol grows (the TLS
-        // work adds `transport`); the page needs only these.
         Reply::Status {
             cluster_id,
             document_version,
             coordinator,
+            transport,
             devices,
-            ..
         } => Ok(Json(json!({
             "cluster_id": cluster_id,
             "document_version": document_version,
             "coordinator": coordinator,
+            // The cluster's transport (SPEC 19.1.6.3): plain, tls-optional,
+            // or tls; and whether this server's own connection to the node
+            // is TLS, which follows from how it was started.
+            "transport": transport,
+            "ui_to_node_tls": conn.is_tls(),
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),
@@ -935,7 +1127,7 @@ async fn drain(
     Json(body): Json<DrainBody>,
 ) -> ApiResult<Response> {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let mut conn = connect(target).await?;
     let id = conn.start_drain(device, body.partial).await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
@@ -957,7 +1149,7 @@ async fn set_device_state(
     Json(body): Json<StateBody>,
 ) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     if body.state == DeviceState::Removed {
         return Err(ApiError::BadRequest(
             "a device is removed with the remove action, after draining".to_string(),
@@ -994,7 +1186,7 @@ async fn set_device_label(
     Json(body): Json<LabelBody>,
 ) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let label = body
         .label
         .map(|l| l.trim().to_string())
@@ -1017,7 +1209,7 @@ async fn set_device_label(
 
 async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let (document, changed) =
         membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
     Ok(Json(json!({

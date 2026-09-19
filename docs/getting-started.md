@@ -201,7 +201,11 @@ needs the same `--tls-ca`, `--tls-cert`, and `--tls-key` settings, or
 their `DJBOD_TLS_*` variables. The HTTP side has no authentication and
 no TLS, so keep it on localhost and reach it from another machine through
 an SSH tunnel, `ssh -L 5264:127.0.0.1:5264 <host>`, or bind it to a LAN
-address with `--listen` only on a network you trust. The JSON API
+address with `--listen` only on a network you trust. It does refuse what
+a browser could be made to send from another web site: a request that
+changes anything must come from the page itself, and the server answers
+only to its IP addresses and `localhost` unless told other names with
+`--host`, so a DNS name someone else points at it does not work. The JSON API
 it serves under `/api/` is documented at the top of
 `crates/djbod-ui/src/lib.rs`.
 
