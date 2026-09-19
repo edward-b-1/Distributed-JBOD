@@ -133,6 +133,8 @@
      detail column and squeeze the list. Let both columns shrink; wide
      content then scrolls inside its own box. */
   .split > * { min-width: 0; }
+  .filter-spacer { display: none; }
+  @media (min-width: 900px) { .filter-spacer { display: block; } }
   #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
   .log {
     font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
@@ -219,12 +221,15 @@
     <button id="upload-cancel">Cancel</button>
   </div>
   <div class="split">
+    <!-- Two grid rows: the filter over the list, an empty cell over the
+         panel, so the panel's top lines up with the table's. -->
+    <div class="row" style="margin:0">
+      <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
+      <button id="list-go">List</button>
+      <button id="list-clear" title="empty the prefix and list every key">Clear</button>
+    </div>
+    <div class="filter-spacer"></div>
     <div>
-      <div class="row" style="margin-top:0">
-        <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
-        <button id="list-go">List</button>
-        <button id="list-clear" title="empty the prefix and list every key">Clear</button>
-      </div>
       <table>
         <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
         <tbody id="objects"></tbody>
