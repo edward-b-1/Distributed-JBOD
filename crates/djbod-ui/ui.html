@@ -18,6 +18,8 @@
     --warning: #fab219;
     --serious: #ec835a;
     --critical: #d03b3b;
+    --warning-soft: #fff3df;
+    --critical-soft: #fbe3e3;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -31,6 +33,8 @@
       --muted: #8a8984;
       --accent: #3987e5;
       --accent-track: #1d3a5e;
+      --warning-soft: #3a2f16;
+      --critical-soft: #3d1c1c;
     }
   }
   * { box-sizing: border-box; }
@@ -105,6 +109,14 @@
   .log .finding { color: var(--critical); }
   .log .repaired { color: var(--good); }
   .log .muted { color: var(--muted); }
+  .banner {
+    display: flex; gap: 12px; align-items: baseline; padding: 8px 16px; font-size: 13px;
+    background: var(--warning-soft); color: var(--text); border-bottom: 1px solid var(--line);
+  }
+  .banner.critical { background: var(--critical-soft); }
+  .banner .what { flex: 1; }
+  .banner code { font-family: var(--mono); }
+  .banner button { border: none; background: none; padding: 0 0 0 8px; color: var(--text-2); }
   #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; max-width: 460px; z-index: 10; }
   .toast { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 10px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
   .toast.error { border-left-color: var(--critical); }
@@ -131,6 +143,7 @@
   <span class="meta" id="h-refreshed"></span>
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
+<div id="banners"></div>
 <nav role="tablist">
   <button role="tab" data-tab="overview" aria-selected="true">Overview</button>
   <button role="tab" data-tab="objects">Objects</button>
@@ -394,7 +407,7 @@ async function refresh() {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
-    renderHeader(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
+    renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
 function renderHeader() {
@@ -407,6 +420,41 @@ function renderHeader() {
   $('h-transport').textContent = status.transport || 'plain';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
   document.title = `Distributed-JBOD ${short(status.cluster_id)}`;
+}
+// Warnings about unencrypted links, one line each, dismissable for the
+// session. Two links are judged: the cluster's own transport, which the
+// status reports (SPEC 19.1.6.3), and this page's connection to the UI
+// server, which the browser knows. The UI server's own connection to
+// the node is shown in the header instead, since a tls cluster refuses a
+// plain one outright.
+function renderBanners() {
+  const { status } = state;
+  const warnings = [];
+  const transport = status.transport || 'plain';
+  if (transport === 'plain') {
+    warnings.push({ id: 'transport-plain', level: 'critical',
+      text: 'The cluster transport is plain. Connections between nodes, and from clients, are unencrypted. Change it with ',
+      code: 'djbod cluster set-transport' });
+  } else if (transport === 'tls-optional') {
+    warnings.push({ id: 'transport-optional', level: '',
+      text: 'The cluster transport is tls-optional. Nodes use TLS with each other, but clients may still connect without a certificate. Finish with ',
+      code: 'djbod cluster set-transport tls' });
+  }
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
+  if (location.protocol === 'http:' && !local) {
+    warnings.push({ id: 'page-plain', level: 'critical',
+      text: `This page is served using http from ${location.host}. Configure TLS encryption with a reverse proxy in front of `,
+      code: 'djbod-ui', tail: '.' });
+  }
+  let dismissed = [];
+  try { dismissed = JSON.parse(sessionStorage.getItem('dismissed-banners') || '[]'); } catch (_) { dismissed = []; }
+  $('banners').replaceChildren(...warnings.filter((w) => !dismissed.includes(w.id)).map((w) =>
+    el('div', { class: 'banner ' + w.level, role: 'alert' },
+      el('span', { class: 'what' }, w.text, el('code', { text: w.code }), w.tail || ''),
+      el('button', { text: '×', 'aria-label': 'dismiss for this session', onclick: () => {
+        try { sessionStorage.setItem('dismissed-banners', JSON.stringify([...dismissed, w.id])); } catch (_) { /* shown again next load */ }
+        renderBanners();
+      } }))));
 }
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
