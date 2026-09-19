@@ -18,9 +18,11 @@
 //! | `GET  /objects?prefix&start_after&limit` | `ListKeys`                      |
 //! | `GET  /objects/{key}`                | `HeadObject`                        |
 //! | `PUT  /objects/{key}`                | `PutObject`, body streamed through  |
+//! | `GET  /upload-check?size=N`          | `Status` and the document: would a write of N bytes fit? |
 //! | `DELETE /objects/{key}`              | `DeleteObject`                      |
 //! | `GET  /download/{key}`               | `GetObject`, body streamed through  |
 //! | `POST /repair/{key}`                 | `RepairObject`                      |
+//! | `POST /verify/{key}`                 | `GetObject`, body read and discarded; progress and the verdict as NDJSON |
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
@@ -48,7 +50,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::io::StreamReader;
@@ -56,6 +58,7 @@ use uuid::Uuid;
 
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
+use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
 use djbod_node::client::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_node::membership::{self, MembershipError};
@@ -84,12 +87,14 @@ pub fn router(target: Target) -> Router {
         .route("/cluster/scheme", post(cluster_scheme))
         .route("/cluster/limits", post(cluster_limits))
         .route("/objects", get(list_objects))
+        .route("/upload-check", get(upload_check))
         .route(
             "/objects/{*key}",
             get(head_object).put(put_object).delete(delete_object),
         )
         .route("/download/{*key}", get(download_object))
         .route("/repair/{*key}", post(repair_object))
+        .route("/verify/{*key}", post(verify_object))
         .route("/move-shard/{*key}", post(move_shard))
         .route("/scrub", post(scrub))
         .route("/devices/{id}/state", post(set_device_state))
@@ -369,10 +374,84 @@ async fn put_object(
         .map(str::to_string);
     let mut conn = connect(&target).await?;
     let mut source = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
-    let version = conn
+    let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
-        .await?;
+        .await;
+    let version = match result {
+        Ok(version) => version,
+        Err(e) => {
+            // The node has refused, but the browser may still be sending
+            // the body. A response on a connection whose request body was
+            // never read makes the browser report a network failure and
+            // drop the response, so the reason would be lost. Read and
+            // discard the rest first; the refusal is then delivered.
+            let _ = tokio::io::copy(&mut source, &mut tokio::io::sink()).await;
+            return Err(e.into());
+        }
+    };
     Ok(Json(json!({ "key": key, "version": version.to_text() })))
+}
+
+#[derive(Deserialize)]
+struct UploadCheckParams {
+    size: u64,
+}
+
+/// Whether a write of `size` bytes would find room, judged as the
+/// coordinator judges it (SPEC 10.4): k+m active devices each with at
+/// least one shard file's worth of free space within headroom, which is
+/// what `Status` reports. The page asks before starting an upload so a
+/// file that plainly will not fit is refused before its bytes are sent;
+/// the node remains the authority when the upload runs. Devices that
+/// share one filesystem report the same free space several times, so
+/// the answer is optimistic there.
+async fn upload_check(
+    State(target): State<Arc<Target>>,
+    Query(params): Query<UploadCheckParams>,
+) -> ApiResult {
+    let mut conn = connect(&target).await?;
+    let document = match conn.request(Request::GetClusterConfig).await? {
+        Reply::GetClusterConfig { document } => document,
+        other => return Err(ApiError::unexpected(other)),
+    };
+    let devices = match conn.request(Request::Status).await? {
+        Reply::Status { devices, .. } => devices,
+        other => return Err(ApiError::unexpected(other)),
+    };
+    let internal =
+        |message: String| ApiError::Remote(ErrorDetail::new(ErrorCode::Internal, message));
+    let scheme = Scheme::new(document.k, document.m)
+        .map_err(|e| internal(format!("the cluster document's scheme is invalid: {e}")))?;
+    let shard_bytes = if params.size == 0 {
+        0
+    } else {
+        djbod_core::shardfile::shard_file_length(scheme, document.block_size, params.size)
+            .ok_or_else(|| internal("could not compute the shard file length".to_string()))?
+    };
+    let required = scheme.total_shards();
+    let mut active_free: Vec<u64> = devices
+        .iter()
+        .filter(|d| d.state == DeviceState::Active)
+        .map(|d| d.free_bytes)
+        .collect();
+    active_free.sort_unstable_by(|a, b| b.cmp(a));
+    let with_room = active_free
+        .iter()
+        .filter(|free| **free >= shard_bytes)
+        .count();
+    Ok(Json(json!({
+        "size": params.size,
+        "fits": with_room >= required && params.size <= document.max_object_bytes,
+        "too_large": params.size > document.max_object_bytes,
+        "max_object_bytes": document.max_object_bytes,
+        "shard_bytes": shard_bytes,
+        "required_devices": required,
+        "active_devices": active_free.len(),
+        "devices_with_room": with_room,
+        // Free space on the device that would receive the last shard:
+        // the k+m-th emptiest active device, or 0 if there are fewer.
+        "room_bytes": active_free.get(required.saturating_sub(1)).copied().unwrap_or(0),
+    })))
 }
 
 async fn delete_object(State(target): State<Arc<Target>>, Path(key): Path<String>) -> ApiResult {
@@ -431,6 +510,11 @@ async fn download_object(
                         (conn, expected_sequence + 1, false),
                     ))
                 }
+                // A clean end means the coordinator has already checked
+                // the delivered length and the whole-object checksum
+                // against the record (SPEC 11.7) and would have ended with
+                // ObjectChecksumMismatch otherwise; each chunk was checked
+                // above. This is what `djbod get` relies on too.
                 StreamItem::End(end) => match end.error {
                     None => None,
                     Some(detail) => Some((
@@ -476,6 +560,113 @@ async fn download_object(
         HeaderValue::from_str(&record.version.to_text())
             .unwrap_or_else(|_| HeaderValue::from_static("")),
     );
+    Ok(response)
+}
+
+/// Read the object through, as a download would, without keeping it: the
+/// node checks every block against its checksum and the whole object at
+/// the end (SPEC 11.7), so this answers whether a download would succeed
+/// and, when it would not, exactly what is damaged. The answer streams as
+/// JSON lines so the page can show progress: `start` with the size, a
+/// `progress` line every few megabytes, then `done` with `verified` and,
+/// when false, the node's error detail. A damaged object is a result, not
+/// a failure of the request; only not finding the object or the node is
+/// an HTTP error.
+async fn verify_object(
+    State(target): State<Arc<Target>>,
+    Path(key): Path<String>,
+) -> ApiResult<Response> {
+    const REPORT_EVERY: u64 = 8 * 1024 * 1024;
+    let mut conn = connect(&target).await?;
+    let id = conn
+        .send_request(Request::GetObject { key: key.clone() })
+        .await?;
+    let record = match conn.read_response(id).await? {
+        Reply::GetObject { record } => record,
+        other => return Err(ApiError::unexpected(other)),
+    };
+    let size = record.size;
+    let start = json!({
+        "event": "start",
+        "key": key,
+        "version": record.version.to_text(),
+        "size": size,
+    });
+    struct Progress {
+        conn: Connection,
+        expected_sequence: u64,
+        bytes: u64,
+        unreported: u64,
+        finished: bool,
+    }
+    let state = Progress {
+        conn,
+        expected_sequence: 0,
+        bytes: 0,
+        unreported: 0,
+        finished: false,
+    };
+    let done = |verified: bool, error: Option<ErrorDetail>, bytes: u64| json!({ "event": "done", "verified": verified, "error": error, "bytes": bytes });
+    let lines = futures_util::stream::unfold(state, move |mut st| async move {
+        if st.finished {
+            return None;
+        }
+        let line = loop {
+            match st.conn.read_stream_item(id).await {
+                Ok(StreamItem::Data(data)) => {
+                    if data.sequence != st.expected_sequence
+                        || checksum_block(&data.bytes) != data.checksum
+                    {
+                        st.finished = true;
+                        let detail = ErrorDetail::new(
+                            ErrorCode::ProtocolViolation,
+                            format!(
+                                "body chunk {} out of order or corrupt in transit",
+                                data.sequence
+                            ),
+                        );
+                        break done(false, Some(detail), st.bytes);
+                    }
+                    st.expected_sequence += 1;
+                    st.bytes += data.bytes.len() as u64;
+                    st.unreported += data.bytes.len() as u64;
+                    if st.unreported < REPORT_EVERY && st.bytes < size {
+                        continue;
+                    }
+                    st.unreported = 0;
+                    break json!({ "event": "progress", "bytes": st.bytes });
+                }
+                Ok(StreamItem::End(end)) => {
+                    st.finished = true;
+                    break done(end.error.is_none(), end.error, st.bytes);
+                }
+                Err(e) => {
+                    st.finished = true;
+                    let detail = match e {
+                        ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                        other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
+                    };
+                    break done(false, Some(detail), st.bytes);
+                }
+            }
+        };
+        let mut text = line.to_string();
+        text.push('\n');
+        Some((Ok::<Bytes, io::Error>(Bytes::from(text)), st))
+    });
+    let first = futures_util::stream::once(async move {
+        let mut text = start.to_string();
+        text.push('\n');
+        Ok::<Bytes, io::Error>(Bytes::from(text))
+    });
+    let mut response = Body::from_stream(first.chain(lines)).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 

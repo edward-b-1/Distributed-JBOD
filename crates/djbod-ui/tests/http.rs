@@ -575,3 +575,174 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "node_unreachable");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upload_check_judges_room_as_the_coordinator_would() {
+    let test = start_node(4, 3, 1).await;
+    let (status, json) = get_json(&test, "/api/upload-check?size=1000").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["fits"], true);
+    assert_eq!(json["too_large"], false);
+    assert_eq!(json["required_devices"], 4);
+    assert_eq!(json["active_devices"], 4);
+    assert_eq!(json["devices_with_room"], 4);
+    let expected = djbod_core::shardfile::shard_file_length(
+        djbod_core::erasure::Scheme::new(3, 1).unwrap(),
+        64 * 1024,
+        1000,
+    )
+    .unwrap();
+    assert_eq!(json["shard_bytes"], expected);
+
+    // Larger than the maximum object size (1 TiB by default) and than any
+    // device: refused on both counts, before a byte is sent.
+    let (status, json) = get_json(&test, &format!("/api/upload-check?size={}", 1u64 << 41)).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["fits"], false);
+    assert_eq!(json["too_large"], true);
+    assert_eq!(json["devices_with_room"], 0);
+
+    // Under the size limit but over the room: the room is the reason.
+    let (_, json) = post_json(
+        &test,
+        "/api/cluster/limits",
+        serde_json::json!({ "max_object_bytes": 1u64 << 50 }),
+    )
+    .await;
+    assert_eq!(json["changed"], true, "{json}");
+    let (_, json) = get_json(&test, &format!("/api/upload-check?size={}", 1u64 << 45)).await;
+    assert_eq!(json["fits"], false, "{json}");
+    assert_eq!(json["too_large"], false);
+    assert_eq!(json["devices_with_room"], 0);
+    assert!(json["room_bytes"].as_u64().unwrap() > 0);
+
+    // A zero-length object needs no room.
+    let (_, json) = get_json(&test, "/api/upload-check?size=0").await;
+    assert_eq!(json["fits"], true, "{json}");
+    assert_eq!(json["shard_bytes"], 0);
+}
+
+/// Over a real socket, as a browser would do it: the node refuses the
+/// write at once, but the client keeps sending the body. The server must
+/// read the whole body before answering, or the client sees the
+/// connection closed mid-send and never learns why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusal_during_upload_is_delivered_after_the_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let test = start_node(4, 3, 1).await;
+    let (_, json) = post_json(
+        &test,
+        "/api/cluster/limits",
+        serde_json::json!({ "max_object_bytes": 4096 }),
+    )
+    .await;
+    assert_eq!(json["changed"], true, "{json}");
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = listener.local_addr().unwrap();
+    let router = app(&test);
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let size: usize = 64 * 1024 * 1024;
+    let mut socket = tokio::net::TcpStream::connect(http).await.unwrap();
+    socket
+        .write_all(
+            format!(
+                "PUT /api/objects/too/big HTTP/1.1\r\nHost: djbod\r\nContent-Length: {size}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // Every write must succeed: a server that closed early would reset
+    // the connection part way through.
+    let chunk = vec![0xabu8; 64 * 1024];
+    let mut sent = 0;
+    while sent < size {
+        socket
+            .write_all(&chunk)
+            .await
+            .expect("the server kept reading");
+        sent += chunk.len();
+    }
+    let mut response = Vec::new();
+    socket.read_to_end(&mut response).await.unwrap();
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 400 "), "{text}");
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json: serde_json::Value = serde_json::from_str(body.trim()).expect("json body");
+    assert_eq!(json["error"]["code"], "object_too_large", "{json}");
+}
+
+/// Run a verify and return its JSON lines.
+async fn verify_lines(test: &TestNode, key: &str) -> (StatusCode, Vec<serde_json::Value>) {
+    let (status, headers, body) = call(
+        test,
+        Request::post(format!("/api/verify/{key}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    if status == StatusCode::OK {
+        assert_eq!(headers[header::CONTENT_TYPE], "application/x-ndjson");
+    }
+    let lines = String::from_utf8_lossy(&body)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    (status, lines)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verify_names_the_damage_a_download_would_meet() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 2 * 64 * 1024 + 7, 11);
+    put_object(&test, "v/file", &body, None).await;
+
+    let (status, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(status, StatusCode::OK, "{lines:?}");
+    assert_eq!(lines[0]["event"], "start");
+    assert_eq!(lines[0]["size"], body.len());
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done", "{lines:?}");
+    assert_eq!(done["verified"], true);
+    assert_eq!(done["bytes"], body.len());
+    // The last progress line reports the whole object.
+    let progress: Vec<&serde_json::Value> =
+        lines.iter().filter(|l| l["event"] == "progress").collect();
+    assert_eq!(progress.last().unwrap()["bytes"], body.len(), "{lines:?}");
+
+    // Damage shard 0, a data shard, inside its data.
+    let mut damaged = None;
+    for dir in &test.dirs {
+        for entry in walkdir(dir.path()) {
+            if entry.to_string_lossy().ends_with(".0.shard") {
+                let mut bytes = std::fs::read(&entry).unwrap();
+                bytes[4096 + 10] ^= 0xff;
+                std::fs::write(&entry, bytes).unwrap();
+                damaged = Some(entry);
+            }
+        }
+    }
+    assert!(damaged.is_some());
+
+    let (status, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(status, StatusCode::OK, "{lines:?}");
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done", "{lines:?}");
+    assert_eq!(done["verified"], false);
+    assert_eq!(done["error"]["code"], "block_checksum_mismatch");
+    assert_eq!(done["error"]["shard_index"], 0);
+    assert_eq!(done["error"]["stripe"], 0);
+    assert!(done["error"]["device"].is_string());
+
+    let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let (_, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(lines.last().unwrap()["verified"], true, "{lines:?}");
+
+    let (status, lines) = verify_lines(&test, "v/missing").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{lines:?}");
+    assert_eq!(lines[0]["error"]["code"], "not_found");
+}

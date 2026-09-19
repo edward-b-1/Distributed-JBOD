@@ -164,7 +164,12 @@ version and every device with a used-space meter and its state; a device
 is marked draining, drained, and removed from there and from the
 Maintenance tab, where scrubs and drains show their events as they
 happen. The Objects tab lists keys by prefix and shows a record, its
-shard placement, and repair, move-shard, download, upload, and delete.
+shard placement, and verify, repair, move-shard, download, upload, and
+delete. Verify reads the object through the node without saving it, so
+it names any damage a download would trip over.
+An upload is checked against the devices' free space before its bytes
+are sent, and a write the node refuses is reported with the node's
+reason.
 The Settings tab changes the scheme and the limits.
 
 Two things stay on the command line: `cluster remove-node --force`, which

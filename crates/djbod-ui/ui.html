@@ -50,7 +50,9 @@
   }
   nav button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
   main { padding: 16px; max-width: 1200px; margin: 0 auto; }
-  section[hidden] { display: none; }
+  /* Author display rules (flex on .row, grid on sections) would otherwise
+     beat the browser's own `[hidden] { display: none }`. */
+  [hidden] { display: none !important; }
   h2 { font-size: 15px; margin: 22px 0 8px; font-weight: 600; }
   h2:first-child { margin-top: 0; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
@@ -163,6 +165,12 @@
     <label>as key <input id="upload-key" placeholder="photos/cat.jpg" size="30"></label>
     <button id="upload-go">Upload</button>
   </div>
+  <div class="row" id="upload-progress" hidden>
+    <span class="key" id="upload-progress-name"></span>
+    <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill" id="upload-progress-fill" style="width:0%"></div></div></div>
+    <span class="hint" id="upload-progress-text"></span>
+    <button id="upload-cancel">Cancel</button>
+  </div>
   <div class="split">
     <div>
       <table>
@@ -242,6 +250,12 @@ function human(bytes) {
   return unit === 0 ? `${bytes} B` : `${value.toFixed(1)} ${units[unit]}`;
 }
 function short(id) { return String(id).slice(0, 8); }
+function humanTime(seconds) {
+  if (seconds < 60) return `${Math.ceil(seconds)} s`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)} min`;
+  return `${Math.floor(seconds / 3600)} h ${Math.round((seconds % 3600) / 60)} min`;
+}
+function ordinal(n) { const r = n % 100; if (r >= 11 && r <= 13) return 'th'; return ['th', 'st', 'nd', 'rd'][n % 10] || 'th'; }
 function el(tag, attrs = {}, ...children) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -254,9 +268,27 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 function idCell(id) {
-  return el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => {
-    navigator.clipboard?.writeText(String(id)); toast(`copied ${id}`);
-  } }, short(id));
+  return el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => copyText(String(id)) }, short(id));
+}
+/// Copy to the clipboard and say so. `navigator.clipboard` exists only on
+/// secure origins (HTTPS or localhost); over plain HTTP from another
+/// machine the page falls back to the older selection-based copy, and if
+/// that fails too the toast shows the full text to copy by hand.
+async function copyText(text) {
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); copied = true; } catch (_) { copied = false; }
+  }
+  if (!copied) {
+    const area = el('textarea', { style: 'position:fixed;left:-9999px;top:0', 'aria-hidden': 'true' });
+    area.value = text;
+    document.body.append(area);
+    area.focus(); area.select();
+    try { copied = document.execCommand('copy'); } catch (_) { copied = false; }
+    area.remove();
+  }
+  if (copied) toast(`copied ${text}`);
+  else toast('could not copy on this page', text, true);
 }
 function encodeKey(key) { return key.split('/').map(encodeURIComponent).join('/'); }
 
@@ -492,13 +524,58 @@ function renderDetail(record) {
       el('dt', { text: 'content type' }), el('dd', { text: record.content_type || '—' }),
       ...Object.entries(record.user_metadata || {}).flatMap(([k, v]) => [el('dt', { text: 'meta ' + k }), el('dd', { text: v })])),
     el('div', { class: 'actions', style: 'margin:10px 0' },
-      el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download' }),
+      el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download',
+        title: 'A download that stops short of the object\u2019s size failed the node\u2019s verification.' }),
+      el('button', { text: 'Verify', title: 'read the whole object through the node without saving it: every block is checked, and any damage is named', onclick: (e) => verify(record.key, e.target) }),
       el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
       el('button', { class: 'danger', text: 'Delete', onclick: () => remove(record.key) })),
+    el('div', { id: 'verify-result' }),
     el('table', {}, el('thead', {}, el('tr', {}, el('th', { class: 'num', text: '#' }), el('th', { text: 'Device' }), el('th', { text: 'Node' }), el('th', { text: 'State' }))), el('tbody', {}, ...shardRows)),
     el('div', { class: 'row' }, el('label', {}, 'Move ', shardSelect), el('label', {}, 'to ', targetSelect),
       el('button', { text: 'Move shard', onclick: () => moveShard(record.key, Number($('move-index').value), $('move-to').value || null) })),
     el('details', {}, el('summary', { text: 'record as JSON' }), el('pre', { text: JSON.stringify(record, null, 2) })));
+}
+async function verify(key, button) {
+  const box = $('verify-result');
+  button.disabled = true;
+  const fill = el('div', { class: 'fill', style: 'width:0%' });
+  const text = el('span', { class: 'hint', text: `verifying ${key}: reading every block through the node…` });
+  box.replaceChildren(el('div', { class: 'row', style: 'margin:0 0 10px' },
+    el('div', { class: 'meter', style: 'flex:1;min-width:200px' }, el('div', { class: 'track' }, fill)), text));
+  const started = performance.now();
+  let size = 0;
+  try {
+    await streamLines('/verify/' + encodeKey(key), {}, (e) => {
+      if (state.selectedKey !== key) return;
+      switch (e.event) {
+        case 'start': size = e.size; break;
+        case 'progress': {
+          const fraction = size ? e.bytes / size : 0;
+          fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+          const seconds = (performance.now() - started) / 1000;
+          const rate = seconds > 0 ? e.bytes / seconds : 0;
+          text.textContent = `verifying ${key}: ${human(e.bytes)} of ${human(size)} (${(fraction * 100).toFixed(0)}%)` +
+            (rate > 0 && e.bytes < size ? `, ${human(rate)}/s, about ${humanTime((size - e.bytes) / rate)} left` : '');
+          break;
+        }
+        case 'done': {
+          const when = new Date().toLocaleTimeString();
+          if (e.verified) {
+            box.replaceChildren(el('p', { class: 'ok', style: 'margin:0 0 10px', text: `verified at ${when}: ${human(e.bytes)} read and every block checked` }));
+          } else {
+            const err = e.error;
+            box.replaceChildren(el('p', { class: 'bad', style: 'margin:0 0 10px' },
+              `damaged (${when}, after ${human(e.bytes)} of ${human(size)}): ${err.code}: ${err.message}`,
+              el('br'),
+              el('span', { class: 'hint', text: describeError(err).replace(/\n/g, '   ') })));
+          }
+          break;
+        }
+        default: break;
+      }
+    });
+  } catch (e) { box.replaceChildren(); fail('verify', e); }
+  finally { button.disabled = false; }
 }
 async function repair(key) {
   try {
@@ -542,17 +619,72 @@ $('upload-go').addEventListener('click', async () => {
   if (!key) return toast('give the object a key', '', true);
   $('upload-go').disabled = true;
   try {
-    const headers = {};
-    if (file.type) headers['content-type'] = file.type;
-    const response = await fetch('/api/objects/' + encodeKey(key), { method: 'PUT', headers, body: file });
-    const body = JSON.parse(await response.text());
-    if (!response.ok) throw body;
-    toast(`stored ${key} as version ${body.version}`);
+    // Ask first whether it can fit, so a file that plainly will not is
+    // refused before its bytes are sent. The node still decides.
+    const check = await api('/upload-check?size=' + file.size);
+    if (check.too_large) {
+      toast(`${file.name} is ${human(file.size)}; the cluster's maximum object size is ${human(check.max_object_bytes)}`, 'change it under Settings if that is intended', true);
+      return;
+    }
+    if (!check.fits) {
+      toast(`no room for ${file.name} (${human(file.size)})`,
+        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${check.active_devices} active device(s) have that much` +
+        (check.active_devices >= check.required_devices ? `, and the ${check.required_devices}${ordinal(check.required_devices)} emptiest has ${human(check.room_bytes)}` : '') +
+        '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
+      return;
+    }
+    const version = await uploadWithProgress(file, key);
+    toast(`stored ${key} as version ${version}`);
     $('upload-key').value = '';
     list();
     select(key);
-  } catch (e) { fail('upload', e); }
-  finally { $('upload-go').disabled = false; }
+  } catch (e) { if (e !== 'cancelled') fail('upload', e); }
+  finally { $('upload-go').disabled = false; $('upload-progress').hidden = true; activeUpload = null; }
+});
+
+let activeUpload = null;
+
+/// Send the file with XMLHttpRequest, which reports the bytes sent as
+/// they go; fetch cannot. Resolves to the version id, rejects with the
+/// server's JSON error, or with 'cancelled' after Cancel.
+function uploadWithProgress(file, key) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    activeUpload = xhr;
+    const started = performance.now();
+    $('upload-progress-name').textContent = key;
+    $('upload-progress').hidden = false;
+    const update = (sent, total) => {
+      const fraction = total ? sent / total : 1;
+      $('upload-progress-fill').style.width = `${(fraction * 100).toFixed(1)}%`;
+      const seconds = (performance.now() - started) / 1000;
+      const rate = seconds > 0 ? sent / seconds : 0;
+      let text = `${human(sent)} of ${human(total)} (${(fraction * 100).toFixed(0)}%)`;
+      if (rate > 0 && sent < total) text += `, ${human(rate)}/s, about ${humanTime((total - sent) / rate)} left`;
+      $('upload-progress-text').textContent = text;
+    };
+    update(0, file.size);
+    xhr.upload.addEventListener('progress', (e) => update(e.loaded, e.lengthComputable ? e.total : file.size));
+    xhr.upload.addEventListener('load', () => {
+      update(file.size, file.size);
+      $('upload-progress-text').textContent += ', waiting for the node to finish writing';
+    });
+    xhr.addEventListener('load', () => {
+      let body;
+      try { body = JSON.parse(xhr.responseText); } catch (_) { body = { error: { code: 'http', message: xhr.statusText || `status ${xhr.status}` } }; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body.version); else reject(body);
+    });
+    xhr.addEventListener('error', () => reject({ error: { code: 'network', message: 'the connection failed before the node answered' } }));
+    xhr.addEventListener('abort', () => reject('cancelled'));
+    xhr.open('PUT', '/api/objects/' + encodeKey(key));
+    if (file.type) xhr.setRequestHeader('content-type', file.type);
+    xhr.send(file);
+  });
+}
+$('upload-cancel').addEventListener('click', () => {
+  if (!activeUpload) return;
+  activeUpload.abort();
+  toast('Upload cancelled');
 });
 
 // ------------------------------------------------------------ maintenance
