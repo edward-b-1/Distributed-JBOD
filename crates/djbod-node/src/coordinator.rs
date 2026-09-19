@@ -38,7 +38,7 @@ use crate::local_ops::{respond, Failure};
 use crate::node::Node;
 use crate::server::{our_hello, ConnectionEnd, Reader, Writer};
 use crate::ulid::VersionGenerator;
-use crate::wire::{read_message, write_message};
+use crate::wire::{read_message_within, write_message};
 
 pub fn is_client_operation(request: &Request) -> bool {
     matches!(
@@ -1054,7 +1054,14 @@ async fn put_object(
     let key_hash = record_template.key_hash;
     let version = record_template.version;
 
-    let outcome = stream_body_to_holders(reader, &mut holders, scheme, &record_template).await;
+    let outcome = stream_body_to_holders(
+        reader,
+        &mut holders,
+        scheme,
+        &record_template,
+        node.stream_idle_timeout(),
+    )
+    .await;
     let object_checksum = match outcome {
         Ok(checksum) => checksum,
         Err(Failure::Error(detail)) => {
@@ -1249,6 +1256,7 @@ async fn stream_body_to_holders(
     holders: &mut [Holder],
     scheme: Scheme,
     record: &MetadataRecord,
+    idle: std::time::Duration,
 ) -> Result<BlockChecksum, Failure> {
     let code = ReedSolomonCode::new(scheme);
     let stripe_size = scheme.data_shards() * record.block_size as usize;
@@ -1259,7 +1267,9 @@ async fn stream_body_to_holders(
     let mut stripe_number: u64 = 0;
 
     loop {
-        let message = read_message(reader).await?;
+        // A client that stops sending must not hold k+m shard writes open
+        // forever; the caller aborts the holders on this error (10.12).
+        let message = read_message_within(reader, idle).await?;
         match message {
             Message::Data { data, .. } => {
                 if data.sequence != expected_sequence {

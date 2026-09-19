@@ -23,7 +23,7 @@ use djbod_proto::message::{
 
 use crate::node::{Node, NodeError, ShardWriteKey};
 use crate::server::{ConnectionEnd, Reader, Writer};
-use crate::wire::{read_message, write_message};
+use crate::wire::{read_message_within, write_message};
 
 /// Serve one request. `Err` closes the connection; ordinary failures are
 /// reported to the peer as `Response::Error` and return `Ok`.
@@ -607,8 +607,12 @@ async fn put_shard(
     respond(writer, id, Ok(Response::PutShardReady)).await?;
 
     let mut expected_stripe: u64 = 0;
+    let idle = node.stream_idle_timeout();
     loop {
-        let message = read_message(reader).await?;
+        // A sender that stops mid-stream (a crashed coordinator, a client
+        // that went away) must not leave this write open forever; the
+        // dropped `write` removes the temporary (10.12).
+        let message = read_message_within(reader, idle).await?;
         match message {
             Message::Data { id: got, data } if got == id => {
                 if data.sequence != expected_stripe {

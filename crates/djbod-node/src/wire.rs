@@ -1,5 +1,7 @@
 //! Frames over tokio streams.
 
+use std::time::Duration;
+
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -16,6 +18,21 @@ pub enum WireError {
     Frame(#[from] FrameError),
     #[error(transparent)]
     Message(#[from] MessageError),
+    #[error("no frame arrived for {} seconds; the stream was abandoned (SPEC 10.12)", .0.as_secs())]
+    Idle(Duration),
+}
+
+/// Read one message, or fail with `Idle` if none arrives within `idle`.
+/// For the receiving side of a block stream: a sender that stops mid-way
+/// must not leave the receiver waiting forever.
+pub async fn read_message_within<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    idle: Duration,
+) -> Result<Message, WireError> {
+    match tokio::time::timeout(idle, read_message(reader)).await {
+        Ok(result) => result,
+        Err(_) => Err(WireError::Idle(idle)),
+    }
 }
 
 /// Read one frame. `Closed` if the peer hung up cleanly between frames.
@@ -43,5 +60,12 @@ pub async fn write_message<W: AsyncWrite + Unpin>(
 ) -> Result<(), WireError> {
     let bytes = message.encode()?;
     writer.write_all(&bytes).await?;
+    // A plain TCP stream has nothing to flush. A TLS stream does: rustls
+    // may accept the plaintext into its own buffer while the socket would
+    // block, and nothing sends those encrypted bytes until the next write
+    // or a flush. Without this, the last frame of a conversation (an
+    // EndOfStream after many blocks) could sit unsent while both sides
+    // waited on each other.
+    writer.flush().await?;
     Ok(())
 }

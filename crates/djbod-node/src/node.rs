@@ -340,6 +340,11 @@ impl Node {
         })
     }
 
+    /// How long a receiver waits for the next frame of a stream (10.12).
+    pub fn stream_idle_timeout(&self) -> Duration {
+        Duration::from_secs(self.config.stream_idle_timeout_secs.max(1))
+    }
+
     /// This node's TLS material, if configured.
     pub fn tls(&self) -> Option<&Arc<TlsMaterial>> {
         self.tls.as_ref()
