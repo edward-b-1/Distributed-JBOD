@@ -73,7 +73,7 @@
     .rail button { width: auto; }
     .rail .count { margin-left: 4px; }
   }
-  main { padding: 16px 20px 32px; min-width: 0; max-width: 1200px; }
+  main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
   [hidden] { display: none !important; }
@@ -120,8 +120,10 @@
   input[type=number] { width: 9em; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
   .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); }
+  .row label.grow { flex: 1 1 14em; }
+  .row label.grow input { flex: 1; min-width: 6em; }
   .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
-  @media (min-width: 900px) { .split { grid-template-columns: 3fr 2fr; } }
+  @media (min-width: 900px) { .split { grid-template-columns: minmax(0, 1fr) minmax(360px, 1fr); } }
   .log {
     font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: var(--bg);
     border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 360px; overflow: auto; margin-top: 8px;
@@ -187,11 +189,10 @@
 
 <section id="tab-objects" hidden>
   <div class="row">
-    <label>Prefix <input id="prefix" placeholder="photos/" size="30"></label>
+    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
     <button id="list-go" class="primary">List</button>
-    <span style="flex:1"></span>
-    <label>Upload <input type="file" id="upload-file"></label>
-    <label>as key <input id="upload-key" placeholder="photos/cat.jpg" size="30"></label>
+    <label class="grow">Upload <input type="file" id="upload-file"></label>
+    <label class="grow">as key <input id="upload-key" placeholder="photos/cat.jpg"></label>
     <button id="upload-go">Upload</button>
   </div>
   <div class="row" id="upload-progress" hidden>
