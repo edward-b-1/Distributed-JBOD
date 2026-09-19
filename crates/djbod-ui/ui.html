@@ -126,7 +126,8 @@
   <h1>Distributed-JBOD</h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
   <span class="meta">document version <code id="h-version">…</code></span>
-  <span class="meta">via node <code id="h-node">…</code></span>
+  <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
+  <span class="meta">transport <code id="h-transport">…</code></span>
   <span class="meta" id="h-refreshed"></span>
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
@@ -402,6 +403,8 @@ function renderHeader() {
   $('h-version').textContent = status.document_version;
   $('h-node').textContent = short(status.coordinator);
   $('h-node').title = status.coordinator;
+  $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
+  $('h-transport').textContent = status.transport || 'plain';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
   document.title = `Distributed-JBOD ${short(status.cluster_id)}`;
 }
@@ -423,6 +426,11 @@ function renderOverview() {
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
     ['Scheme', `${doc.k}+${doc.m}`, `${human(doc.block_size)} blocks, any ${doc.m} of ${doc.k + doc.m} may fail`],
+    ['Transport', status.transport || 'plain', {
+      plain: 'connections in the cluster are unencrypted',
+      'tls-optional': 'nodes use TLS with each other; clients may connect without it',
+      tls: 'every connection uses TLS and a certificate',
+    }[status.transport || 'plain'] || ''],
   ];
   $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
     el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));

@@ -462,18 +462,21 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
     let mut conn = connect(target).await?;
     match conn.request(Request::Status).await? {
-        // `..`: the status gains fields as the protocol grows (the TLS
-        // work adds `transport`); the page needs only these.
         Reply::Status {
             cluster_id,
             document_version,
             coordinator,
+            transport,
             devices,
-            ..
         } => Ok(Json(json!({
             "cluster_id": cluster_id,
             "document_version": document_version,
             "coordinator": coordinator,
+            // The cluster's transport (SPEC 19.1.6.3): plain, tls-optional,
+            // or tls; and whether this server's own connection to the node
+            // is TLS, which follows from how it was started.
+            "transport": transport,
+            "ui_to_node_tls": conn.is_tls(),
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),
