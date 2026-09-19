@@ -433,11 +433,11 @@ function renderBanners() {
   const transport = status.transport || 'plain';
   if (transport === 'plain') {
     warnings.push({ id: 'transport-plain', level: 'critical',
-      text: 'The cluster transport is plain. Connections between nodes, and from clients, are unencrypted. Change it with ',
+      text: 'The cluster transport is set to plain. Connections between nodes, and from clients, are unencrypted. Change it with ',
       code: 'djbod cluster set-transport' });
   } else if (transport === 'tls-optional') {
     warnings.push({ id: 'transport-optional', level: '',
-      text: 'The cluster transport is tls-optional. Nodes use TLS with each other, but clients may still connect without a certificate. Finish with ',
+      text: 'The cluster transport is set to tls-optional. Nodes use TLS with each other, but clients may still connect without a certificate. Finish with ',
       code: 'djbod cluster set-transport tls' });
   }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
