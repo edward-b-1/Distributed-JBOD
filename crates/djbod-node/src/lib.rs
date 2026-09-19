@@ -23,6 +23,10 @@
 //! Disk work runs on tokio's blocking pool via `spawn_blocking`;
 //! `djbod-core` stays synchronous (4.4).
 
+/// This software's build, crate version and git commit, sent in every
+/// `Hello` and printed by `--version`. The commit comes from `build.rs`.
+pub const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("DJBOD_GIT_COMMIT"));
+
 pub mod client;
 pub mod config;
 pub mod coordinator;

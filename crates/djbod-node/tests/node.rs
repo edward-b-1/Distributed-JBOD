@@ -107,6 +107,7 @@ impl TestNode {
             node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
             cluster_id: self.node.cluster_id(),
             document_version: self.node.document_version(),
+            build: None,
         };
         Connection::connect(self.addr, hello)
             .await
@@ -272,6 +273,7 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: test.node.cluster_id(),
         document_version: 99,
+        build: None,
     };
     match Connection::connect(test.addr, stale).await {
         Err(ClientError::Remote(detail)) => {
@@ -801,6 +803,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: test.node.cluster_id(),
         document_version: 1,
+        build: None,
     };
     assert!(matches!(
         Connection::connect(test.addr, stale).await,

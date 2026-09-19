@@ -5,7 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use djbod_proto::frame::{Frame, FrameError, FrameHeader, HEADER_LEN};
+use djbod_proto::frame::{Frame, FrameError, FrameHeader, MessageType, HEADER_LEN};
 use djbod_proto::message::{Message, MessageError};
 
 #[derive(Debug, Error)]
@@ -20,6 +20,10 @@ pub enum WireError {
     Message(#[from] MessageError),
     #[error("no frame arrived for {} seconds; the stream was abandoned (SPEC 10.12)", .0.as_secs())]
     Idle(Duration),
+    /// A well-framed request whose payload this build cannot decode, with
+    /// the request id to answer on.
+    #[error("request {id} cannot be decoded: {reason}")]
+    UndecodableRequest { id: u32, reason: String },
 }
 
 /// Read one message, or fail with `Idle` if none arrives within `idle`.
@@ -51,7 +55,16 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Frame, W
 
 pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Message, WireError> {
     let frame = read_frame(reader).await?;
-    Ok(Message::from_frame(&frame)?)
+    match Message::from_frame(&frame) {
+        Ok(message) => Ok(message),
+        Err(MessageError::Codec(e)) if frame.header.message_type == MessageType::Request => {
+            Err(WireError::UndecodableRequest {
+                id: frame.header.request_id,
+                reason: e.to_string(),
+            })
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub async fn write_message<W: AsyncWrite + Unpin>(

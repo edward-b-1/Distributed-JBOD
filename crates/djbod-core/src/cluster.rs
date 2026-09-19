@@ -51,6 +51,7 @@ impl std::fmt::Display for NodeId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeEntry {
     pub id: NodeId,
     /// `host:port` strings the node listens on.
@@ -107,6 +108,7 @@ pub enum DeviceState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceEntry {
     pub id: DeviceId,
     pub node: NodeId,
@@ -150,7 +152,11 @@ pub enum IndependenceLevel {
     Device,
 }
 
+/// A document with a field this build does not know is refused rather
+/// than read without it (SPEC 6.2.6.4): a node that dropped the field
+/// would hold the same version as its peers with different content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ClusterDocument {
     /// Monotonically increasing; every change is a new version (6.2.1).
     pub version: u64,
@@ -422,6 +428,30 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn a_field_this_build_does_not_know_is_refused_at_every_level() {
+        let mut json = serde_json::to_value(sample()).expect("to json");
+        let refused = |json: &serde_json::Value| {
+            let error = serde_json::from_value::<ClusterDocument>(json.clone())
+                .expect_err("refused")
+                .to_string();
+            assert!(error.contains("unknown field `colour`"), "{error}");
+        };
+        let mut with_extra = json.clone();
+        with_extra["colour"] = "blue".into();
+        refused(&with_extra);
+        let mut with_extra = json.clone();
+        with_extra["nodes"][0]["colour"] = "blue".into();
+        refused(&with_extra);
+        with_extra = json.clone();
+        with_extra["devices"][0]["colour"] = "blue".into();
+        refused(&with_extra);
+        // Without the extra field the same text reads back.
+        json["nodes"][0]["label"] = "nas1".into();
+        let document: ClusterDocument = serde_json::from_value(json).expect("read");
+        assert_eq!(document.nodes[0].label.as_deref(), Some("nas1"));
     }
 
     #[test]

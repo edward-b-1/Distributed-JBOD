@@ -27,6 +27,7 @@ rustls-pemfile = "2"
 
 [dev-dependencies]
 rcgen = "0.13"
+ciborium = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

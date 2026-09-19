@@ -426,6 +426,25 @@ document (18.3). The node and its devices are dropped from the document
 together, so a device of a removed node is recognised at `join` by being
 initialised for the cluster yet unlisted.
 
+6.2.6.4 [D] **Mixed builds.** A node refuses a document that carries a
+field its build does not know, whether it arrives in `ApplyClusterConfig`
+or is found in its own `cluster.json`, rather than reading the document
+without the field. Reading it without the field would leave the node
+holding the same version as its peers with different content, the
+disagreement 6.2.6.1 forbids, with no error until the next change, when
+`propose` reports the documents differing and nothing can be fixed
+automatically. The refusal is an ordinary error on the request, naming
+the field and the refusing node's build, so the proposer sees which node
+is behind; `djbod cluster show` prints every node's build for the same
+reason (19.1.5). The rule for a rolling upgrade follows: upgrade every
+node before making a change that uses a field the older build lacks. A
+document without such a field is accepted by old and new builds alike,
+since an absent optional field means its default (6.2.2). As built,
+`ClusterDocument`, `NodeEntry`, and `DeviceEntry` deny unknown fields; a
+request a node cannot decode is answered with `ProtocolViolation` on its
+request id and the connection is then closed, since what the request
+expected next is unknown.
+
 6.2.7 [D] All nodes must hold the same document version to serve requests.
 A node that finds itself holding a different version from a peer during a
 request returns an error, and a node refuses the `Hello` of a node peer
@@ -1665,8 +1684,9 @@ addresses by design.
 
 19.1.5 [D] Every connection begins with each side sending one `Hello`
 carrying the protocol version, its peer kind (node or client), its node id
-if a node, the cluster id, and its cluster document version (0 for a
-client). A node closes the connection if the protocol version is
+if a node, the cluster id, its cluster document version (0 for a
+client), and its software build (crate version and git commit; absent
+from builds before it was added, which `cluster show` reports as older). A node closes the connection if the protocol version is
 unsupported, the cluster id differs, or a node peer's document version
 differs (6.2.7), with an error naming which. This catches a node or client
 pointed at the wrong cluster and a node running stale software or

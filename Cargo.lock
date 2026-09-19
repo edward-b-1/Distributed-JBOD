@@ -365,6 +365,7 @@ name = "djbod-node"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ciborium",
  "clap",
  "djbod-core",
  "djbod-proto",
