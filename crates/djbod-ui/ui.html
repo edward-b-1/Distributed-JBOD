@@ -126,7 +126,7 @@
   .row label { display: inline-flex; gap: 6px; align-items: center; color: var(--text-2); }
   .row label.grow { flex: 1 1 14em; }
   .row label.grow input { flex: 1; min-width: 6em; }
-  .split { display: grid; grid-template-columns: 1fr; gap: 12px; }
+  .split { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 20px; }
   @media (min-width: 900px) { .split { grid-template-columns: minmax(0, 1fr) minmax(360px, 1fr); } }
   /* A grid column will not shrink below its widest unbreakable content,
      so a long line in the record JSON or a long key would widen the
@@ -225,7 +225,7 @@
          panel, so the panel's top lines up with the table's. -->
     <div class="row" style="margin:0">
       <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
-      <button id="list-go">List</button>
+      <button id="list-go" class="primary">List</button>
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
     </div>
     <div class="filter-spacer"></div>
