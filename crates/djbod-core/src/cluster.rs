@@ -114,9 +114,9 @@ pub struct DeviceEntry {
 }
 
 /// Longest device label, in bytes (SPEC 6.2.5.1).
-pub const MAX_LABEL_BYTES: usize = 64;
+pub const MAX_LABEL_BYTES: usize = 128;
 
-/// Whether `label` may name a device: 1 to 64 bytes of printable text
+/// Whether `label` may name a device: 1 to 128 bytes of printable text
 /// with no whitespace, and not something a UUID could be mistaken for.
 pub fn validate_label(label: &str) -> Result<(), ClusterDocumentError> {
     if label.is_empty() || label.len() > MAX_LABEL_BYTES {
@@ -506,7 +506,7 @@ mod tests {
         for bad in [
             "",
             "has space",
-            &"x".repeat(65),
+            &"x".repeat(129),
             &Uuid::from_u128(9).to_string(),
         ] {
             let mut doc = sample();

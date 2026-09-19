@@ -166,7 +166,7 @@ enum ClusterCommand {
     SetLabel {
         /// The device, by UUID or current label.
         device: String,
-        /// The new label: 1 to 64 characters, no whitespace.
+        /// The new label: 1 to 128 characters, no whitespace.
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
         label: Option<String>,
         #[arg(long)]

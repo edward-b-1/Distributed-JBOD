@@ -293,7 +293,7 @@ no message grows with the number of objects.
 `active` devices receive new shards.
 
 6.2.5.1 [D] **Device labels.** A device entry may carry a `label`, an
-administrator-chosen name of 1 to 64 bytes with no whitespace, unique
+administrator-chosen name of 1 to 128 bytes with no whitespace, unique
 within the document and not shaped like a UUID, set or cleared with
 `djbod cluster set-label` as a document change like any other. `status`
 shows it beside the UUID, and every `djbod` command that takes a device

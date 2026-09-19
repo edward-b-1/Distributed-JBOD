@@ -267,7 +267,7 @@ target/release/djbod status                       # LABEL column
 target/release/djbod cluster set-state nas1-bay0 draining
 ```
 
-Labels are unique, up to 64 characters with no spaces, and live in the
+Labels are unique, up to 128 characters with no spaces, and live in the
 cluster document, so they follow the disk if it moves to another machine.
 `set-label <label> --clear` removes one.
 
