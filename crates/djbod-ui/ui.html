@@ -208,17 +208,20 @@
 
 <section id="tab-objects" hidden>
   <div class="row">
-    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
-    <button id="list-go" class="primary">List</button>
     <label class="grow">Upload <input type="file" id="upload-file"></label>
     <label class="grow">as key <input id="upload-key" placeholder="photos/cat.jpg"></label>
-    <button id="upload-go">Upload</button>
+    <button id="upload-go" class="primary">Upload</button>
   </div>
   <div class="row" id="upload-progress" hidden>
     <span class="key" id="upload-progress-name"></span>
     <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill" id="upload-progress-fill" style="width:0%"></div></div></div>
     <span class="hint" id="upload-progress-text"></span>
     <button id="upload-cancel">Cancel</button>
+  </div>
+  <div class="row">
+    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
+    <button id="list-go">List</button>
+    <button id="list-clear" title="empty the prefix and list every key">Clear</button>
   </div>
   <div class="split">
     <div>
@@ -630,6 +633,7 @@ function renderListing() {
   $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
 }
 $('list-go').addEventListener('click', () => list());
+$('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
 $('list-more').addEventListener('click', () => list(state.listing.keys.at(-1)?.key));
 
