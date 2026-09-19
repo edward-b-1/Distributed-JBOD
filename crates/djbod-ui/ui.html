@@ -218,13 +218,13 @@
     <span class="hint" id="upload-progress-text"></span>
     <button id="upload-cancel">Cancel</button>
   </div>
-  <div class="row">
-    <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
-    <button id="list-go">List</button>
-    <button id="list-clear" title="empty the prefix and list every key">Clear</button>
-  </div>
   <div class="split">
     <div>
+      <div class="row" style="margin-top:0">
+        <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
+        <button id="list-go">List</button>
+        <button id="list-clear" title="empty the prefix and list every key">Clear</button>
+      </div>
       <table>
         <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
         <tbody id="objects"></tbody>
