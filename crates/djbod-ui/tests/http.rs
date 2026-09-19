@@ -531,13 +531,23 @@ async fn bad_requests_are_reported_as_such() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert_eq!(json["error"]["code"], "bad_request");
 
+    // A device that is not a UUID is looked up as a label; an unknown one
+    // is refused with a message naming it (its status is decided by the
+    // membership error mapping, not here).
     let (status, json) = post_json(
         &test,
         "/api/devices/not-a-uuid/remove",
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(!status.is_success(), "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not-a-uuid"),
+        "{json}"
+    );
 
     let (status, json) =
         post_json(&test, "/api/nodes/not-a-uuid/remove", serde_json::json!({})).await;
