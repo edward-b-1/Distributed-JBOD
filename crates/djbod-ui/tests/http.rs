@@ -533,13 +533,23 @@ async fn bad_requests_are_reported_as_such() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert_eq!(json["error"]["code"], "bad_request");
 
+    // A device that is not a UUID is looked up as a label; an unknown one
+    // is refused with a message naming it (its status is decided by the
+    // membership error mapping, not here).
     let (status, json) = post_json(
         &test,
         "/api/devices/not-a-uuid/remove",
         serde_json::json!({}),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert!(!status.is_success(), "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not-a-uuid"),
+        "{json}"
+    );
 
     let (status, json) =
         post_json(&test, "/api/nodes/not-a-uuid/remove", serde_json::json!({})).await;
@@ -844,6 +854,38 @@ async fn device_labels_are_set_shown_and_cleared() {
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT, "{json}");
+
+    // Wherever a device is named in a path, its label works too.
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/nas1-bay0/state",
+        serde_json::json!({ "state": "draining" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["device"], devices[0]);
+    assert_eq!(json["changed"], true);
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/nas1-bay0/state",
+        serde_json::json!({ "state": "active" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let (status, json) = post_json(
+        &test,
+        "/api/devices/no-such-label/state",
+        serde_json::json!({ "state": "draining" }),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "{json}");
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no-such-label"),
+        "{json}"
+    );
 
     // Null, or an empty string, clears it.
     let (status, json) = post_json(

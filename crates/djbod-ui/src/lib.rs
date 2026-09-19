@@ -28,6 +28,7 @@
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
 //! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
+//! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
@@ -450,6 +451,22 @@ async fn connect(target: &Target) -> ApiResult<Connection> {
         Connection::client_hello(target.cluster),
     )
     .await?)
+}
+
+/// The device a path parameter names: a UUID, or a label looked up in
+/// the cluster document (SPEC 6.2.5.1), as every `djbod` command that
+/// takes a device accepts either. A label costs one document fetch.
+async fn device_param(app: &App, name: &str) -> ApiResult<DeviceId> {
+    match Uuid::parse_str(name) {
+        Ok(uuid) => Ok(DeviceId(uuid)),
+        Err(_) => Ok(membership::resolve_device(
+            &app.target.connector,
+            app.target.node,
+            app.target.cluster,
+            name,
+        )
+        .await?),
+    }
 }
 
 fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
@@ -1110,7 +1127,7 @@ async fn drain(
     Json(body): Json<DrainBody>,
 ) -> ApiResult<Response> {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let mut conn = connect(target).await?;
     let id = conn.start_drain(device, body.partial).await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
@@ -1132,7 +1149,7 @@ async fn set_device_state(
     Json(body): Json<StateBody>,
 ) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     if body.state == DeviceState::Removed {
         return Err(ApiError::BadRequest(
             "a device is removed with the remove action, after draining".to_string(),
@@ -1169,7 +1186,7 @@ async fn set_device_label(
     Json(body): Json<LabelBody>,
 ) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let label = body
         .label
         .map(|l| l.trim().to_string())
@@ -1192,7 +1209,7 @@ async fn set_device_label(
 
 async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
     let target = &app.target;
-    let device = DeviceId(parse_id(&id, "device")?);
+    let device = device_param(&app, &id).await?;
     let (document, changed) =
         membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
     Ok(Json(json!({
