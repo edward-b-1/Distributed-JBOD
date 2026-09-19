@@ -1277,3 +1277,63 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
         "{events:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
+    use djbod_proto::message::ListQuery;
+    let a = first_node(1, 2, 1).await;
+    let b = joined_node(1, &a).await;
+    let c = joined_node(1, &b).await;
+    let d = joined_node(1, &c).await;
+    let mut client = a.client().await;
+    // Seven objects at 2+1 over four devices: every key's record is on
+    // three of the four nodes, so every node's page overlaps the others'.
+    let records = put_objects(&mut client, 7, 400).await;
+    let mut expected: Vec<String> = records.iter().map(|r| r.key.clone()).collect();
+    expected.sort();
+    for limit in [1u32, 2, 3, 100] {
+        let mut walked: Vec<String> = Vec::new();
+        let mut start_after: Option<String> = None;
+        loop {
+            match client
+                .request(Request::ListKeys(ListQuery {
+                    prefix: None,
+                    start_after: start_after.clone(),
+                    limit: Some(limit),
+                }))
+                .await
+                .expect("list")
+            {
+                Response::ListKeys { keys, truncated } => {
+                    assert!(!keys.is_empty());
+                    assert!(keys.len() <= limit as usize);
+                    start_after = keys.last().map(|k| k.key.clone());
+                    walked.extend(keys.into_iter().map(|k| k.key));
+                    if !truncated {
+                        break;
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(walked, expected, "limit {limit}");
+    }
+    // The other node is as good a coordinator.
+    let mut client = d.client().await;
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: Some("obj-".to_string()),
+            start_after: Some("obj-4".to_string()),
+            limit: None,
+        }))
+        .await
+        .expect("list")
+    {
+        Response::ListKeys { keys, truncated } => {
+            let got: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
+            assert_eq!(got, vec!["obj-5", "obj-6"]);
+            assert!(!truncated);
+        }
+        other => panic!("{other:?}"),
+    }
+}
