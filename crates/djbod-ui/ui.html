@@ -18,6 +18,8 @@
     --warning: #fab219;
     --serious: #ec835a;
     --critical: #d03b3b;
+    --warning-soft: #fff3df;
+    --critical-soft: #fbe3e3;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -31,6 +33,8 @@
       --muted: #8a8984;
       --accent: #3987e5;
       --accent-track: #1d3a5e;
+      --warning-soft: #3a2f16;
+      --critical-soft: #3d1c1c;
     }
   }
   * { box-sizing: border-box; }
@@ -106,11 +110,10 @@
   .log .repaired { color: var(--good); }
   .log .muted { color: var(--muted); }
   .banner {
-    display: flex; gap: 12px; align-items: baseline; padding: 10px 16px;
-    background: var(--surface); border-bottom: 1px solid var(--line); border-left: 4px solid var(--warning);
+    display: flex; gap: 12px; align-items: baseline; padding: 8px 16px; font-size: 13px;
+    background: var(--warning-soft); color: var(--text); border-bottom: 1px solid var(--line);
   }
-  .banner.critical { border-left-color: var(--critical); }
-  .banner .what::before { content: "\26A0  "; }
+  .banner.critical { background: var(--critical-soft); }
   .banner .what { flex: 1; }
   .banner code { font-family: var(--mono); }
   .banner button { border: none; background: none; padding: 0 0 0 8px; color: var(--text-2); }
@@ -430,24 +433,24 @@ function renderBanners() {
   const transport = status.transport || 'plain';
   if (transport === 'plain') {
     warnings.push({ id: 'transport-plain', level: 'critical',
-      text: 'Cluster transport is plain: connections between nodes, and from clients to nodes, are unencrypted and unauthenticated. ',
+      text: 'The cluster transport is plain. Connections between nodes, and from clients, are unencrypted. Change it with ',
       code: 'djbod cluster set-transport' });
   } else if (transport === 'tls-optional') {
     warnings.push({ id: 'transport-optional', level: '',
-      text: 'Cluster transport is tls-optional: nodes use TLS with each other, but a client may still connect without a certificate. Finish the migration with ',
+      text: 'The cluster transport is tls-optional. Nodes use TLS with each other, but clients may still connect without a certificate. Finish with ',
       code: 'djbod cluster set-transport tls' });
   }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
   if (location.protocol === 'http:' && !local) {
     warnings.push({ id: 'page-plain', level: 'critical',
-      text: `This page is served over plain HTTP from ${location.host}: everything shown and done here crosses the network unencrypted, and anyone who can reach the port can administer the cluster. Reach it through an SSH tunnel or a reverse proxy with TLS: `,
-      code: `ssh -L 5264:127.0.0.1:${location.port || 80} <host>` });
+      text: `This page is being used over plain HTTP from ${location.host}. Everything you do here is sent unencrypted. Run `,
+      code: 'djbod-ui', tail: ' on this machine only, or behind a TLS proxy.' });
   }
   let dismissed = [];
   try { dismissed = JSON.parse(sessionStorage.getItem('dismissed-banners') || '[]'); } catch (_) { dismissed = []; }
   $('banners').replaceChildren(...warnings.filter((w) => !dismissed.includes(w.id)).map((w) =>
     el('div', { class: 'banner ' + w.level, role: 'alert' },
-      el('span', { class: 'what' }, w.text, el('code', { text: w.code })),
+      el('span', { class: 'what' }, w.text, el('code', { text: w.code }), w.tail || ''),
       el('button', { text: '×', 'aria-label': 'dismiss for this session', onclick: () => {
         try { sessionStorage.setItem('dismissed-banners', JSON.stringify([...dismissed, w.id])); } catch (_) { /* shown again next load */ }
         renderBanners();
