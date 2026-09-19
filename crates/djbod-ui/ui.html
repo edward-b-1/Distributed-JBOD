@@ -519,8 +519,8 @@ function renderBanners() {
   const builds = nodeBuilds(cluster);
   if (builds.size > 1) {
     warnings.push({ id: 'mixed-builds', level: '',
-      text: `Nodes run ${builds.size} different builds (${[...builds].join(', ')}). Upgrade every node before changing the cluster document; a node refuses a document it cannot represent. Each node's build is in the Nodes table and in `,
-      code: 'djbod cluster show' });
+      text: `Nodes run ${builds.size} different builds (${[...builds].join(', ')}). Upgrade every node before changing the cluster document. Build ids shown in Nodes table and `,
+      code: 'djbod cluster show', tail: '.' });
   }
   const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.hostname.endsWith('.localhost');
   if (location.protocol === 'http:' && !local) {
