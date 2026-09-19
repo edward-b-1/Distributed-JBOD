@@ -28,7 +28,11 @@ is known to the node and the UI server for an instant and then gone. The
 UI now keeps its own in-memory note of recent read failures so the
 object panel can say what happened. That is a stopgap: it lives in one
 process, dies with it, and knows only about failures that went through
-that process.
+that process. It also reaches the page only by asking: a link download
+runs outside the page, so the page polls the UI server for a minute
+after Download is clicked, which catches damage early in an object at
+once and damage late in a large or slow download late or not at all,
+until the next periodic refresh.
 
 ## 2. Requirements
 
