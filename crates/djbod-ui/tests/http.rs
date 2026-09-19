@@ -674,3 +674,75 @@ async fn a_refusal_during_upload_is_delivered_after_the_body() {
     let json: serde_json::Value = serde_json::from_str(body.trim()).expect("json body");
     assert_eq!(json["error"]["code"], "object_too_large", "{json}");
 }
+
+/// Run a verify and return its JSON lines.
+async fn verify_lines(test: &TestNode, key: &str) -> (StatusCode, Vec<serde_json::Value>) {
+    let (status, headers, body) = call(
+        test,
+        Request::post(format!("/api/verify/{key}"))
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    if status == StatusCode::OK {
+        assert_eq!(headers[header::CONTENT_TYPE], "application/x-ndjson");
+    }
+    let lines = String::from_utf8_lossy(&body)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    (status, lines)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn verify_names_the_damage_a_download_would_meet() {
+    let test = start_node(4, 3, 1).await;
+    let body = pattern_bytes(3 * 2 * 64 * 1024 + 7, 11);
+    put_object(&test, "v/file", &body, None).await;
+
+    let (status, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(status, StatusCode::OK, "{lines:?}");
+    assert_eq!(lines[0]["event"], "start");
+    assert_eq!(lines[0]["size"], body.len());
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done", "{lines:?}");
+    assert_eq!(done["verified"], true);
+    assert_eq!(done["bytes"], body.len());
+    // The last progress line reports the whole object.
+    let progress: Vec<&serde_json::Value> =
+        lines.iter().filter(|l| l["event"] == "progress").collect();
+    assert_eq!(progress.last().unwrap()["bytes"], body.len(), "{lines:?}");
+
+    // Damage shard 0, a data shard, inside its data.
+    let mut damaged = None;
+    for dir in &test.dirs {
+        for entry in walkdir(dir.path()) {
+            if entry.to_string_lossy().ends_with(".0.shard") {
+                let mut bytes = std::fs::read(&entry).unwrap();
+                bytes[4096 + 10] ^= 0xff;
+                std::fs::write(&entry, bytes).unwrap();
+                damaged = Some(entry);
+            }
+        }
+    }
+    assert!(damaged.is_some());
+
+    let (status, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(status, StatusCode::OK, "{lines:?}");
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done", "{lines:?}");
+    assert_eq!(done["verified"], false);
+    assert_eq!(done["error"]["code"], "block_checksum_mismatch");
+    assert_eq!(done["error"]["shard_index"], 0);
+    assert_eq!(done["error"]["stripe"], 0);
+    assert!(done["error"]["device"].is_string());
+
+    let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let (_, lines) = verify_lines(&test, "v/file").await;
+    assert_eq!(lines.last().unwrap()["verified"], true, "{lines:?}");
+
+    let (status, lines) = verify_lines(&test, "v/missing").await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{lines:?}");
+    assert_eq!(lines[0]["error"]["code"], "not_found");
+}

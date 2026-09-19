@@ -526,12 +526,56 @@ function renderDetail(record) {
     el('div', { class: 'actions', style: 'margin:10px 0' },
       el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download',
         title: 'A download that stops short of the object\u2019s size failed the node\u2019s verification.' }),
+      el('button', { text: 'Verify', title: 'read the whole object through the node without saving it: every block is checked, and any damage is named', onclick: (e) => verify(record.key, e.target) }),
       el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
       el('button', { class: 'danger', text: 'Delete', onclick: () => remove(record.key) })),
+    el('div', { id: 'verify-result' }),
     el('table', {}, el('thead', {}, el('tr', {}, el('th', { class: 'num', text: '#' }), el('th', { text: 'Device' }), el('th', { text: 'Node' }), el('th', { text: 'State' }))), el('tbody', {}, ...shardRows)),
     el('div', { class: 'row' }, el('label', {}, 'Move ', shardSelect), el('label', {}, 'to ', targetSelect),
       el('button', { text: 'Move shard', onclick: () => moveShard(record.key, Number($('move-index').value), $('move-to').value || null) })),
     el('details', {}, el('summary', { text: 'record as JSON' }), el('pre', { text: JSON.stringify(record, null, 2) })));
+}
+async function verify(key, button) {
+  const box = $('verify-result');
+  button.disabled = true;
+  const fill = el('div', { class: 'fill', style: 'width:0%' });
+  const text = el('span', { class: 'hint', text: `verifying ${key}: reading every block through the node…` });
+  box.replaceChildren(el('div', { class: 'row', style: 'margin:0 0 10px' },
+    el('div', { class: 'meter', style: 'flex:1;min-width:200px' }, el('div', { class: 'track' }, fill)), text));
+  const started = performance.now();
+  let size = 0;
+  try {
+    await streamLines('/verify/' + encodeKey(key), {}, (e) => {
+      if (state.selectedKey !== key) return;
+      switch (e.event) {
+        case 'start': size = e.size; break;
+        case 'progress': {
+          const fraction = size ? e.bytes / size : 0;
+          fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+          const seconds = (performance.now() - started) / 1000;
+          const rate = seconds > 0 ? e.bytes / seconds : 0;
+          text.textContent = `verifying ${key}: ${human(e.bytes)} of ${human(size)} (${(fraction * 100).toFixed(0)}%)` +
+            (rate > 0 && e.bytes < size ? `, ${human(rate)}/s, about ${humanTime((size - e.bytes) / rate)} left` : '');
+          break;
+        }
+        case 'done': {
+          const when = new Date().toLocaleTimeString();
+          if (e.verified) {
+            box.replaceChildren(el('p', { class: 'ok', style: 'margin:0 0 10px', text: `verified at ${when}: ${human(e.bytes)} read and every block checked` }));
+          } else {
+            const err = e.error;
+            box.replaceChildren(el('p', { class: 'bad', style: 'margin:0 0 10px' },
+              `damaged (${when}, after ${human(e.bytes)} of ${human(size)}): ${err.code}: ${err.message}`,
+              el('br'),
+              el('span', { class: 'hint', text: describeError(err).replace(/\n/g, '   ') })));
+          }
+          break;
+        }
+        default: break;
+      }
+    });
+  } catch (e) { box.replaceChildren(); fail('verify', e); }
+  finally { button.disabled = false; }
 }
 async function repair(key) {
   try {
