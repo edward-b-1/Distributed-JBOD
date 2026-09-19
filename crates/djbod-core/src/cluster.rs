@@ -198,6 +198,16 @@ pub enum ClusterDocumentError {
     BadMetadataLimit(u64),
     #[error("node {0:?} appears more than once")]
     DuplicateNode(NodeId),
+    #[error("node {0:?} lists no address; a node entry needs at least one")]
+    NoAddresses(NodeId),
+    #[error("node {node:?} address {address:?} is not an IP address and port: {reason}")]
+    BadAddress {
+        node: NodeId,
+        address: String,
+        reason: String,
+    },
+    #[error("address {address} is listed for more than one node")]
+    DuplicateAddress { address: String },
     #[error("device {0:?} appears more than once")]
     DuplicateDevice(DeviceId),
     #[error("label {label:?} is not usable: {reason}")]
@@ -239,6 +249,29 @@ impl ClusterDocument {
                 return Err(ClusterDocumentError::DuplicateNode(node.id));
             }
             node_ids.push(node.id);
+        }
+        // Addresses (6.2.5.2): one or more per node, each an IP address
+        // and port, none listed twice anywhere in the document.
+        let mut addresses: Vec<&str> = Vec::new();
+        for node in &self.nodes {
+            if node.addresses.is_empty() {
+                return Err(ClusterDocumentError::NoAddresses(node.id));
+            }
+            for address in &node.addresses {
+                if let Err(e) = address.parse::<std::net::SocketAddr>() {
+                    return Err(ClusterDocumentError::BadAddress {
+                        node: node.id,
+                        address: address.clone(),
+                        reason: e.to_string(),
+                    });
+                }
+                if addresses.contains(&address.as_str()) {
+                    return Err(ClusterDocumentError::DuplicateAddress {
+                        address: address.clone(),
+                    });
+                }
+                addresses.push(address);
+            }
         }
         let mut device_ids: Vec<DeviceId> = Vec::with_capacity(self.devices.len());
         for device in &self.devices {

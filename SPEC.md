@@ -310,6 +310,30 @@ even share a label without ambiguity, since no command takes both.
 Errors from nodes carry UUIDs; `status` maps them. The typed confirmation
 of a forced removal (6.2.6.3) remains the UUID.
 
+6.2.5.2 [D] **Node addresses.** A node entry lists one or more addresses,
+each an IP address and port (19.1.6.1: certificates name IP addresses, so
+host names are not used). The list is never empty, and no address is
+listed for two nodes; the validator refuses a document that breaks either
+rule. Nodes and clients use the first address; the others are recorded
+for the operator and are not tried. `init-cluster` and `join` list the
+node's configured advertised address (`advertise`, or `listen` when it is
+not set). Afterwards the list changes in two ways:
+
+- `djbod cluster set-address <node> <host:port>[,<host:port>...]`
+  replaces the list as a document change like any other (6.2.6). The
+  proposal reaches every node at the address the current document lists,
+  so the node being moved must still answer there; this is the command for
+  a node that is about to move, or that gained an address.
+- A node that has already moved cannot acknowledge at its old address.
+  Starting it with the new address configured is the startup case of
+  18.1.2.1, so a configuration edit and a restart are enough.
+
+Moving every node at once, so that none can be reached at a listed
+address, is outside both. The last resort is to stop every node and write
+the same next document, with the version increased by one, into every
+node's `cluster.json`; with any node running or any copy differing this
+creates the disagreement 6.2.6.1 forbids.
+
 6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's
 command, or a joining node. The procedure:
@@ -1184,6 +1208,19 @@ its own startup or through `sync`. Peers that cannot be reached are logged
 and ignored, since a node must be able to start alone. The node then
 checks that it and all its devices appear in the document it holds
 (refusing to start otherwise, as now) and serves.
+
+18.1.2.1 [D] **A node that moved.** After adopting from its peers, `run`
+checks that the document's entry for this node lists its configured
+advertised address (6.2.5.2). If not, it proposes a document in which its
+entry lists that address alone, skipping itself in the proposal as a dead
+node is skipped (6.2.6.3 step 2), since it is not yet serving and cannot
+be reached at the old address; it saves the agreed document itself. A
+change that arrives meanwhile is adopted and the proposal is retried from
+it. A lone node's proposal has nobody else to ask and always succeeds. If
+the proposal fails, because another node is unreachable or refuses, the
+node does not start: it would otherwise serve at an address no other node
+knows, which is the same as being down for everyone but a client given the
+address by hand. The message names the listed and configured addresses.
 
 18.1.3 [D] **Adding a device to an existing node** is a document change
 listing the new device, made by `djbod cluster add-device` on that node

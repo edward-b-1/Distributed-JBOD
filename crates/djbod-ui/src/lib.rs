@@ -80,6 +80,10 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
+/// The icon, for the browser tab and the header: dark ink on transparent,
+/// and a variant with the ink inverted for a dark surface.
+pub const ICON: &[u8] = include_bytes!("../icon/djbod-256.png");
+pub const ICON_DARK: &[u8] = include_bytes!("../icon/djbod-256-dark.png");
 
 /// A read of an object that the node stopped because of damage, kept so
 /// the page can say why a download failed after the browser has reported
@@ -215,6 +219,8 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
     });
     Router::new()
         .route("/", get(page))
+        .route("/icon.png", get(|| async { icon(ICON) }))
+        .route("/icon-dark.png", get(|| async { icon(ICON_DARK) }))
         .nest("/api", api)
         .layer(middleware::from_fn_with_state(
             app.clone(),
@@ -322,6 +328,20 @@ fn refuse(code: &str, message: impl Into<String>) -> Response {
 
 async fn page() -> Html<&'static str> {
     Html(PAGE)
+}
+
+fn icon(bytes: &'static [u8]) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static("image/png")),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------- errors
@@ -433,6 +453,8 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::LastNode => (StatusCode::CONFLICT, "last_node"),
         M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
         M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
+        // Only `djbod-node run` proposes its own address; not reachable here.
+        M::AddressChangeFailed { .. } => (StatusCode::BAD_GATEWAY, "address_change_failed"),
         M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
         // A document that fails validation: a bad or duplicate label, a
         // scheme the devices cannot carry, and the like.

@@ -189,6 +189,18 @@ enum ClusterCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Replace the addresses other nodes and clients use to reach a
+    /// node. The node must still answer at its listed address; a node
+    /// that has already moved adopts its configured address when it
+    /// starts (SPEC 18.1.2.1).
+    SetAddress {
+        /// The node, by UUID or label.
+        node_id: String,
+        /// One or more ip:port addresses, comma separated; the first is
+        /// the one used.
+        #[arg(value_delimiter = ',', required = true)]
+        addresses: Vec<String>,
+    },
     /// Move every shard off a draining device in one pass.
     Drain {
         /// The draining device to empty, by UUID or label.
@@ -739,6 +751,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     "node": r.node,
                                     "label": r.label,
                                     "address": r.address,
+                                    "addresses": document.node(r.node).map(|n| &n.addresses),
                                     "version": r.result.as_ref().ok().map(|d| d.version),
                                     "error": r.result.as_ref().err(),
                                 })
@@ -758,11 +771,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 Ok(d) => d.version.to_string(),
                                 Err(e) => format!("unreachable: {e}"),
                             };
+                            // Every listed address; the first is the one used.
+                            let addresses = document
+                                .node(r.node)
+                                .map(|n| n.addresses.join(", "))
+                                .unwrap_or_else(|| r.address.clone());
                             println!(
                                 "{:<36}  {:<16}  {:<21}  {version}",
                                 r.node.0,
                                 r.label.as_deref().unwrap_or("-"),
-                                r.address
+                                addresses
                             );
                         }
                     }
@@ -1052,6 +1070,38 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!(
                             "label cleared from node {} (document version {})",
                             id.0, document.version
+                        );
+                    }
+                }
+                ClusterCommand::SetAddress { node_id, addresses } => {
+                    let id = resolve_node(&cli, node_id).await?;
+                    let (document, changed) = djbod_node::membership::set_node_addresses(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        id,
+                        addresses.clone(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "node": id,
+                                "addresses": addresses,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if !changed {
+                        println!("nothing changed");
+                    } else {
+                        println!(
+                            "node {} is now reached at {} (document version {})",
+                            id.0,
+                            addresses.join(", "),
+                            document.version
                         );
                     }
                 }

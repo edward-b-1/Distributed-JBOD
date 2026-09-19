@@ -74,7 +74,7 @@ struct ConfigArgs {
     #[arg(long, env = "DJBOD_LISTEN")]
     listen: Option<std::net::SocketAddr>,
     /// Address other nodes use to reach this one, when `listen` is a
-    /// wildcard.
+    /// wildcard. A change is proposed to the cluster when the node starts.
     #[arg(long, env = "DJBOD_ADVERTISE")]
     advertise: Option<std::net::SocketAddr>,
     /// Directory holding this node's copy of the cluster document.
@@ -232,7 +232,9 @@ enum Command {
         #[arg(long)]
         wipe_removed_device: bool,
     },
-    /// Run the node.
+    /// Run the node. A node whose configured address is not the one the
+    /// cluster document lists proposes the change first, and does not
+    /// start if that fails.
     Run {
         #[command(flatten)]
         config: ConfigArgs,

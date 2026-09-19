@@ -764,3 +764,38 @@ async fn nodes_can_be_labelled_and_named_by_label() {
     assert!(ok, "{err}");
     assert!(out.contains("label cleared"), "{out}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_nodes_address_can_be_set_from_the_command_line() {
+    let test = start_node(2, 1, 1).await;
+    let node_id = test.node.id().0.to_string();
+    let here = test.addr.to_string();
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-address", &node_id, &here]);
+    assert!(ok, "{err}");
+    assert!(out.contains("nothing changed"), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-address", &node_id, "nowhere"]);
+    assert!(!ok);
+    assert!(err.contains("not an IP address and port"), "{err}");
+    let twice = format!("{here},{here}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-address", &node_id, &twice]);
+    assert!(!ok);
+    assert!(err.contains("more than one node"), "{err}");
+
+    // A second address, after the one the node is reached at.
+    let list = format!("{here},127.0.0.1:1");
+    let (ok, out, err) = djbod(&test, &["cluster", "set-address", &node_id, &list]);
+    assert!(ok, "{err}");
+    assert!(out.contains("is now reached at"), "{out}");
+    assert!(out.contains("127.0.0.1:1"), "{out}");
+    let (ok, out, _) = djbod(&test, &["cluster", "show"]);
+    assert!(ok);
+    assert!(out.contains("127.0.0.1:1"), "{out}");
+    assert_eq!(
+        test.node.document().nodes[0].addresses,
+        vec![here.clone(), "127.0.0.1:1".to_string()]
+    );
+    let (ok, _, err) = djbod(&test, &["cluster", "set-address", "no-such-node", &here]);
+    assert!(!ok);
+    assert!(err.contains("no node is named"), "{err}");
+}

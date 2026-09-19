@@ -1,3 +1,5 @@
+<img src="crates/djbod-ui/icon/djbod-256.png" alt="" width="96" align="right">
+
 # Distributed-JBOD
 
 A distributed, resilient, object store.
