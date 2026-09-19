@@ -278,6 +278,12 @@ async fn remove_device_from_the_command_line() {
 
     let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &device]);
     assert!(!ok);
+    assert!(err.contains("is active"), "{err}");
+    assert!(err.contains("set-state"), "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-state", &device, "draining"]);
+    assert!(ok, "{err}");
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &device]);
+    assert!(!ok);
     assert!(
         err.contains("still named by the current record of 1 version(s)"),
         "{err}"

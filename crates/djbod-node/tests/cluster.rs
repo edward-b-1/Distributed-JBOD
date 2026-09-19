@@ -1058,6 +1058,19 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
         .expect("b holds a shard of obj-0");
     let cluster = a.node.cluster_id();
 
+    // An active device cannot be removed, referenced or not (issue #28).
+    match membership::remove_device(c.addr, cluster, device).await {
+        Err(membership::MembershipError::DeviceActive(found)) => assert_eq!(found, device),
+        other => panic!("expected DeviceActive, got {other:?}"),
+    }
+    assert_eq!(
+        a.node.document().device(device).expect("device").state,
+        DeviceState::Active
+    );
+    membership::set_device_state(c.addr, cluster, device, DeviceState::Draining)
+        .await
+        .expect("set state");
+    // Draining but still holding shards: refused with the keys.
     match membership::remove_device(c.addr, cluster, device).await {
         Err(membership::MembershipError::StillReferenced {
             versions, examples, ..
@@ -1067,14 +1080,6 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
         }
         other => panic!("expected StillReferenced, got {other:?}"),
     }
-    assert_eq!(
-        a.node.document().device(device).expect("device").state,
-        DeviceState::Active
-    );
-
-    membership::set_device_state(c.addr, cluster, device, DeviceState::Draining)
-        .await
-        .expect("set state");
     drain_clean(&mut client, device).await;
     let (document, changed) = membership::remove_device(c.addr, cluster, device)
         .await
@@ -1126,14 +1131,22 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let d_id = d.node.id();
     let old_device_path = d.config.devices[0].clone();
 
+    // A node with an active device cannot be removed (issue #28).
+    match membership::remove_node(a.addr, cluster, d_id).await {
+        Err(membership::MembershipError::NodeHasActiveDevices { node, devices }) => {
+            assert_eq!(node, d_id);
+            assert_eq!(devices, vec![device]);
+        }
+        other => panic!("expected NodeHasActiveDevices, got {other:?}"),
+    }
+    membership::set_device_state(a.addr, cluster, device, DeviceState::Draining)
+        .await
+        .expect("set state");
     if records.iter().any(|r| r.shard_on(device).is_some()) {
         match membership::remove_node(a.addr, cluster, d_id).await {
             Err(membership::MembershipError::StillReferenced { .. }) => {}
             other => panic!("expected StillReferenced, got {other:?}"),
         }
-        membership::set_device_state(a.addr, cluster, device, DeviceState::Draining)
-            .await
-            .expect("set state");
         drain_clean(&mut client, device).await;
     }
     let document = membership::remove_node(a.addr, cluster, d_id)
