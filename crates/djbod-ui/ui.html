@@ -368,6 +368,20 @@ function deviceText(id) {
   const label = deviceLabel(id);
   return label ? `${label} (${short(id)})` : short(id);
 }
+// Nodes the same way (SPEC 6.2.5.1): label first, UUID in parentheses.
+function nodeLabel(id) {
+  return state.cluster?.document.nodes.find((n) => n.id === id)?.label || null;
+}
+function nodeCell(id) {
+  const label = nodeLabel(id);
+  if (!label) return idCell(id);
+  return el('span', {}, el('span', { class: 'label-name', text: label }), ' ',
+    el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => copyText(String(id)) }, `(${short(id)})`));
+}
+function nodeText(id) {
+  const label = nodeLabel(id);
+  return label ? `${label} (${short(id)})` : short(id);
+}
 
 function toast(message, detail, isError = false) {
   const box = el('div', { class: 'toast' + (isError ? ' error' : '') },
@@ -381,7 +395,7 @@ function describeError(error) {
   const lines = [];
   for (const f of ['node', 'device', 'key', 'version', 'shard_index', 'stripe']) {
     if (error[f] === undefined || error[f] === null) continue;
-    const label = f === 'device' ? deviceLabel(error[f]) : null;
+    const label = f === 'device' ? deviceLabel(error[f]) : f === 'node' ? nodeLabel(error[f]) : null;
     lines.push(`${f}: ${label ? `${label} (${error[f]})` : error[f]}`);
   }
   return lines.join('\n');
@@ -460,7 +474,7 @@ function renderHeader() {
   const { status, cluster } = state;
   $('h-cluster').textContent = status.cluster_id;
   $('h-version').textContent = status.document_version;
-  $('h-node').textContent = short(status.coordinator);
+  $('h-node').textContent = nodeText(status.coordinator);
   $('h-node').title = status.coordinator;
   $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
   $('h-transport').textContent = status.transport || 'plain';
@@ -537,9 +551,10 @@ function renderOverview() {
     const version = n.error
       ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
       : el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` });
-    return el('tr', {}, el('td', {}, idCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
+    return el('tr', {}, el('td', {}, nodeCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
       el('td', { class: 'num', text: deviceCount }),
       el('td', {}, el('div', { class: 'actions' },
+        el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
         el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
           title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
   }));
@@ -561,12 +576,23 @@ function renderOverview() {
     }
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
     return el('tr', {}, el('td', {}, deviceCell(d.device)),
-      el('td', {}, idCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
+      el('td', {}, nodeCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
       el('td', {}, el('span', { class: 'state ' + d.state, text: d.state })),
       el('td', {}, d.state === 'removed' ? el('span', { class: 'hint', text: '—' }) : meter),
       el('td', { class: 'num', text: human(d.free_bytes) }), el('td', { class: 'num', text: human(d.total_bytes) }),
       el('td', {}, actions));
   }));
+}
+async function setNodeLabel(node, current) {
+  const answer = prompt(`Label for node ${node}\n\n1 to 128 characters, no spaces, unique in the cluster. Leave empty to clear.`, current || '');
+  if (answer === null) return;
+  const label = answer.trim() || null;
+  if (label === (current || null)) return;
+  try {
+    const r = await post(`/nodes/${node}/label`, { label });
+    toast(label ? `node ${short(node)} is now labelled ${label} (document version ${r.document_version})` : `label cleared from node ${short(node)} (document version ${r.document_version})`);
+    refresh();
+  } catch (e) { fail('set node label', e); }
 }
 async function setLabel(device, current) {
   const answer = prompt(`Label for device ${device}\n\n1 to 128 characters, no spaces, unique in the cluster. Leave empty to clear.`, current || '');
@@ -702,12 +728,12 @@ function renderDetail(record) {
   const shardRows = record.shards.map((s) => {
     const info = state.status?.devices.find((d) => d.device === s.device);
     return el('tr', {}, el('td', { class: 'num', text: s.index }), el('td', {}, deviceCell(s.device)),
-      el('td', {}, deviceNode(s.device) ? idCell(deviceNode(s.device)) : el('span', { class: 'bad', text: 'not in cluster' })),
+      el('td', {}, deviceNode(s.device) ? nodeCell(deviceNode(s.device)) : el('span', { class: 'bad', text: 'not in cluster' })),
       el('td', {}, info ? el('span', { class: 'state ' + info.state, text: info.state }) : ''));
   });
   const shardSelect = el('select', { id: 'move-index' }, ...record.shards.map((s) => el('option', { value: s.index, text: `shard ${s.index}` })));
   const targetSelect = el('select', { id: 'move-to' }, el('option', { value: '', text: 'emptiest device' }),
-    ...(state.status?.devices || []).filter((d) => d.state === 'active').map((d) => el('option', { value: d.device, text: `${deviceText(d.device)} on ${short(d.node)}` })));
+    ...(state.status?.devices || []).filter((d) => d.state === 'active').map((d) => el('option', { value: d.device, text: `${deviceText(d.device)} on ${nodeText(d.node)}` })));
   $('object-detail').replaceChildren(
     el('div', { class: 'key', text: record.key, style: 'font-size:13.5px;margin-bottom:8px' }),
     el('dl', {},
@@ -902,9 +928,9 @@ $('scrub-go').addEventListener('click', async () => {
   try {
     await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
       switch (e.event) {
-        case 'node_finding': findings++; logLine(log, `node ${short(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
-        case 'node_summary': logLine(log, `node ${short(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
-        case 'node_failed': findings++; logLine(log, `node ${short(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
+        case 'node_finding': findings++; logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
+        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_failed': findings++; logLine(log, `node ${nodeText(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
         case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
@@ -924,7 +950,7 @@ function renderDrainDevices() {
   const select = $('drain-device');
   const current = select.value;
   select.replaceChildren(...state.status.devices.filter((d) => d.state === 'draining').map((d) =>
-    el('option', { value: d.device, text: `${deviceText(d.device)} on ${short(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
+    el('option', { value: d.device, text: `${deviceText(d.device)} on ${nodeText(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
   if (select.options.length === 0) select.append(el('option', { value: '', text: 'no draining device; set one draining first' }));
   if (current) select.value = current;
   $('drain-go').disabled = !select.value;
@@ -940,7 +966,7 @@ $('drain-go').addEventListener('click', async () => {
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
       switch (e.event) {
-        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${short(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
         case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
         case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;

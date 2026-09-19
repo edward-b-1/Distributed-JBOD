@@ -1148,3 +1148,44 @@ async fn requests_from_another_site_or_host_are_refused() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn node_labels_are_set_shown_and_cleared() {
+    let test = start_node(4, 3, 1).await;
+    let (_, cluster) = get_json(&test, "/api/cluster").await;
+    let node = cluster["document"]["nodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(cluster["document"]["nodes"][0].get("label").is_none());
+
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/nodes/{node}/label"),
+        serde_json::json!({ "label": "nas1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    let (_, cluster) = get_json(&test, "/api/cluster").await;
+    assert_eq!(cluster["document"]["nodes"][0]["label"], "nas1");
+
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/nodes/{node}/label"),
+        serde_json::json!({ "label": "has space" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/nodes/{node}/label"),
+        serde_json::json!({ "label": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    let (_, cluster) = get_json(&test, "/api/cluster").await;
+    assert!(cluster["document"]["nodes"][0].get("label").is_none());
+}
