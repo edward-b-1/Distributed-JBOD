@@ -268,9 +268,27 @@ function el(tag, attrs = {}, ...children) {
   return node;
 }
 function idCell(id) {
-  return el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => {
-    navigator.clipboard?.writeText(String(id)); toast(`copied ${id}`);
-  } }, short(id));
+  return el('span', { class: 'id', title: `${id}\nclick to copy`, onclick: () => copyText(String(id)) }, short(id));
+}
+/// Copy to the clipboard and say so. `navigator.clipboard` exists only on
+/// secure origins (HTTPS or localhost); over plain HTTP from another
+/// machine the page falls back to the older selection-based copy, and if
+/// that fails too the toast shows the full text to copy by hand.
+async function copyText(text) {
+  let copied = false;
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); copied = true; } catch (_) { copied = false; }
+  }
+  if (!copied) {
+    const area = el('textarea', { style: 'position:fixed;left:-9999px;top:0', 'aria-hidden': 'true' });
+    area.value = text;
+    document.body.append(area);
+    area.focus(); area.select();
+    try { copied = document.execCommand('copy'); } catch (_) { copied = false; }
+    area.remove();
+  }
+  if (copied) toast(`copied ${text}`);
+  else toast('could not copy on this page', text, true);
 }
 function encodeKey(key) { return key.split('/').map(encodeURIComponent).join('/'); }
 
