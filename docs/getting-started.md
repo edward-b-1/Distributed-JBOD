@@ -166,7 +166,11 @@ Maintenance tab, where scrubs and drains show their events as they
 happen. The Objects tab lists keys by prefix and shows a record, its
 shard placement, and verify, repair, move-shard, download, upload, and
 delete. Verify reads the object through the node without saving it, so
-it names any damage a download would trip over.
+it names any damage a download would trip over. A download the node
+stopped for damage shows the browser's own failure message only, but the
+UI server remembers the node's reason for as long as it runs, so the
+object panel shows it until a repair, verify, or download of that object
+succeeds.
 An upload is checked against the devices' free space before its bytes
 are sent, and a write the node refuses is reported with the node's
 reason.

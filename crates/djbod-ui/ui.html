@@ -239,7 +239,7 @@
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false }, selectedKey: null };
+const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false }, selectedKey: null, failures: {} };
 
 // ------------------------------------------------------------ helpers
 
@@ -345,8 +345,9 @@ if (location.hash) document.querySelector(`nav [data-tab="${location.hash.slice(
 
 async function refresh() {
   try {
-    const [status, cluster] = await Promise.all([api('/status'), api('/cluster')]);
+    const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
+    state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
     renderHeader(); renderOverview(); renderSettings(); renderDrainDevices();
   } catch (e) { fail('refresh', e); }
 }
@@ -466,7 +467,8 @@ async function list(startAfter) {
 function renderListing() {
   const { keys, truncated } = state.listing;
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', { class: 'key', text: k.key }), el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
+    el('td', { class: 'key' }, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object failed; open it for details' }) : null, k.key),
+    el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
   if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 3, class: 'empty', text: 'no objects' })));
   $('list-more').hidden = !truncated;
   $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
@@ -479,9 +481,40 @@ async function select(key) {
   state.selectedKey = key;
   renderListing();
   try {
-    const record = await api('/objects/' + encodeKey(key));
-    renderDetail(record);
+    const [record, failures] = await Promise.all([api('/objects/' + encodeKey(key)), api('/read-failures')]);
+    state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
+    if (state.selectedKey === key) renderDetail(record);
   } catch (e) { fail('head', e); }
+}
+
+/// A link download runs outside the page, so after Download is clicked
+/// the page asks the server for a while whether the node stopped that
+/// read, and redraws the panel when it did. The server remembers only
+/// reads it relayed, in memory, until a read, verify, or repair of the
+/// key succeeds.
+let failurePoll = 0;
+function watchForReadFailure(key) {
+  const since = Math.floor(Date.now() / 1000) - 1;
+  const token = ++failurePoll;
+  let tries = 0;
+  const tick = async () => {
+    if (token !== failurePoll || state.selectedKey !== key || tries++ >= 30) return;
+    try {
+      const r = await api('/read-failures');
+      const found = r.failures.find((f) => f.key === key && f.at >= since);
+      if (found) { select(key); return; }
+    } catch (_) { return; }
+    setTimeout(tick, 2000);
+  };
+  setTimeout(tick, 1500);
+}
+function describeFailure(f) {
+  const when = new Date(f.at * 1000).toLocaleTimeString();
+  const what = f.operation === 'download' ? 'a download' : 'a verify';
+  return el('p', { class: 'bad', style: 'margin:0 0 10px' },
+    `${what} at ${when} was stopped by the node after ${human(f.bytes)}: ${f.error.code}: ${f.error.message}`,
+    el('br'),
+    el('span', { class: 'hint', text: describeError(f.error).replace(/\n/g, '   ') + '   Repair rebuilds it from the other shards; Verify checks it again.' }));
 }
 function renderDetail(record) {
   const deviceNode = (id) => state.status?.devices.find((d) => d.device === id)?.node;
@@ -505,7 +538,8 @@ function renderDetail(record) {
       el('dt', { text: 'revision' }), el('dd', { text: record.revision || 0 }),
       el('dt', { text: 'content type' }), el('dd', { text: record.content_type || '—' }),
       ...Object.entries(record.user_metadata || {}).flatMap(([k, v]) => [el('dt', { text: 'meta ' + k }), el('dd', { text: v })])),
-    el('div', { class: 'actions', style: 'margin:10px 0' },
+    state.failures[record.key] ? describeFailure(state.failures[record.key]) : null,
+    el('div', { class: 'actions', style: 'margin:10px 0', onclick: (e) => { if (e.target.closest('a.btn')) watchForReadFailure(record.key); } },
       el('a', { class: 'btn', href: '/api/download/' + encodeKey(record.key), download: '', text: 'Download' }),
       el('button', { text: 'Verify', title: 'read the whole object through the node without saving it: every block is checked, and any damage is named', onclick: (e) => verify(record.key, e.target) }),
       el('button', { text: 'Repair', title: 'rebuild damaged or missing shards from the intact ones', onclick: () => repair(record.key) }),
