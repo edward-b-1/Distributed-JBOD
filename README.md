@@ -270,9 +270,11 @@ open, or deferred, and the reasoning behind rejected alternatives is kept.
 Appendix C has the crate layout and the milestone plan. Proposals under
 discussion live in [docs/proposals](docs/proposals). The crates are
 `djbod-core` (on-disk format, checksums, coding), `djbod-proto` (the
-native protocol), `djbod-node`, `djbod-cli`, `djbod-recover`, and
-`djbod-ui`; `cargo test --workspace` runs everything, starting nodes on
-localhost ports, and takes a few seconds.
+native protocol), `djbod-client` (the client library every program
+uses: node addresses with failover, one method per operation, async or
+blocking), `djbod-node`, `djbod-cli`, `djbod-recover`, and `djbod-ui`;
+`cargo test --workspace` runs everything, starting nodes on localhost
+ports, and takes a few seconds.
 
 ## Status
 
