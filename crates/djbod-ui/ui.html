@@ -107,7 +107,14 @@
     .rail-head { display: none; }
     .rail .count { margin-left: 4px; }
   }
-  main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
+  main { padding: 16px 20px 20px; min-width: 0; max-width: 1640px; display: flex; flex-direction: column; min-height: 0; }
+  main > section { flex: 1 1 auto; min-height: 0; }
+  /* The Objects section is a column that fills the window's height, so
+     its key table can scroll inside a box sized by what is left rather
+     than by a guess, and the paging row stays in view above it. */
+  #tab-objects { display: flex; flex-direction: column; }
+  #tab-objects .split { flex: 1 1 auto; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
+  #tab-objects .list-column { display: flex; flex-direction: column; min-height: 0; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
   [hidden] { display: none !important; }
@@ -201,10 +208,10 @@
   /* The key table scrolls in its own box rather than with the window,
      its header staying put; the box takes the height left under the
      controls, and at least enough for a few rows. */
-  .scroll { max-height: calc(100vh - 300px); min-height: 12em; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .scroll { flex: 1 1 auto; min-height: 8em; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
   .scroll table { border: none; border-radius: 0; }
   .scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: 0 1px 0 var(--line); }
-  .paging { margin: 8px 0 0; }
+  .paging { margin: 0 0 8px; flex: none; }
   .paging #list-page { font-variant-numeric: tabular-nums; }
   .paging .cursor { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
   .filter-spacer { display: none; }
@@ -313,18 +320,18 @@
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
     </div>
     <div class="filter-spacer"></div>
-    <div>
-      <div class="scroll">
-        <table>
-          <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
-          <tbody id="objects"></tbody>
-        </table>
-      </div>
+    <div class="list-column">
       <div class="row paging">
         <button id="list-prev" title="the previous page">&#8249; Previous</button>
         <span id="list-page" class="hint">Page 1</span>
         <button id="list-next" title="the next page">Next &#8250;</button>
         <span class="hint" id="list-count"></span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
+          <tbody id="objects"></tbody>
+        </table>
       </div>
     </div>
     <div class="card" id="object-detail"><div class="empty">Select an object to see its record.</div></div>
