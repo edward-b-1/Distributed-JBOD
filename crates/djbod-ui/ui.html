@@ -223,6 +223,7 @@
   <button id="rail-toggle" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
   <nav role="tablist" aria-label="Sections">
     <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview<span class="count" id="count-overview"></span></button>
+    <button role="tab" data-tab="nodes"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Nodes<span class="count" id="count-nodes"></span></button>
     <button role="tab" data-tab="objects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count" id="count-objects"></span></button>
     <button role="tab" data-tab="maintenance"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 2.3"/><path d="M3 21l8.5-8.5"/></svg>Maintenance<span class="count" id="count-maintenance"></span></button>
     <button role="tab" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
@@ -233,6 +234,9 @@
 <section id="tab-overview">
   <div id="health" role="status"></div>
   <div class="tiles" id="tiles"></div>
+</section>
+
+<section id="tab-nodes" hidden>
   <h2>Nodes</h2>
   <table>
     <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
@@ -665,7 +669,10 @@ function renderOverview() {
       tls: 'every connection uses TLS and a certificate',
     }[status.transport || 'plain'] || ''],
   ];
-  $('count-overview').textContent = `${counts.active + counts.draining} dev`;
+  $('count-overview').textContent = '';
+  const off = cluster.nodes.filter((n) => n.error || n.version !== doc.version).length;
+  $('count-nodes').textContent = off ? `${off} off` : `${cluster.nodes.length}`;
+  $('count-nodes').classList.toggle('bad', off > 0);
   const damaged = Object.keys(state.failures || {}).length;
   $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
   // A tile with a fourth element names the tab that holds its detail and
