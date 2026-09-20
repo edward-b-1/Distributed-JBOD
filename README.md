@@ -155,6 +155,20 @@ scale, and years of production use. Distributed-JBOD is young, as the
 | `djbod-recover` | `list` and `extract` objects from device directories with nothing running. |
 | `scripts/djbod-pki.sh` | Issues the certificate authority and node and client certificates. |
 
+From a program, the same operations are the `djbod-client` Rust crate
+and the `djbod` Python package, which wraps it:
+
+```python
+import djbod
+client = djbod.Client(["10.0.0.1:5263", "10.0.0.2:5263"])   # any node; the id is learned
+client.put("photos/cat.jpg", open("cat.jpg", "rb").read(), content_type="image/jpeg")
+print(client.head("photos/cat.jpg").size, [k.key for k in client.list_all("photos/")])
+```
+
+Both take a list of nodes and move to the next when one fails, and both
+report a node's refusal with the same detail the command-line tool
+prints. `crates/djbod-python/README.md` has the build steps.
+
 ## Security
 
 Out of the box nothing on the wire is authenticated or encrypted. That is

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "djbod"
+description = "Client for Distributed-JBOD, the erasure-coded object store for mismatched disks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Filesystems",
+]
+
+[project.urls]
+Repository = "https://github.com/edward-b-1/Distributed-JBOD"
+
+[tool.maturin]
+python-source = "python"
+module-name = "djbod._native"
+features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
