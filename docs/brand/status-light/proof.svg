@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1180" height="620" viewBox="0 0 1180 620">
+  <rect width="1180" height="310" fill="#FFFFFF"/>
+  <rect y="310" width="1180" height="310" fill="#0B1220"/>
+  <g font-family="Segoe UI" font-size="13" fill="#94A3B8">
+    <text x="40" y="34">horizontal lockup</text>
+    <text x="430" y="34">stacked lockup</text>
+    <text x="640" y="34">mark</text>
+    <text x="790" y="34">mono</text>
+    <text x="930" y="34">small icon — 64 / 48 / 32 / 16 px</text>
+    <text x="40" y="344">on dark</text>
+    <text x="430" y="344">stacked / dark</text>
+    <text x="640" y="344">mark</text>
+    <text x="790" y="344">mono white</text>
+    <text x="930" y="344">app icon</text>
+  </g>
+
+  <image xlink:href="png/djbod-lockup-horizontal-1024.png" x="40" y="105" width="340" height="144.9"/>
+  <image xlink:href="png/djbod-lockup-stacked-600.png" x="430" y="60" width="140" height="190.9"/>
+  <image xlink:href="png/djbod-mark-512.png" x="640" y="105" width="120" height="120"/>
+  <image xlink:href="png/djbod-mark-mono-dark-512.png" x="790" y="105" width="120" height="120"/>
+  <image xlink:href="png/djbod-icon-64.png" x="930" y="120" width="64" height="64"/>
+  <image xlink:href="png/djbod-icon-48.png" x="1010" y="128" width="48" height="48"/>
+  <image xlink:href="png/djbod-icon-32.png" x="1074" y="136" width="32" height="32"/>
+  <image xlink:href="png/djbod-icon-16.png" x="1122" y="144" width="16" height="16"/>
+
+  <image xlink:href="png/djbod-lockup-horizontal-onDark-1024.png" x="40" y="415" width="340" height="144.9"/>
+  <image xlink:href="png/djbod-lockup-stacked-onDark-600.png" x="430" y="370" width="140" height="190.9"/>
+  <image xlink:href="png/djbod-mark-512.png" x="640" y="415" width="120" height="120"/>
+  <image xlink:href="png/djbod-mark-mono-white-512.png" x="790" y="415" width="120" height="120"/>
+  <image xlink:href="png/djbod-appicon-512.png" x="930" y="415" width="120" height="120"/>
+</svg>

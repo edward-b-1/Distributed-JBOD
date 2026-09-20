@@ -26,6 +26,7 @@ So: heterogeneous capacity, pooled across nodes, with integrity data striped ove
 | `djbod-appicon.svg` | dark rounded square, avatars / app tiles |
 | `png/` | rasterised exports of all of the above |
 | `proof.png`, `proof2.png`, `proof3.png` | contact sheets showing everything together |
+| `proof-palette.png` | the three parity colours, on both UI surfaces |
 
 All type in the lockups is **converted to outlines**, so the SVGs render identically
 without Segoe UI installed.
@@ -34,11 +35,33 @@ without Segoe UI installed.
 
 | Role | Hex |
 |---|---|
-| Data slabs | `#0EA5E9` (`#38BDF8` on very dark backgrounds) |
+| Data slabs | `#2a78d6` (`#3987e5` on dark) — the UI's `--accent` |
 | Parity slab | `#F97316` |
 | Wordmark "JBOD" | `#0F172A` — `#F8FAFC` on dark |
 | "DISTRIBUTED" | `#64748B` — `#94A3B8` on dark |
 | App-icon background | `#0B1220` |
+
+The blues are not chosen independently: they are the `--accent` values from
+`crates/djbod-ui/ui.html`, light and dark, so the logo and the running app
+are the same blue. If `--accent` ever changes, rebuild the kit with the new
+value rather than letting the two drift.
+
+### Parity-colour alternates
+
+Two complete alternate kits sit beside the primary one. Same geometry, same
+blues; only the parity slab differs.
+
+| Folder | Parity slab | |
+|---|---|---|
+| *(root)* | `#F97316` | orange, the set in use |
+| [`yellow/`](yellow/) | `#fab219` | the UI's `--warning` |
+| [`status-light/`](status-light/) | `#FFD21A` + glow | reads as a lit indicator |
+
+`status-light/` is the brighter of the yellows and adds a soft glow behind the
+parity slabs, so they look like status LEDs rather than flat fills. The glow is
+an SVG filter scaled to the slab, and it survives down to 16 px — at that size
+it stops reading as a glow and simply warms the colour, which is a benign
+failure. `proof-palette.png` puts all three side by side on both UI surfaces.
 
 ## Usage rules
 
@@ -60,6 +83,13 @@ without Segoe UI installed.
 
 ```bash
 bash build.sh
+```
+
+Every colour is overridable, as is the output directory, so an alternate
+palette can be rendered beside the primary kit:
+
+```bash
+OUT=yellow ORANGE='#fab219' bash build.sh
 ```
 
 Set `INKSCAPE=/path/to/inkscape` if it isn't at the default Windows location.

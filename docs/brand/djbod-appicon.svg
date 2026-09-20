@@ -2,14 +2,14 @@
   <title>Distributed JBOD</title>
   <rect width="512" height="512" rx="112" fill="#0B1220"/>
   <g transform="translate(256,256) scale(1.42) translate(-128,-128)">
-    <rect x="26" y="189" width="56" height="40" rx="20" fill="#38BDF8"/>
-    <rect x="26" y="135" width="56" height="40" rx="20" fill="#38BDF8"/>
+    <rect x="26" y="189" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="26" y="135" width="56" height="40" rx="20" fill="#3987e5"/>
     <rect x="26" y="81" width="56" height="40" rx="20" fill="#F97316"/>
-    <rect x="100" y="189" width="56" height="40" rx="20" fill="#38BDF8"/>
+    <rect x="100" y="189" width="56" height="40" rx="20" fill="#3987e5"/>
     <rect x="100" y="135" width="56" height="40" rx="20" fill="#F97316"/>
     <rect x="174" y="189" width="56" height="40" rx="20" fill="#F97316"/>
-    <rect x="174" y="135" width="56" height="40" rx="20" fill="#38BDF8"/>
-    <rect x="174" y="81" width="56" height="40" rx="20" fill="#38BDF8"/>
-    <rect x="174" y="27" width="56" height="40" rx="20" fill="#38BDF8"/>
+    <rect x="174" y="135" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="174" y="81" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="174" y="27" width="56" height="40" rx="20" fill="#3987e5"/>
   </g>
 </svg>

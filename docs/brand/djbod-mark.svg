@@ -1,21 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
   <title>Distributed JBOD</title>
-    <rect x="25" y="194" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="25" y="163" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="25" y="132" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
+    <rect x="25" y="194" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="25" y="163" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="25" y="132" width="44" height="23" rx="11.5" fill="#2a78d6"/>
     <rect x="25" y="101" width="44" height="23" rx="11.5" fill="#F97316"/>
-    <rect x="79" y="194" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="79" y="163" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
+    <rect x="79" y="194" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="79" y="163" width="44" height="23" rx="11.5" fill="#2a78d6"/>
     <rect x="79" y="132" width="44" height="23" rx="11.5" fill="#F97316"/>
-    <rect x="79" y="101" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="79" y="70" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="79" y="39" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="133" y="194" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
+    <rect x="79" y="101" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="79" y="70" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="79" y="39" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="133" y="194" width="44" height="23" rx="11.5" fill="#2a78d6"/>
     <rect x="133" y="163" width="44" height="23" rx="11.5" fill="#F97316"/>
-    <rect x="133" y="132" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
+    <rect x="133" y="132" width="44" height="23" rx="11.5" fill="#2a78d6"/>
     <rect x="187" y="194" width="44" height="23" rx="11.5" fill="#F97316"/>
-    <rect x="187" y="163" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="187" y="132" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="187" y="101" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
-    <rect x="187" y="70" width="44" height="23" rx="11.5" fill="#0EA5E9"/>
+    <rect x="187" y="163" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="187" y="132" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="187" y="101" width="44" height="23" rx="11.5" fill="#2a78d6"/>
+    <rect x="187" y="70" width="44" height="23" rx="11.5" fill="#2a78d6"/>
 </svg>
