@@ -153,3 +153,17 @@ what the checks found, is designed and next to build.
 The system has been tested by many nodes running in one process on one
 machine and by hand against the built binaries. It has not yet run for
 long on several real machines; do that before relying on it.
+
+## License
+
+Distributed-JBOD is free software under the GNU Affero General Public
+License, version 3 only (`AGPL-3.0-only`); the full text is in
+[LICENSE](LICENSE). Copyright (C) 2026 edward-b-1.
+
+You may run, study, change and share it. If you distribute it, or offer a
+modified version to others over a network, which a storage service and
+its web UI do, you must offer them the source of the version they use.
+The web UI links to this repository for that reason. The binaries also
+contain third-party packages under permissive licenses, whose notices are
+collected in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES); ship that file
+beside any binary you distribute.
