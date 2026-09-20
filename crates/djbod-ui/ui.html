@@ -70,10 +70,20 @@
   /* Collapsed: icons only, the label as a tooltip, the count hidden. */
   .collapsed .rail .label, .collapsed .rail .count { display: none; }
   .collapsed .rail button { justify-content: center; padding: 8px 0; }
-  #rail-toggle { margin-bottom: 6px; align-self: flex-end; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; color: var(--muted); cursor: pointer; font: inherit; }
+  /* The rail's head: a small title at the left, the collapse toggle at
+     the right; collapsed, only the toggle, centred. */
+  /* The head keeps the rail's side padding, so the toggle sits the same
+     distance from the rail's right border as the section buttons do. */
+  .rail-head { display: flex; align-items: center; margin: 0 0 6px; padding-left: 10px; }
+  #rail-toggle { margin-left: auto; }
+  .rail-title { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .collapsed .rail-head { justify-content: center; padding-left: 0; }
+  .collapsed #rail-toggle { margin-left: 0; }
+  /* Not a section button: it keeps its own width rather than the rail
+     buttons' full width, or its icon would sit at the row's left. */
+  #rail-toggle { width: auto; flex: none; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; color: var(--muted); cursor: pointer; font: inherit; }
   #rail-toggle:hover { color: var(--text); background: var(--bg); }
   #rail-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; transition: transform .15s; }
-  .collapsed #rail-toggle { align-self: center; }
   .collapsed #rail-toggle svg { transform: rotate(180deg); }
   @media (prefers-reduced-motion: reduce) { .frame, #rail-toggle svg { transition: none; } }
   .rail button {
@@ -94,7 +104,7 @@
     .rail button { width: auto; }
     .collapsed .rail .label, .collapsed .rail .count { display: initial; }
     .collapsed .rail button { justify-content: flex-start; padding: 8px 10px; }
-    #rail-toggle { display: none; }
+    .rail-head { display: none; }
     .rail .count { margin-left: 4px; }
   }
   main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
@@ -235,7 +245,10 @@
 <div id="banners"></div>
 <div class="frame">
 <aside class="rail">
-  <button id="rail-toggle" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+  <div class="rail-head">
+    <span class="label rail-title">Sections</span>
+    <button id="rail-toggle" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+  </div>
   <nav role="tablist" aria-label="Sections">
     <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview<span class="count" id="count-overview"></span></button>
     <button role="tab" data-tab="nodes"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Nodes<span class="count" id="count-nodes"></span></button>
