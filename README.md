@@ -107,6 +107,41 @@ objects with no cluster running, and turning on TLS.
   a certificate authority you create with `openssl`, or the included
   script. A running cluster switches from plain to TLS in two steps.
 
+## Why not MinIO, Garage, SeaweedFS, or Ceph?
+
+Each of these is a good system, and for many needs the right one. The
+job Distributed-JBOD is built for is narrower: a few small machines with
+whatever disks are to hand, erasure coding across all of them, every
+block checked on every read, and nothing else to run.
+
+- **MinIO** erasure-codes S3 storage, but lays it out in erasure sets of
+  uniform drives and grows by adding whole pools. A pile of odd-sized
+  disks either wastes the difference or cannot be laid out at all.
+  Distributed-JBOD places each object on the emptiest disks at the time
+  it is written, so any mix of sizes fills evenly and one new disk starts
+  taking writes at once. MinIO's community edition also changed terms
+  in 2025; check them before depending on it.
+- **Garage** is built for the same hardware, heterogeneous and
+  unreliable machines with no master, and is the closest relative. It
+  keeps three full copies of every object rather than erasure coding,
+  so it spends 3x raw space where `3+1` spends 1.33x, and it does not
+  verify each block against a checksum as it is read.
+- **SeaweedFS** is a fast volume-based blob store whose erasure coding is
+  a background tier for cold volumes, applied after the fact. It needs
+  master servers, and a filer for anything beyond flat blobs. Here
+  erasure coding is the write path, and there is no master to keep up.
+- **Ceph** does everything here and a great deal more, and is the right
+  answer at scale. It also needs monitors, managers, several
+  well-provisioned nodes to be sensible, and the operations knowledge to
+  run them, which is why small deployments avoid it.
+
+What none of them offer is the recovery story: each object here is a
+plain JSON record beside a shard file on each disk, in a layout you can
+read, and `djbod-recover` reads the objects back from bare disks with
+nothing running. Where they win, they win clearly: S3 compatibility,
+scale, and years of production use. Distributed-JBOD is young, as the
+[Status](#status) section says.
+
 ## The tools
 
 | Tool | What it is for |
