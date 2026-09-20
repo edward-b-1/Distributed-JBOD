@@ -76,11 +76,11 @@ outline _v-dark.svg  djbod-lockup-stacked-onDark.svg
 rm -f _h-light.svg _h-dark.svg _v-light.svg _v-dark.svg
 
 # --- inline lockups: mark left, the name on one line, hyphenated or not
-inline_src () { # $1=out  $2=joiner entity  $3=muted colour  $4=ink colour
+inline_src () { # $1=out  $2=joiner entity  $3=muted colour  $4=ink colour  $5=title
 awk -f gen.awk -e "BEGIN{
   mh=76; s=mh/178; mw=206*s; fs=48; cap=fs*0.7;
   yb = 24 + mh/2 + cap/2; tx = 24 + mw + 26; h = mh + 48;
-  printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"900\\\" height=\\\"%g\\\" viewBox=\\\"0 0 900 %g\\\">\n  <title>Distributed-JBOD</title>\n\", h, h;
+  printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"900\\\" height=\\\"%g\\\" viewBox=\\\"0 0 900 %g\\\">\n  <title>$5</title>\n\", h, h;
   printf \"  <g transform=\\\"translate(24,24) scale(%g) translate(-25,-39)\\\">\n\", s;
   printf \"%s\", stack(4,44,23,10,8,\"4 6 3 5\",\"3 2 1 0\",\"$BLUE\",\"$ORANGE\",256);
   printf \"  </g>\n\";
@@ -96,10 +96,10 @@ finish () { # $1=src $2=out
   sed -i -E "s/width=\"900(\.[0-9]+)?\"/width=\"$W\"/; s/viewBox=\"0 0 900(\.[0-9]+)? /viewBox=\"0 0 $W /" "$2"
   rm -f "$1"
 }
-inline_src _i1.svg "-"      "$MUTED"   "$INK";   finish _i1.svg djbod-lockup-inline.svg
-inline_src _i2.svg "-"      "$MUTED_D" "$INK_D"; finish _i2.svg djbod-lockup-inline-onDark.svg
-inline_src _i3.svg "&#160;" "$MUTED"   "$INK";   finish _i3.svg djbod-lockup-inline-nohyphen.svg
-inline_src _i4.svg "&#160;" "$MUTED_D" "$INK_D"; finish _i4.svg djbod-lockup-inline-nohyphen-onDark.svg
+inline_src _i1.svg "-"      "$MUTED"   "$INK"   "Distributed-JBOD"; finish _i1.svg djbod-lockup-inline.svg
+inline_src _i2.svg "-"      "$MUTED_D" "$INK_D" "Distributed-JBOD"; finish _i2.svg djbod-lockup-inline-onDark.svg
+inline_src _i3.svg "&#160;" "$MUTED"   "$INK"   "Distributed JBOD"; finish _i3.svg djbod-lockup-inline-nohyphen.svg
+inline_src _i4.svg "&#160;" "$MUTED_D" "$INK_D" "Distributed JBOD"; finish _i4.svg djbod-lockup-inline-nohyphen-onDark.svg
 
 # --- raster exports
 png () { "$IK" --export-type=png --export-filename="$2" -w "$3" "$1" >/dev/null 2>&1; }
