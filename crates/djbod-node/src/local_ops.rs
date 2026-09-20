@@ -23,7 +23,7 @@ use djbod_proto::message::{
 
 use crate::node::{Node, NodeError, ShardWriteKey};
 use crate::server::{ConnectionEnd, Reader, Writer};
-use crate::wire::{read_message_within, write_message};
+use djbod_client::wire::{read_message_within, write_message};
 
 /// Serve one request. `Err` closes the connection; ordinary failures are
 /// reported to the peer as `Response::Error` and return `Ok`.
@@ -205,8 +205,8 @@ impl From<NodeError> for Failure {
     }
 }
 
-impl From<crate::wire::WireError> for Failure {
-    fn from(e: crate::wire::WireError) -> Failure {
+impl From<djbod_client::wire::WireError> for Failure {
+    fn from(e: djbod_client::wire::WireError) -> Failure {
         Failure::Close(e.into())
     }
 }

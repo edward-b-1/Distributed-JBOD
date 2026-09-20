@@ -22,10 +22,10 @@ use djbod_core::version::VersionId;
 use djbod_proto::handshake::Hello;
 use djbod_proto::message::{ErrorCode, ErrorDetail, RecordCursor, Request, Response};
 
-use crate::client::{ClientError, Connection};
 use crate::config::NodeConfig;
 use crate::node::{Node, NodeError};
 use crate::transport::{Connector, TlsMaterial};
+use djbod_client::connection::{ClientError, Connection};
 
 /// What one node answered when asked for its document.
 #[derive(Debug)]

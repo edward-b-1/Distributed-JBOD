@@ -334,6 +334,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "djbod-client",
  "djbod-core",
  "djbod-node",
  "djbod-proto",
@@ -341,6 +342,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "djbod-client"
+version = "0.1.0"
+dependencies = [
+ "djbod-core",
+ "djbod-proto",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
  "uuid",
 ]
 
@@ -367,6 +383,7 @@ dependencies = [
  "anyhow",
  "ciborium",
  "clap",
+ "djbod-client",
  "djbod-core",
  "djbod-proto",
  "rand",
@@ -419,6 +436,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "djbod-client",
  "djbod-core",
  "djbod-node",
  "djbod-proto",

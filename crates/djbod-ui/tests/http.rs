@@ -9,10 +9,10 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use djbod_client::transport::Connector;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_node::transport::Connector;
 use djbod_ui::{router, router_for_hosts, Target};
 use tokio::net::TcpListener;
 
@@ -168,7 +168,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(json["devices"][0]["state"], "active");
     assert_eq!(json["transport"], "plain");
     assert_eq!(json["ui_to_node_tls"], false);
-    assert_eq!(json["ui_build"], djbod_node::BUILD);
+    assert_eq!(json["ui_build"], djbod_client::BUILD);
 
     let (status, json) = get_json(&test, "/api/cluster").await;
     assert_eq!(status, StatusCode::OK, "{json}");
@@ -178,7 +178,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["version"], json["document"]["version"]);
     assert!(nodes[0]["error"].is_null());
-    assert_eq!(nodes[0]["build"], djbod_node::BUILD);
+    assert_eq!(nodes[0]["build"], djbod_client::BUILD);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1196,7 +1196,7 @@ async fn node_labels_are_set_shown_and_cleared() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_brand_assets_are_served_for_the_tab_and_the_header() {
     let test = start_node(4, 3, 1).await;
-    let build = djbod_node::BUILD;
+    let build = djbod_client::BUILD;
     for (name, kind, magic) in [
         ("lockup.svg", "image/svg+xml", &b"<?xml"[..]),
         ("lockup-dark.svg", "image/svg+xml", &b"<?xml"[..]),

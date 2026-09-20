@@ -33,12 +33,12 @@ use djbod_proto::message::{
     ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
 };
 
-use crate::client::{ClientError, Connection, StreamItem};
 use crate::local_ops::{respond, Failure};
 use crate::node::Node;
 use crate::server::{our_hello, ConnectionEnd, Reader, Writer};
 use crate::ulid::VersionGenerator;
-use crate::wire::{read_message_within, write_message};
+use djbod_client::connection::{ClientError, Connection, StreamItem};
+use djbod_client::wire::{read_message_within, write_message};
 
 pub fn is_client_operation(request: &Request) -> bool {
     matches!(

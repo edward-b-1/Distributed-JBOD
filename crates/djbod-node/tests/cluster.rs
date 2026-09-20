@@ -5,15 +5,15 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use djbod_client::connection::{ClientError, Connection};
+use djbod_client::wire;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::record::DeviceId;
-use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node, NodeError};
 use djbod_node::server;
 use djbod_node::transport::Connector;
-use djbod_node::wire;
 use djbod_proto::frame::{Frame, MessageType};
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{DrainEvent, ErrorCode, Message, Request, Response, ShardCondition};
@@ -1707,7 +1707,7 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
         .await
         .expect("hello");
     match wire::read_message(&mut stream).await.expect("peer hello") {
-        Message::Hello(peer) => assert_eq!(peer.build.as_deref(), Some(djbod_node::BUILD)),
+        Message::Hello(peer) => assert_eq!(peer.build.as_deref(), Some(djbod_client::BUILD)),
         other => panic!("expected Hello, got {other:?}"),
     }
     stream
@@ -1726,7 +1726,7 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
                 detail.message
             );
             assert!(
-                detail.message.contains(djbod_node::BUILD),
+                detail.message.contains(djbod_client::BUILD),
                 "{}",
                 detail.message
             );
@@ -1889,7 +1889,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
     );
     assert_eq!(
         asking.peer_hello().build.as_deref(),
-        Some(djbod_node::BUILD)
+        Some(djbod_client::BUILD)
     );
     assert_eq!(asking.peer_hello().node_id, Some(a.node.id()));
     // Nothing else is served on that connection.
