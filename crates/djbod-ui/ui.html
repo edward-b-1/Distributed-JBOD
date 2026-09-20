@@ -179,7 +179,6 @@
 <header>
   <h1><picture><source srcset="/icon-dark.png" media="(prefers-color-scheme: dark)"><img src="/icon.png" alt="" width="26" height="26"></picture>Distributed-JBOD</h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
-  <span class="meta">document version <code id="h-version">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
   <span class="meta">ui build <code id="h-build">…</code></span>
@@ -486,7 +485,6 @@ async function refresh() {
 function renderHeader() {
   const { status, cluster } = state;
   $('h-cluster').textContent = status.cluster_id;
-  $('h-version').textContent = status.document_version;
   $('h-node').textContent = nodeText(status.coordinator);
   $('h-node').title = status.coordinator;
   $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
