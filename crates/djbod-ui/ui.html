@@ -21,6 +21,7 @@
     --critical: #d03b3b;
     --warning-soft: #fff3df;
     --critical-soft: #fbe3e3;
+    --good-soft: #e1f4e1;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
@@ -36,6 +37,7 @@
       --accent-track: #1d3a5e;
       --warning-soft: #3a2f16;
       --critical-soft: #3d1c1c;
+      --good-soft: #17301a;
     }
   }
   * { box-sizing: border-box; }
@@ -116,6 +118,19 @@
   .state.draining::before { content: "\25D0  "; color: var(--warning); }
   .state.removed::before { content: "\25CB  "; color: var(--muted); }
   .ok::before { content: "\2713 "; color: var(--good); }
+  /* The health card at the top of the Overview: a mark, a sentence, and
+     the way to the fix, in the status colour; green when every node
+     answers and holds the current document, red when one does not, amber
+     when only the builds differ. */
+  .health { display: flex; align-items: center; gap: 14px; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .health .mark { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 700; color: #fff; background: var(--good); flex: none; }
+  .health.bad .mark { background: var(--critical); }
+  .health.warn .mark { background: var(--warning); color: #3a2f16; }
+  .health .title { font-weight: 600; font-size: 15px; }
+  .health .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  .health .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .health .actions a { color: var(--accent); font-size: 13px; white-space: nowrap; cursor: pointer; text-decoration: none; }
+  .health .actions a:hover { text-decoration: underline; }
   .bad::before { content: "\2717 "; color: var(--critical); }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   button, input, select {
@@ -199,6 +214,7 @@
 <main>
 
 <section id="tab-overview">
+  <div id="health" role="status"></div>
   <div class="tiles" id="tiles"></div>
   <h2>Nodes</h2>
   <table>
@@ -483,6 +499,44 @@ async function refresh() {
     renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
+// The health card: do all nodes hold the same configuration? Consistent
+// means every node listed in the document answered and holds the
+// document's version (SPEC 6.2.6). An unreachable node or one at another
+// version breaks that, and the card names it and offers the fix. Builds
+// that differ (6.2.6.4) are a warning on their own, since the next
+// document change may be refused by the older node.
+function renderHealth() {
+  const { status, cluster } = state;
+  const nodes = cluster.nodes;
+  const unreachable = nodes.filter((n) => n.error);
+  const behind = nodes.filter((n) => !n.error && n.version !== status.document_version);
+  const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build || 'older'));
+  const older = nodes.filter((n) => !n.error && !n.build);
+  const names = (list) => list.map((n) => nodeText(n.node)).join(', ');
+  let cls = 'ok', mark = '\u2713', title, sub;
+  const actions = [];
+  if (unreachable.length) {
+    cls = 'bad'; mark = '!';
+    title = `${unreachable.length} of ${nodes.length} node(s) unreachable`;
+    sub = unreachable.map((n) => `${nodeText(n.node)} at ${n.address}: ${n.error}`).join('; ');
+  } else if (behind.length) {
+    cls = 'bad'; mark = '!';
+    title = 'Cluster inconsistent';
+    sub = `${names(behind)} ${behind.length === 1 ? 'holds' : 'hold'} document version ${behind.map((n) => n.version).join(', ')}; the current version is ${status.document_version}`;
+    actions.push(['Sync documents \u2192', () => $('sync').click()]);
+  } else if (builds.size > 1) {
+    cls = 'warn'; mark = '\u2261';
+    title = 'Consistent, builds differ';
+    sub = older.length ? `${names(older)} ${older.length === 1 ? 'runs' : 'run'} an older build; upgrade before the next change to the cluster document` : `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
+  } else {
+    title = 'Cluster consistent';
+    sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
+  }
+  $('health').replaceChildren(el('div', { class: 'health ' + cls },
+    el('div', { class: 'mark', 'aria-hidden': 'true', text: mark }),
+    el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
+    el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+}
 function renderHeader() {
   const { status, cluster } = state;
   // The cluster's name first, its id in parentheses (SPEC 6.2.5.3).
@@ -494,6 +548,7 @@ function renderHeader() {
   $('h-transport').textContent = status.transport || 'plain';
   $('h-build').textContent = status.ui_build || '?';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
+  renderHealth();
   document.title = `Distributed-JBOD ${status.cluster_name || short(status.cluster_id)}`;
 }
 // Warnings about unencrypted links, one line each, dismissable for the
