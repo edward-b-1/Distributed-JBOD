@@ -81,12 +81,12 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
 /// The brand assets the page uses, from docs/brand (see its README):
-/// the horizontal lockup for the header in its light and dark forms,
+/// the one-line unhyphenated lockup for the header in its light and dark forms,
 /// the 2x2 favicon reduction for the tab with a PNG fallback, and the
 /// app icon for home screens.
-pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-horizontal.svg");
+pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen.svg");
 pub const LOCKUP_DARK: &[u8] =
-    include_bytes!("../../../docs/brand/djbod-lockup-horizontal-onDark.svg");
+    include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen-onDark.svg");
 pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/djbod-favicon.svg");
 pub const FAVICON_PNG: &[u8] = include_bytes!("../../../docs/brand/png/djbod-favicon-32.png");
 pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/png/djbod-appicon-256.png");
@@ -226,23 +226,23 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
     Router::new()
         .route("/", get(page))
         .route(
-            "/brand/lockup.svg",
+            "/brand/{version}/lockup.svg",
             get(|| async { asset(LOCKUP, "image/svg+xml") }),
         )
         .route(
-            "/brand/lockup-dark.svg",
+            "/brand/{version}/lockup-dark.svg",
             get(|| async { asset(LOCKUP_DARK, "image/svg+xml") }),
         )
         .route(
-            "/brand/favicon.svg",
+            "/brand/{version}/favicon.svg",
             get(|| async { asset(FAVICON_SVG, "image/svg+xml") }),
         )
         .route(
-            "/brand/favicon-32.png",
+            "/brand/{version}/favicon-32.png",
             get(|| async { asset(FAVICON_PNG, "image/png") }),
         )
         .route(
-            "/brand/appicon-256.png",
+            "/brand/{version}/appicon-256.png",
             get(|| async { asset(APP_ICON, "image/png") }),
         )
         .nest("/api", api)
@@ -350,8 +350,15 @@ fn refuse(code: &str, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// The page, with every brand asset path given this build's id as a
+/// segment, so a browser may cache the assets indefinitely and still
+/// see a new logo the moment a new build serves the page.
+static PAGE_FOR_THIS_BUILD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    PAGE.replace("\"/brand/", &format!("\"/brand/{}/", djbod_node::BUILD))
+});
+
 async fn page() -> Html<&'static str> {
-    Html(PAGE)
+    Html(PAGE_FOR_THIS_BUILD.as_str())
 }
 
 fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
@@ -360,7 +367,9 @@ fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
             (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
+                // The path carries the build id, so the content at a given
+                // path never changes and may be cached for good.
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
             ),
         ],
         bytes,
