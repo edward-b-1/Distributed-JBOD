@@ -51,12 +51,12 @@
   body > * { flex: none; }
   a { color: var(--accent); }
   header {
-    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
-    padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
   }
   header h1 { margin: 0; display: flex; align-items: center; }
-  /* The one-line lockup; 48 px high keeps it above the kit's 200 px minimum width. */
-  header h1 img { height: 48px; width: auto; display: block; }
+  /* The one-line lockup, 60 px high (254 px wide); the header's items centre on it. */
+  header h1 img { height: 60px; width: auto; display: block; }
   header .meta { color: var(--text-2); font-size: 13px; }
   header .meta code { font-family: var(--mono); }
   /* Navigation is a left rail: one button per section with an icon and,
@@ -223,7 +223,7 @@
 </head>
 <body>
 <header>
-  <h1><picture><source srcset="/brand/lockup-dark.svg" media="(prefers-color-scheme: dark)"><img src="/brand/lockup.svg" alt="Distributed JBOD" width="203" height="48"></picture></h1>
+  <h1><picture><source srcset="/brand/lockup-dark.svg" media="(prefers-color-scheme: dark)"><img src="/brand/lockup.svg" alt="Distributed JBOD" width="254" height="60"></picture></h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
