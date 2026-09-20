@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="88" viewBox="0 0 360 88">
+<rect width="360" height="88" fill="#f4f3ee"/>
+<g transform="translate(16 16) scale(0.35)">
+<defs><clipPath id="djbodD" clipPathUnits="userSpaceOnUse"><path d="M21 18 H77 A63 63 0 0 1 77 144 H21 Z M49 46 H77 A35 35 0 0 1 77 116 H49 Z" clip-rule="evenodd"/></clipPath></defs><g clip-path="url(#djbodD)"><rect x="10" y="18" width="140" height="22" fill="#16181d"/><rect x="10" y="44" width="140" height="22" fill="#16181d"/><rect x="10" y="70" width="140" height="22" fill="#16181d"/><rect x="10" y="96" width="140" height="22" fill="#d9662b"/><rect x="10" y="122" width="140" height="22" fill="#16181d"/></g>
+</g>
+<text x="90" y="55" font-family="'Space Grotesk', 'Segoe UI', sans-serif" font-size="30" letter-spacing="-0.3" fill="#16181d"><tspan font-weight="500">Distributed</tspan><tspan font-weight="700" fill="#d9662b">-</tspan><tspan font-weight="700">JBOD</tspan></text>
+</svg>
