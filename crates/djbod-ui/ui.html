@@ -216,7 +216,7 @@
 <section id="tab-overview">
   <div id="health" role="status"></div>
   <div class="tiles" id="tiles"></div>
-  <h2 id="nodes-section">Nodes</h2>
+  <h2>Nodes</h2>
   <table>
     <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
@@ -532,7 +532,6 @@ function renderHealth() {
     title = 'Cluster consistent';
     sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
   }
-  actions.push(['Details \u2192', () => { document.querySelector('[data-tab=overview]').click(); $('nodes-section').scrollIntoView({ behavior: 'smooth', block: 'start' }); }]);
   $('health').replaceChildren(el('div', { class: 'health ' + cls },
     el('div', { class: 'mark', 'aria-hidden': 'true', text: mark }),
     el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
