@@ -81,12 +81,12 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
 /// The brand assets the page uses, from docs/brand (see its README):
-/// the horizontal lockup for the header in its light and dark forms,
+/// the one-line unhyphenated lockup for the header in its light and dark forms,
 /// the 2x2 favicon reduction for the tab with a PNG fallback, and the
 /// app icon for home screens.
-pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-horizontal.svg");
+pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen.svg");
 pub const LOCKUP_DARK: &[u8] =
-    include_bytes!("../../../docs/brand/djbod-lockup-horizontal-onDark.svg");
+    include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen-onDark.svg");
 pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/djbod-favicon.svg");
 pub const FAVICON_PNG: &[u8] = include_bytes!("../../../docs/brand/png/djbod-favicon-32.png");
 pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/png/djbod-appicon-256.png");
