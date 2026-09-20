@@ -166,6 +166,98 @@ localhost by default; put it behind something that does if you expose it.
 Nodes listen on TCP port **5263** by default, which spells JBOD on a
 telephone keypad.
 
+## A typical multi-node deployment
+
+The quick start runs one node with directories standing in for disks.
+The intended shape is one node per machine, each with its own disks.
+Three machines, `nas1` to `nas3` at `10.0.0.1` to `10.0.0.3`, with three
+disks each, look like this. Give every machine a fixed address, by a
+DHCP reservation if nothing else, because the cluster document records
+where each node is reached.
+
+**1. Mount the disks** on each machine, one filesystem per disk, and
+make a directory on each for djbod. Any size, any filesystem; they need
+not match each other or the other machines:
+
+```sh
+sudo mkdir -p /mnt/disk0/djbod /mnt/disk1/djbod /mnt/disk2/djbod /var/lib/djbod
+```
+
+**2. Write `/etc/djbod/node.toml`** on each machine. Only `node_id`,
+`listen`, and `bootstrap_peers` differ between them; `uuidgen` makes the
+id. On `nas1`:
+
+```toml
+node_id = "5f0c1d2e-8a9b-4c3d-9e1f-2a3b4c5d6e7f"     # this machine's, for life
+listen = "10.0.0.1:5263"                              # this machine's own address
+state_dir = "/var/lib/djbod"                          # its copy of the cluster document
+devices = ["/mnt/disk0/djbod", "/mnt/disk1/djbod", "/mnt/disk2/djbod"]
+bootstrap_peers = ["10.0.0.2:5263", "10.0.0.3:5263"]  # the others, asked at startup
+```
+
+If a machine listens on every interface, set `listen = "0.0.0.0:5263"`
+and `advertise = "10.0.0.1:5263"` so the others know which address to
+use.
+
+**3. Create the cluster on the first machine**, then start its node:
+
+```sh
+djbod-node init-cluster --config /etc/djbod/node.toml --name home-nas --k 4 --m 2
+djbod-node run --config /etc/djbod/node.toml
+```
+
+`init-cluster` prints the cluster id; keep it. `4+2` puts six shards of
+every object on six different disks and survives any two of them
+failing, for 50% overhead; `3+1` costs 33% and survives one. Nine disks
+is comfortably more than the six a `4+2` write needs, and the choice can
+be changed later. Until enough disks have joined, writes are refused and
+say so; the first node alone cannot hold a `4+2` object.
+
+**4. Join the other machines**, each with its own configuration file,
+pointing at any node already running, then start them:
+
+```sh
+djbod-node join --config /etc/djbod/node.toml --peer 10.0.0.1:5263 --cluster <the cluster id>
+djbod-node run --config /etc/djbod/node.toml
+```
+
+`join` initialises the new disks and proposes a new version of the
+cluster document listing the machine and its disks, which every running
+node must accept. Run each node under `systemd` or whatever keeps
+services alive on that machine, so it restarts with it; at startup a
+node asks its bootstrap peers for a newer document, so a machine that
+was off while the cluster changed catches up on its own.
+
+**5. Use it from any machine** on the network. Every node answers every
+request, so point the client at whichever is nearest:
+
+```sh
+export DJBOD_NODE=10.0.0.1:5263
+export DJBOD_CLUSTER=<the cluster id>
+djbod cluster show          # three nodes, one document version, each node's build
+djbod status                # nine disks, their labels, state, and free space
+djbod put backups/2026-09.tar backup.tar
+```
+
+Give the disks and machines names once, so `status` reads as your
+hardware does: `djbod cluster set-label <device-uuid> nas1-disk0` and
+`djbod cluster set-node-label <node-uuid> nas1`. For the web UI, run
+`djbod-ui` on one machine with the same two variables; it binds to
+localhost, so reach it over an SSH tunnel or put it behind something
+with a login.
+
+**What to expect.** Shards are placed one per disk on the emptiest disks,
+without regard to which machine a disk is in. A machine that is switched
+off takes its three disks with it, so under `4+2` an object with three
+shards on that machine is unreadable until the machine returns, and the
+request says so. Nothing is lost unless disks themselves fail, and at
+most two disks may fail before an object is gone. Adding a fourth
+machine later is step 4 again; adding a disk to a machine is
+`djbod-node add-device` and a restart; a machine whose address changes
+is moved with `djbod cluster set-address`, or simply restarted with the
+new address configured. Switch the cluster to TLS before it leaves a
+network you trust; the guide has the steps.
+
 ## For developers
 
 The design is in [SPEC.md](SPEC.md), written before the code and kept in
