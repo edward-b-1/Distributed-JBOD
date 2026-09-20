@@ -145,6 +145,31 @@ pub fn validate_label(label: &str) -> Result<(), ClusterDocumentError> {
     Ok(())
 }
 
+/// A cluster name (SPEC 6.2.5.3) is text for people and nothing else,
+/// so spaces are allowed: 1 to 128 bytes, no control characters, and no
+/// leading or trailing whitespace, which would be invisible.
+pub fn validate_cluster_name(name: &str) -> Result<(), ClusterDocumentError> {
+    if name.is_empty() || name.len() > MAX_LABEL_BYTES {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: format!("must be 1 to {MAX_LABEL_BYTES} bytes"),
+        });
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: "must not contain control characters".to_string(),
+        });
+    }
+    if name.trim() != name {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: "must not start or end with whitespace".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// The only independence level v1 accepts (SPEC 7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -222,6 +247,8 @@ pub enum ClusterDocumentError {
     DuplicateDevice(DeviceId),
     #[error("label {label:?} is not usable: {reason}")]
     BadLabel { label: String, reason: String },
+    #[error("cluster name {name:?} is not usable: {reason}")]
+    BadClusterName { name: String, reason: String },
     #[error("label {label:?} is used by more than one device")]
     DuplicateLabel { label: String },
     #[error("device {device:?} names node {node:?}, which is not in the document")]
@@ -313,7 +340,7 @@ impl ClusterDocument {
             }
         }
         if let Some(name) = &self.name {
-            validate_label(name)?;
+            validate_cluster_name(name)?;
         }
         let mut node_labels: Vec<&str> = Vec::new();
         for node in &self.nodes {
@@ -471,20 +498,25 @@ mod tests {
     }
 
     #[test]
-    fn a_cluster_name_follows_the_label_rules_and_shows_beside_the_id() {
+    fn a_cluster_name_is_text_with_spaces_and_shows_beside_the_id() {
         let mut document = sample();
         assert_eq!(document.title(), document.cluster_id.to_string());
-        document.name = Some("home-nas".to_string());
+        document.name = Some("Home NAS".to_string());
         document.validate().expect("a usable name");
         assert_eq!(
             document.title(),
-            format!("home-nas ({})", document.cluster_id)
+            format!("Home NAS ({})", document.cluster_id)
         );
-        document.name = Some("has space".to_string());
-        assert!(matches!(
-            document.validate(),
-            Err(ClusterDocumentError::BadLabel { .. })
-        ));
+        for bad in ["", " padded", "padded ", "two\nlines", &"x".repeat(129)] {
+            document.name = Some(bad.to_string());
+            assert!(
+                matches!(
+                    document.validate(),
+                    Err(ClusterDocumentError::BadClusterName { .. })
+                ),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

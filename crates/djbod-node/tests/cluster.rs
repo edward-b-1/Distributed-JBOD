@@ -1760,7 +1760,7 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
 }
 
 /// SPEC 6.2.5.3: the cluster's name is set at creation or later, shown
-/// beside the id, carried in Hello and Status, and follows the label rules.
+/// beside the id, carried in Hello and Status; spaces are allowed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cluster_can_be_named_at_creation_or_later() {
     // At creation.
@@ -1792,24 +1792,24 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
         &Connector::plain(),
         a.addr,
         cluster,
-        Some("home-nas".to_string()),
+        Some("Home NAS".to_string()),
     )
     .await
     .expect("set name");
     assert!(changed);
-    assert_eq!(document.name.as_deref(), Some("home-nas"));
-    assert_eq!(a.node.document().name.as_deref(), Some("home-nas"));
-    assert_eq!(b.node.document().name.as_deref(), Some("home-nas"));
+    assert_eq!(document.name.as_deref(), Some("Home NAS"));
+    assert_eq!(a.node.document().name.as_deref(), Some("Home NAS"));
+    assert_eq!(b.node.document().name.as_deref(), Some("Home NAS"));
 
     // Hello and Status carry it.
     let mut client = a.client().await;
     assert_eq!(
         client.peer_hello().cluster_name.as_deref(),
-        Some("home-nas")
+        Some("Home NAS")
     );
     match client.request(Request::Status).await.expect("status") {
         Response::Status { cluster_name, .. } => {
-            assert_eq!(cluster_name.as_deref(), Some("home-nas"))
+            assert_eq!(cluster_name.as_deref(), Some("Home NAS"))
         }
         other => panic!("expected Status, got {other:?}"),
     }
@@ -1820,19 +1820,20 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
         Err(ClientError::Remote(detail)) => assert!(
             detail
                 .message
-                .contains(&format!("this node serves cluster home-nas ({cluster})")),
+                .contains(&format!("this node serves cluster Home NAS ({cluster})")),
             "{}",
             detail.message
         ),
         other => panic!("expected refusal, got {other:?}"),
     }
 
-    // The label rules apply; the same name changes nothing; clearing works.
+    // Control characters are refused; the same name changes nothing;
+    // clearing works.
     let result = membership::set_cluster_name(
         &Connector::plain(),
         a.addr,
         cluster,
-        Some("has space".to_string()),
+        Some("two\nlines".to_string()),
     )
     .await;
     assert!(
@@ -1848,7 +1849,7 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
         &Connector::plain(),
         a.addr,
         cluster,
-        Some("home-nas".to_string()),
+        Some("Home NAS".to_string()),
     )
     .await
     .expect("same name");

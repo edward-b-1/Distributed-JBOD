@@ -174,7 +174,7 @@ enum Command {
         #[command(flatten)]
         config: ConfigArgs,
         /// A name for the cluster, shown beside its id: 1 to 128
-        /// characters, no whitespace. `djbod cluster set-name` changes it.
+        /// characters, spaces allowed. `djbod cluster set-name` changes it.
         #[arg(long, env = "DJBOD_CLUSTER_NAME")]
         name: Option<String>,
         /// Data shards per stripe.

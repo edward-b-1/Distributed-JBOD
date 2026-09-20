@@ -335,8 +335,10 @@ node's `cluster.json`; with any node running or any copy differing this
 creates the disagreement 6.2.6.1 forbids.
 
 6.2.5.3 [D] **Cluster name.** The document may carry a `name`, an
-administrator-chosen name for the cluster under the label rules of
-6.2.5.1: 1 to 128 bytes, no whitespace, not shaped like a UUID. The
+administrator-chosen name for the cluster: 1 to 128 bytes of text with no
+control characters and no leading or trailing whitespace. Unlike a label
+(6.2.5.1) it may contain spaces, since it is text for people and never
+stands in for the id in a command. The
 cluster id stays the identity: `Hello` checks the id (19.1.5), `--cluster`
 takes the id, and nothing inside one cluster can make names unique across
 clusters. The name is shown beside the id, never instead of it: `status`

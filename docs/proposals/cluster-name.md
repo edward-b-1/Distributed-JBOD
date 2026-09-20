@@ -37,10 +37,10 @@ nodes, one level up.
 4. The wrong-cluster protection of `Hello` (19.1.5) is not weakened. Two
    clusters may carelessly be given the same name; they cannot be given
    the same UUID.
-5. The same shape rules as labels, for the same reasons: 1 to 128 bytes,
-   no whitespace, not shaped like a UUID, so the name can appear in
-   commands and environment variables and can never be mistaken for the
-   id.
+5. Text for people: 1 to 128 bytes, no control characters, no leading
+   or trailing whitespace. Spaces are allowed, unlike in labels, because
+   the name never stands in for the id in a command. (As first proposed
+   the name followed the label rules; the discussion settled on this.)
 
 ## 3. Where the name lives
 
@@ -120,9 +120,11 @@ stale after a rename, and one more file to distribute. Not recommended;
 
 ## 6. Rules
 
-The name uses the label validator (6.2.5.1): 1 to 128 bytes, no
-whitespace, not UUID-shaped. Uniqueness across clusters cannot be
-enforced by anything inside one cluster and is not claimed. Renaming
+The name is 1 to 128 bytes of text, no control characters, no leading
+or trailing whitespace; spaces are allowed. Uniqueness across clusters
+cannot be enforced by anything inside one cluster and is not claimed.
+Should option (b) ever be adopted, a name would additionally have to be
+distinguishable from a UUID. Renaming
 changes no data: devices belong to a cluster by UUID (5.2), certificates
 are verified by CA, records name nothing about the cluster.
 
@@ -153,15 +155,16 @@ is its own PR after.
 
 ## 9. Open questions
 
-1. Should the name allow spaces, so that `Home NAS` is possible? The
-   label rules forbid them so that names work unquoted in commands and
-   environment variables and so that no name is mistaken for a UUID.
-   Keeping one rule for all three kinds of name seems worth the loss of
-   spaces.
+1. *Settled: yes.* Spaces are allowed, so `Home NAS` is possible; the
+   name is display text and never stands in for the id in a command, so
+   the reasons labels forbid spaces do not apply.
 2. Is (b) wanted at all, given that `DJBOD_CLUSTER` is set once per
    machine? It buys a friendlier flag at the cost of a protocol change
-   and a weaker identity check; the proposal defers it.
-3. Should `init-cluster` require a name, so that no cluster is unnamed
-   from now on? Existing clusters would still be unnamed until
-   `set-name`, so the requirement would not make the tools' unnamed
-   case go away. Optional seems right.
+   and a weaker identity check; the proposal defers it. To be clear
+   about what (b) is and is not: it concerns only the `--cluster` check,
+   not how a client finds the cluster. A client would still connect to a
+   node by `--node ip:port`, as now; (b) would only let it say "and I
+   expect that node to serve the cluster named X" instead of "the
+   cluster with UUID X". No name-to-address mapping is proposed.
+3. *Settled: optional.* `init-cluster --name` is optional; an unnamed
+   cluster is valid and can be named later with `set-name`.

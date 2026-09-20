@@ -181,7 +181,8 @@ enum ClusterCommand {
     /// Give the cluster a name shown beside its id, or clear it with
     /// --clear. The id stays what `--cluster` takes.
     SetName {
-        /// The new name: 1 to 128 characters, no whitespace.
+        /// The new name: 1 to 128 characters; spaces are allowed, so quote
+        /// it.
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
         name: Option<String>,
         #[arg(long)]

@@ -811,31 +811,31 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     let test = start_node(2, 1, 1).await;
     let cluster = test.node.cluster_id().to_string();
 
-    let (ok, out, err) = djbod(&test, &["cluster", "set-name", "home-nas"]);
+    let (ok, out, err) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
     assert!(ok, "{err}");
-    assert!(out.contains("is now named home-nas"), "{out}");
+    assert!(out.contains("is now named Home NAS"), "{out}");
     let (ok, out, _) = djbod(&test, &["status"]);
     assert!(ok);
     assert!(
-        out.contains(&format!("cluster   home-nas ({cluster})")),
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
         "{out}"
     );
     let (ok, out, _) = djbod(&test, &["cluster", "show"]);
     assert!(ok);
     assert!(
-        out.contains(&format!("cluster   home-nas ({cluster})")),
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
         "{out}"
     );
     let (ok, out, _) = djbod(&test, &["--json", "status"]);
     assert!(ok);
-    assert!(out.contains("\"cluster_name\": \"home-nas\""), "{out}");
+    assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
 
-    let (ok, out, _) = djbod(&test, &["cluster", "set-name", "home-nas"]);
+    let (ok, out, _) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
     assert!(ok);
     assert!(out.contains("nothing changed"), "{out}");
-    let (ok, _, err) = djbod(&test, &["cluster", "set-name", "has space"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-name", " padded"]);
     assert!(!ok);
-    assert!(err.contains("whitespace"), "{err}");
+    assert!(err.contains("start or end with whitespace"), "{err}");
 
     let (ok, out, err) = djbod(&test, &["cluster", "set-name", "--clear"]);
     assert!(ok, "{err}");
