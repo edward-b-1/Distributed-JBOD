@@ -455,6 +455,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     let devices = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
     Ok(Response::Status {
         cluster_id: document.cluster_id,
+        cluster_name: document.name.clone(),
         document_version: document.version,
         coordinator: node.id(),
         transport: document.transport,

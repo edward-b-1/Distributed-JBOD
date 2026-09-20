@@ -29,6 +29,8 @@ pub const CLUSTER_DOCUMENT_FILE: &str = "cluster.json";
 /// Parameters for creating a new cluster (SPEC 6.2.2).
 #[derive(Debug, Clone)]
 pub struct ClusterParameters {
+    /// The cluster's name (SPEC 6.2.5.3), or none.
+    pub name: Option<String>,
     pub k: u8,
     pub m: u8,
     pub block_size: u64,
@@ -41,6 +43,7 @@ pub struct ClusterParameters {
 impl Default for ClusterParameters {
     fn default() -> ClusterParameters {
         ClusterParameters {
+            name: None,
             k: 3,
             m: 1,
             block_size: 1 << 20,
@@ -205,6 +208,7 @@ impl Node {
         let document = ClusterDocument {
             version: 1,
             cluster_id,
+            name: parameters.name.clone(),
             k: parameters.k,
             m: parameters.m,
             block_size: parameters.block_size,

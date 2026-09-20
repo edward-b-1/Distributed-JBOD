@@ -108,6 +108,7 @@ impl TestNode {
             cluster_id: self.node.cluster_id(),
             document_version: self.node.document_version(),
             build: None,
+            cluster_name: None,
         };
         Connection::connect(self.addr, hello)
             .await
@@ -274,6 +275,7 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
         cluster_id: test.node.cluster_id(),
         document_version: 99,
         build: None,
+        cluster_name: None,
     };
     match Connection::connect(test.addr, stale).await {
         Err(ClientError::Remote(detail)) => {
@@ -804,6 +806,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         cluster_id: test.node.cluster_id(),
         document_version: 1,
         build: None,
+        cluster_name: None,
     };
     assert!(matches!(
         Connection::connect(test.addr, stale).await,

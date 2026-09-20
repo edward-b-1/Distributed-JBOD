@@ -6,7 +6,7 @@ use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::Instrument;
 
-use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
+use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{ErrorCode, ErrorDetail, Message, Response};
 
 use crate::coordinator;
@@ -81,6 +81,20 @@ pub async fn serve(node: Arc<Node>, listener: TcpListener) {
     }
 }
 
+/// The refusal as the peer reads it; for the wrong cluster, also which
+/// cluster this node serves, by name when it has one (SPEC 6.2.5.3).
+fn refusal_message(node: &Node, refusal: &HelloError) -> String {
+    match refusal {
+        HelloError::ClusterId { .. } => {
+            format!(
+                "{refusal}; this node serves cluster {}",
+                node.document().title()
+            )
+        }
+        other => other.to_string(),
+    }
+}
+
 pub fn our_hello(node: &Node) -> Hello {
     Hello {
         protocol_version: PROTOCOL_VERSION,
@@ -89,6 +103,7 @@ pub fn our_hello(node: &Node) -> Hello {
         cluster_id: node.cluster_id(),
         document_version: node.document_version(),
         build: Some(crate::BUILD.to_string()),
+        cluster_name: node.document().name.clone(),
     }
 }
 
@@ -140,7 +155,7 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
         };
         let detail = ErrorDetail {
             node: Some(node.id()),
-            ..ErrorDetail::new(code, refusal.to_string())
+            ..ErrorDetail::new(code, refusal_message(&node, &refusal))
         };
         let _ = write_message(
             &mut writer,
