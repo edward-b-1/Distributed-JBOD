@@ -182,8 +182,9 @@
   a.btn { display: inline-block; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); text-decoration: none; background: var(--surface); }
   button:hover, a.btn:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--critical); }
-  button.danger:hover { border-color: var(--critical); }
+  /* Destructive actions are filled like the primary button, in red. */
+  button.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+  button.primary:hover, button.danger:hover { filter: brightness(.92); }
   button:disabled { opacity: .5; cursor: default; }
   input[type=number] { width: 9em; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
