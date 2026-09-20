@@ -72,9 +72,13 @@
   .collapsed .rail button { justify-content: center; padding: 8px 0; }
   /* The rail's head: a small title at the left, the collapse toggle at
      the right; collapsed, only the toggle, centred. */
-  .rail-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; padding-left: 10px; }
+  /* The head spans the rail edge to edge (undoing the rail's side padding) so
+     the toggle sits flush against the rail's right border. */
+  .rail-head { display: flex; align-items: center; margin: 0 -10px 6px; padding-left: 20px; }
+  #rail-toggle { margin-left: auto; }
   .rail-title { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
-  .collapsed .rail-head { justify-content: center; padding-left: 0; }
+  .collapsed .rail-head { justify-content: center; padding-left: 0; margin: 0 0 6px; }
+  .collapsed #rail-toggle { margin-left: 0; }
   #rail-toggle { background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; color: var(--muted); cursor: pointer; font: inherit; }
   #rail-toggle:hover { color: var(--text); background: var(--bg); }
   #rail-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; transition: transform .15s; }
