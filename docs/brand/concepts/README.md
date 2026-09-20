@@ -22,12 +22,18 @@ Each mark tries to say that without a caption.
 ```
 concepts/
 ├── svg/       standalone SVGs, one mark + one lockup per concept, light and -onDark
+├── png/       rasterised exports of every SVG (marks at 128 / 256 / 512, lockups at 1024 wide)
 └── canvas/    the editable presentation boards (see below)
 ```
 
 `svg/concept-NN-<name>-mark.svg` is the symbol alone on a 160×160 viewBox with
 transparent background. `-lockup.svg` puts it beside the wordmark. Concept 05 has
 `-wordmark.svg` instead of a lockup because the type *is* the mark.
+
+The PNGs in `png/` were exported with Inkscape 1.4 from the SVGs, for anywhere SVG
+is not accepted. Mark PNGs keep the transparent background. The lockup PNGs were
+rendered on a machine without Space Grotesk, so their type is the Segoe UI fallback;
+re-export after installing the font for the intended face.
 
 Shared system across all six:
 
