@@ -1,7 +1,16 @@
 # Proposal: remembering damaged shards
 
-Status: proposal for discussion, 19 September 2026. Nothing here is in
-SPEC.md yet; section 7 lists what would change there if it is adopted.
+Status: adopted into SPEC.md as section 20.7 on 19 September 2026, with
+the changes to 6.1, 11.4, 11.7, 14.2, 16.1, 18.4, 19.1.3, 20.1.2, 20.1.4,
+and 22 that section 7 lists. The review that settled the open questions
+added: `ClearDamage` after a clean read goes only to shards the lookup
+showed marked; the node and the offline scrub lock the ledger for their
+read-modify-write; repeated detections are coalesced; the cross-node
+`ShardMissingOnHolder` finding marks the holder; marks carry the
+reporting coordinator's node id; `ListDamage` is paged; per-device
+counters replace a history; and the last local scrub's time and summary
+live in the ledger (20.7.6). This document is kept for the alternatives
+it weighed.
 
 ## 1. The problem
 
