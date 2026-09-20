@@ -2066,6 +2066,32 @@ document. A private key is its own file, with owner-only permissions, and
 the configuration or argument names its path. The same applies to any
 future credential.
 
+20.8 [D] **Client libraries.** Programs reach the store through the
+`djbod-client` crate (C.2), which the node, the command-line tool, and the
+web UI are themselves built on, so there is one implementation of the
+handshake, the frames, TLS, streaming, and paging. Its client takes
+several node addresses and tries them in order, the way a client of a
+brokered system takes bootstrap servers: any node answers any request
+(4.1), so the list is for reaching the cluster, not for choosing a node.
+When the connection fails, the next request is sent over a fresh
+connection to the next address; only requests that are safe to repeat,
+the reads, the listing, and `Status`, are retried, and a write, a delete,
+a repair, or a refusal by the node is never repeated on the client's own
+initiative. The cluster id is given when known and otherwise learned
+from the first node that answers (19.1.5.1). Every object operation is
+one method; the streaming operations take a reader or a writer and hold
+one body chunk at a time (3.6); errors carry the node's detail of 16.2.
+A blocking facade runs the same client on a runtime of its own, for
+programs and language bindings that call from ordinary threads.
+
+20.8.1 [P] **Bindings.** Other languages wrap the Rust client rather than
+implementing the protocol again, so the awkward parts, paging, error
+detail, TLS, and failover, exist once. Python first, through PyO3, as a
+blocking module built with maturin; a C header follows if a language
+without a Rust binding route needs one. The protocol of 19.1 remains the
+contract, so a native client in any language stays possible where
+installing a compiled module is not.
+
 ## 21. Open questions
 
 | # | Question | Where | Recommendation |
