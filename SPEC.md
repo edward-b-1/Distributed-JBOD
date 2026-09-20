@@ -350,8 +350,22 @@ cluster set-name`, a document change like any other. `Status` and `Hello`
 carry it so a client need not fetch the document. An absent name means an
 unnamed cluster; documents written before the field are valid, and a node
 on a build from before it refuses a document that carries one (6.2.6.4).
-The reasoning, and the options for letting a client name the cluster
-instead of giving its id, are in `docs/proposals/cluster-name.md`.
+The reasoning is in `docs/proposals/cluster-name.md`.
+
+6.2.5.3.1 [O] **A client naming the cluster.** `--cluster` takes the id,
+and a client that knows only the name has nothing to put in its `Hello`,
+since a node refuses a mismatched id before saying anything. The name is
+display text and this is not a shortcoming, but one option is recorded
+should it be wanted: a client `Hello` may carry no cluster id, meaning
+"tell me"; a node accepts that from clients only, never from nodes
+(6.2.7); the node's own `Hello` gives its id and name, and the client
+closes the connection itself if the name is not the one it expected. The
+check of 19.1.5 then rests on the name being unique among the operator's
+clusters rather than on the id, and names would have to be
+distinguishable from a UUID so `--cluster` could take either. This
+concerns only the check, not how a client finds a node, which stays
+`--node ip:port`. The alternatives and the reasons for deferring are in
+`docs/proposals/cluster-name.md`, section 5.
 
 6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's
