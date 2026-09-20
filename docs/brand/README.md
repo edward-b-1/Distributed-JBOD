@@ -14,8 +14,10 @@ So: heterogeneous capacity, pooled across nodes, with integrity data striped ove
 
 | File | Use |
 |---|---|
-| `djbod-lockup-horizontal.svg` | primary lockup — README headers, docs, site nav |
+| `djbod-lockup-horizontal.svg` | primary lockup, name set on two lines — README headers, docs, site nav |
 | `djbod-lockup-horizontal-onDark.svg` | same, for dark backgrounds |
+| `djbod-lockup-inline.svg` / `-onDark.svg` | one-line lockup, `Distributed-JBOD` — matches the repo name |
+| `djbod-lockup-inline-nohyphen.svg` / `-onDark.svg` | one-line lockup, unhyphenated `Distributed JBOD` |
 | `djbod-lockup-stacked.svg` / `-onDark.svg` | square-ish contexts, splash, stickers |
 | `djbod-mark.svg` | symbol on its own, ≥ 40 px |
 | `djbod-mark-mono-dark.svg` / `-mono-white.svg` | one-colour print, embroidery, stamps |
@@ -23,7 +25,7 @@ So: heterogeneous capacity, pooled across nodes, with integrity data striped ove
 | `djbod-favicon.svg` | 2×2 reduction, ≤ 24 px |
 | `djbod-appicon.svg` | dark rounded square, avatars / app tiles |
 | `png/` | rasterised exports of all of the above |
-| `proof.png`, `proof2.png` | contact sheets showing everything together |
+| `proof.png`, `proof2.png`, `proof3.png` | contact sheets showing everything together |
 
 All type in the lockups is **converted to outlines**, so the SVGs render identically
 without Segoe UI installed.
@@ -40,9 +42,14 @@ without Segoe UI installed.
 
 ## Usage rules
 
+- **Which lockup:** the inline pair is the one to reach for in a wide space — a
+  site header, a slide footer, a banner. The two-line `horizontal` lockup suits
+  narrower spots where the full name on one line would have to be set small.
+  Use the hyphenated inline version anywhere the repo name is meant (it matches
+  `Distributed-JBOD`); the unhyphenated one reads better in prose settings.
 - **Clear space:** one slab-height on every side (≈ 14 % of the mark's height).
 - **Minimum sizes:** full mark 40 px · `icon-small` 24 px · `favicon` 16 px ·
-  horizontal lockup 120 px wide.
+  two-line horizontal lockup 120 px wide · inline lockup 200 px wide.
 - Don't recolour the parity slab to match the others — that diagonal is the logo.
 - Don't rebuild the wordmark in a different typeface; use the outlined SVGs.
 - On photos or busy backgrounds use the mono or app-icon version.

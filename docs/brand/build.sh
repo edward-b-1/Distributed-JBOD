@@ -75,6 +75,32 @@ outline _v-light.svg djbod-lockup-stacked.svg
 outline _v-dark.svg  djbod-lockup-stacked-onDark.svg
 rm -f _h-light.svg _h-dark.svg _v-light.svg _v-dark.svg
 
+# --- inline lockups: mark left, the name on one line, hyphenated or not
+inline_src () { # $1=out  $2=joiner entity  $3=muted colour  $4=ink colour
+awk -f gen.awk -e "BEGIN{
+  mh=76; s=mh/178; mw=206*s; fs=48; cap=fs*0.7;
+  yb = 24 + mh/2 + cap/2; tx = 24 + mw + 26; h = mh + 48;
+  printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"900\\\" height=\\\"%g\\\" viewBox=\\\"0 0 900 %g\\\">\n  <title>Distributed-JBOD</title>\n\", h, h;
+  printf \"  <g transform=\\\"translate(24,24) scale(%g) translate(-25,-39)\\\">\n\", s;
+  printf \"%s\", stack(4,44,23,10,8,\"4 6 3 5\",\"3 2 1 0\",\"$BLUE\",\"$ORANGE\",256);
+  printf \"  </g>\n\";
+  printf \"  <text x=\\\"%g\\\" y=\\\"%g\\\" font-family=\\\"Segoe UI\\\" font-size=\\\"%g\\\" letter-spacing=\\\"-0.5\\\">\", tx, yb, fs;
+  printf \"<tspan font-weight=\\\"400\\\" fill=\\\"$3\\\">Distributed$2</tspan>\";
+  printf \"<tspan font-weight=\\\"700\\\" fill=\\\"$4\\\">JBOD</tspan></text>\n</svg>\n\";
+}" > "$1"; }
+
+# outline the type, then tighten the 900-wide working canvas to the drawing + 24px
+finish () { # $1=src $2=out
+  outline "$1" "$2"
+  W=$("$IK" --query-all "$2" 2>/dev/null | head -1 | awk -F, '{printf "%.0f", $2+$4+24}')
+  sed -i -E "s/width=\"900(\.[0-9]+)?\"/width=\"$W\"/; s/viewBox=\"0 0 900(\.[0-9]+)? /viewBox=\"0 0 $W /" "$2"
+  rm -f "$1"
+}
+inline_src _i1.svg "-"      "$MUTED"   "$INK";   finish _i1.svg djbod-lockup-inline.svg
+inline_src _i2.svg "-"      "$MUTED_D" "$INK_D"; finish _i2.svg djbod-lockup-inline-onDark.svg
+inline_src _i3.svg "&#160;" "$MUTED"   "$INK";   finish _i3.svg djbod-lockup-inline-nohyphen.svg
+inline_src _i4.svg "&#160;" "$MUTED_D" "$INK_D"; finish _i4.svg djbod-lockup-inline-nohyphen-onDark.svg
+
 # --- raster exports
 png () { "$IK" --export-type=png --export-filename="$2" -w "$3" "$1" >/dev/null 2>&1; }
 for s in 512 256 128 64;  do png djbod-mark.svg      "png/djbod-mark-$s.png"      $s; done
@@ -88,6 +114,12 @@ png djbod-lockup-horizontal.svg        png/djbod-lockup-horizontal-512.png   512
 png djbod-lockup-horizontal-onDark.svg png/djbod-lockup-horizontal-onDark-1024.png 1024
 png djbod-lockup-stacked.svg           png/djbod-lockup-stacked-600.png        600
 png djbod-lockup-stacked-onDark.svg    png/djbod-lockup-stacked-onDark-600.png 600
+for f in djbod-lockup-inline djbod-lockup-inline-nohyphen; do
+  png $f.svg              "png/$f-1024.png"        1024
+  png $f.svg              "png/$f-512.png"          512
+  png $f-onDark.svg       "png/$f-onDark-1024.png" 1024
+done
 png proof.svg  proof.png  1180
 png proof2.svg proof2.png  700
+png proof3.svg proof3.png  620
 echo "built $(ls png | wc -l) PNGs and $(ls *.svg | grep -v proof | wc -l) SVGs"
