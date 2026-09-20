@@ -360,7 +360,10 @@ fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
             (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
+                // Revalidated on every load: the assets are small, and a
+                // day's cache would keep an old logo on screen after a
+                // rebuild served a new one at the same path.
+                HeaderValue::from_static("no-cache"),
             ),
         ],
         bytes,
