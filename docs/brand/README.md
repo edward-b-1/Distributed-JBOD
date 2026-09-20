@@ -1,0 +1,69 @@
+# Distributed JBOD — logo
+
+## The mark
+
+Four columns of pill-shaped slabs. Each column is a **node**; each slab is a chunk of
+**disk capacity**, and the columns are deliberately different heights (4 / 6 / 3 / 5) —
+that is the "mixed-size devices" part. One slab per column is **orange**, and those
+orange slabs step diagonally across the whole array: the **parity / checksum stripe**
+that rotates across nodes, which is the bitrot-resilience story.
+
+So: heterogeneous capacity, pooled across nodes, with integrity data striped over all of it.
+
+## Files
+
+| File | Use |
+|---|---|
+| `djbod-lockup-horizontal.svg` | primary lockup — README headers, docs, site nav |
+| `djbod-lockup-horizontal-onDark.svg` | same, for dark backgrounds |
+| `djbod-lockup-stacked.svg` / `-onDark.svg` | square-ish contexts, splash, stickers |
+| `djbod-mark.svg` | symbol on its own, ≥ 40 px |
+| `djbod-mark-mono-dark.svg` / `-mono-white.svg` | one-colour print, embroidery, stamps |
+| `djbod-icon-small.svg` | reduced 3-column mark, 24–64 px |
+| `djbod-favicon.svg` | 2×2 reduction, ≤ 24 px |
+| `djbod-appicon.svg` | dark rounded square, avatars / app tiles |
+| `png/` | rasterised exports of all of the above |
+| `proof.png`, `proof2.png` | contact sheets showing everything together |
+
+All type in the lockups is **converted to outlines**, so the SVGs render identically
+without Segoe UI installed.
+
+## Colour
+
+| Role | Hex |
+|---|---|
+| Data slabs | `#0EA5E9` (`#38BDF8` on very dark backgrounds) |
+| Parity slab | `#F97316` |
+| Wordmark "JBOD" | `#0F172A` — `#F8FAFC` on dark |
+| "DISTRIBUTED" | `#64748B` — `#94A3B8` on dark |
+| App-icon background | `#0B1220` |
+
+## Usage rules
+
+- **Clear space:** one slab-height on every side (≈ 14 % of the mark's height).
+- **Minimum sizes:** full mark 40 px · `icon-small` 24 px · `favicon` 16 px ·
+  horizontal lockup 120 px wide.
+- Don't recolour the parity slab to match the others — that diagonal is the logo.
+- Don't rebuild the wordmark in a different typeface; use the outlined SVGs.
+- On photos or busy backgrounds use the mono or app-icon version.
+
+## Rebuilding
+
+`gen.awk` holds the geometry generator, `build.sh` drives Inkscape.
+
+```bash
+bash build.sh
+```
+
+Set `INKSCAPE=/path/to/inkscape` if it isn't at the default Windows location.
+Tweak the `stack(...)` arguments in `build.sh` to change column count, heights,
+slab proportions or where the parity diagonal falls.
+
+### Making a `.ico`
+
+No ImageMagick on this machine, so the multi-resolution `favicon.ico` isn't built.
+With ImageMagick installed:
+
+```bash
+magick png/djbod-favicon-16.png png/djbod-favicon-24.png png/djbod-favicon-32.png png/djbod-icon-48.png favicon.ico
+```
