@@ -133,6 +133,9 @@
   .state.active::before { content: "\25CF  "; color: var(--good); }
   .state.draining::before { content: "\25D0  "; color: var(--warning); }
   .state.removed::before { content: "\25CB  "; color: var(--muted); }
+  .warn::before { content: "\26A0 "; }
+  .cell-check { white-space: nowrap; }
+  .cell-check .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
   .ok::before { content: "\2713 "; color: var(--good); }
   /* The health card at the top of the Overview: a mark, a sentence, and
      the way to the fix, in the status colour; green when every node
@@ -685,15 +688,36 @@ function renderOverview() {
       el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }));
   }));
 
+  // One row per node with every check the health card makes and the
+  // node's devices, each cell a pass, warning, or fail with the value it
+  // judged and, when not a pass, why. The header is drawn here too so the
+  // page's markup stays a plain table.
+  const check = (state, text, why) => el('span', { class: 'cell-check' }, el('span', { class: state, text }), why ? el('span', { class: 'why', text: why }) : null);
+  const mixed = nodeBuilds(cluster).size > 1;
+  $('nodes').parentElement.querySelector('thead').replaceChildren(el('tr', {},
+    ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
-    const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
-    const mixed = nodeBuilds(cluster).size > 1;
-    const version = n.error
-      ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
-      : el('span', {}, el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` }),
-          el('div', { class: 'hint' + (mixed ? ' bad' : ''), text: nodeBuild(n), title: 'the software build this node runs; djbod-node --version prints it' }));
-    return el('tr', {}, el('td', {}, nodeCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
-      el('td', { class: 'num', text: deviceCount }),
+    const entry = doc.nodes.find((d) => d.id === n.node) || {};
+    const reachable = !n.error;
+    const atVersion = reachable && n.version === doc.version;
+    const own = devices.filter((d) => d.node === n.node);
+    const inUse = own.filter((d) => d.state !== 'removed');
+    const byState = ['active', 'draining', 'removed'].map((st) => [st, own.filter((d) => d.state === st).length]).filter(([, k]) => k > 0);
+    const draining = own.some((d) => d.state === 'draining');
+    const freeHere = inUse.reduce((a, d) => a + d.free_bytes, 0);
+    const deviceCount = inUse.length;
+    const transport = status.transport || 'plain';
+    return el('tr', {},
+      el('td', {}, nodeCell(n.node)),
+      el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
+      el('td', {}, reachable ? check('ok', 'answers') : check('bad', 'unreachable', n.error)),
+      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : atVersion ? check('ok', `version ${n.version}`) : check('bad', `version ${n.version}`, `current is ${doc.version}; Sync brings it up`)),
+      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : n.build ? check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null) : check('warn', 'older, unreported', 'from before builds were sent; upgrade')),
+      el('td', {}, check(transport === 'tls' ? 'ok' : 'warn', transport === 'tls' ? 'required' : transport === 'tls-optional' ? 'optional' : 'plain', transport === 'tls' ? null : 'clients may connect without TLS')),
+      el('td', {}, check(deviceCount === 0 ? 'bad' : draining ? 'warn' : 'ok', String(deviceCount), inUse.length ? `${human(freeHere)} free` : 'no devices in use')),
+      // The devices by state, one line; the note about a pending drain is
+      // a tooltip so the row keeps its height.
+      el('td', {}, byState.length ? el('span', { class: draining ? 'warn' : '', text: byState.map(([st, k]) => `${k} ${st}`).join(', '), title: draining ? 'a drain is in progress or pending' : null }) : el('span', { class: 'hint', text: '\u2014' })),
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
         el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
