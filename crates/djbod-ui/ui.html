@@ -566,7 +566,10 @@ function nodeBuilds(cluster) {
 function renderChecks() {
   const { status, cluster } = state;
   const doc = cluster.document;
-  const latestBuild = status.ui_build;
+  // Builds are judged among the nodes, not against the UI's own build,
+  // which may come from a branch: a node passes when every reachable
+  // node reports the same build.
+  const builds = new Set(cluster.nodes.filter((n) => !n.error).map((n) => n.build || 'older'));
   const cell = (ok, text, why, warn) => el('td', { class: 'check' }, el('span', { class: ok ? 'ok' : warn ? 'warn' : 'bad', text }), why ? el('span', { class: 'why', text: why }) : null);
   let failing = 0, warning = 0;
   $('checks-body').replaceChildren(...cluster.nodes.map((n) => {
@@ -576,7 +579,7 @@ function renderChecks() {
     const free = devices.filter((d) => d.state !== 'removed').reduce((a, d) => a + d.free_bytes, 0);
     const reachable = !n.error;
     const atVersion = reachable && n.version === status.document_version;
-    const buildOk = reachable && !!n.build && (!latestBuild || n.build === latestBuild);
+    const buildOk = reachable && !!n.build && builds.size === 1;
     const buildWarn = reachable && !buildOk;
     if (!reachable || (reachable && !atVersion)) failing++;
     if (buildWarn) warning++;
@@ -585,7 +588,7 @@ function renderChecks() {
       el('td', {}, nodeCell(n.node)),
       cell(reachable, reachable ? 'answers' : 'unreachable', reachable ? null : n.error),
       reachable ? cell(atVersion, `version ${n.version}`, atVersion ? null : `current is ${status.document_version}; Sync brings it up`) : cell(false, 'unknown', 'not reachable'),
-      reachable ? cell(buildOk, n.build || 'older, unreported', buildOk ? null : (n.build ? `the UI runs ${latestBuild}` : 'from before builds were sent; upgrade'), true) : cell(false, 'unknown', 'not reachable'),
+      reachable ? cell(buildOk, n.build || 'older, unreported', buildOk ? null : (n.build ? `nodes run ${builds.size} different builds` : 'from before builds were sent; upgrade'), true) : cell(false, 'unknown', 'not reachable'),
       cell(true, status.transport === 'tls' ? 'required' : status.transport === 'tls-optional' ? 'optional' : 'plain', null, status.transport !== 'tls'),
       cell(!draining, `${active} active${draining ? `, ${draining} draining` : ''}${removed ? `, ${removed} removed` : ''}`, draining ? 'a drain is in progress or pending' : null, true),
       el('td', { class: 'num', text: human(free) }),
