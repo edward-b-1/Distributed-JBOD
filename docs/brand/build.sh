@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
 # Regenerates every Distributed JBOD logo asset from scratch.
 #   usage: bash build.sh
+#
+# The palette mirrors the UI's CSS variables in crates/djbod-ui/ui.html:
+# BLUE/BLUE_D are --accent light/dark, so the logo and the app agree.
+# Override any of them, and OUT, to render the kit in another palette:
+#   OUT=yellow ORANGE='#fab219' bash build.sh     # --warning instead of orange
 set -e
 IK="${INKSCAPE:-/c/Program Files/Inkscape/bin/inkscape.exe}"
-BLUE="#0EA5E9"; ORANGE="#F97316"; INK="#0F172A"; MUTED="#64748B"
-BLUE_D="#38BDF8"; INK_D="#F8FAFC"; MUTED_D="#94A3B8"; BG_D="#0B1220"
+BLUE="${BLUE:-#2a78d6}";   ORANGE="${ORANGE:-#F97316}"
+BLUE_D="${BLUE_D:-#3987e5}"
+INK="#0F172A"; MUTED="#64748B"; INK_D="#F8FAFC"; MUTED_D="#94A3B8"; BG_D="#0B1220"
 
-mkdir -p png
+# Everything is written under OUT so an alternate palette can live beside the
+# primary kit; gen.awk and the proof sheets stay in the kit root.
+OUT="${OUT:-.}"
+GEN="$PWD/gen.awk"
+mkdir -p "$OUT/png"
+if [ "$OUT" != "." ]; then cp proof.svg proof2.svg proof3.svg "$OUT/"; fi
+cd "$OUT"
 
 # --- the mark: 4 columns of pill-shaped slabs, heights 4/6/3/5 (mixed capacity),
 #     with a parity slab descending diagonally across them (levels 3/2/1/0).
 mark () { # $1=out $2=blue $3=orange
-  awk -f gen.awk -e "BEGIN{
+  awk -f "$GEN" -e "BEGIN{
     printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"256\\\" height=\\\"256\\\" viewBox=\\\"0 0 256 256\\\">\n  <title>Distributed JBOD</title>\n\";
     printf \"%s\", stack(4,44,23,10,8,\"4 6 3 5\",\"3 2 1 0\",\"$2\",\"$3\",256);
     printf \"</svg>\n\";
@@ -22,17 +34,17 @@ mark djbod-mark-mono-dark.svg  "$INK"     "$INK"
 mark djbod-mark-mono-white.svg "#FFFFFF"  "#FFFFFF"
 
 # --- reduced marks for small sizes
-awk -f gen.awk -e "BEGIN{
+awk -f "$GEN" -e "BEGIN{
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"256\\\" height=\\\"256\\\" viewBox=\\\"0 0 256 256\\\">\n  <title>Distributed JBOD</title>\n\";
   printf \"%s\", stack(3,56,40,18,14,\"3 2 4\",\"2 1 0\",\"$BLUE\",\"$ORANGE\",256);
   printf \"</svg>\n\";
 }" > djbod-icon-small.svg
-awk -f gen.awk -e "BEGIN{
+awk -f "$GEN" -e "BEGIN{
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"256\\\" height=\\\"256\\\" viewBox=\\\"0 0 256 256\\\">\n  <title>Distributed JBOD</title>\n\";
   printf \"%s\", stack(2,96,66,24,24,\"2 2\",\"1 0\",\"$BLUE\",\"$ORANGE\",256);
   printf \"</svg>\n\";
 }" > djbod-favicon.svg
-awk -f gen.awk -e "BEGIN{
+awk -f "$GEN" -e "BEGIN{
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"512\\\" height=\\\"512\\\" viewBox=\\\"0 0 512 512\\\">\n  <title>Distributed JBOD</title>\n\";
   printf \"  <rect width=\\\"512\\\" height=\\\"512\\\" rx=\\\"112\\\" fill=\\\"$BG_D\\\"/>\n\";
   printf \"  <g transform=\\\"translate(256,256) scale(1.42) translate(-128,-128)\\\">\n\";
@@ -41,7 +53,7 @@ awk -f gen.awk -e "BEGIN{
 }" > djbod-appicon.svg
 
 # --- lockups (type set live, then outlined by Inkscape so the files need no fonts)
-lockup_h () { awk -f gen.awk -e "BEGIN{
+lockup_h () { awk -f "$GEN" -e "BEGIN{
   s=96/178;
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"338\\\" height=\\\"144\\\" viewBox=\\\"0 8 338 144\\\">\n  <title>Distributed JBOD</title>\n\";
   printf \"  <g transform=\\\"translate(24,32) scale(%g) translate(-25,-39)\\\">\n\", s;
@@ -52,7 +64,7 @@ lockup_h () { awk -f gen.awk -e "BEGIN{
   printf \"  </g>\n</svg>\n\";
 }" > "$1"; }
 
-lockup_v () { awk -f gen.awk -e "BEGIN{
+lockup_v () { awk -f "$GEN" -e "BEGIN{
   s=120/178; mw=206*s; x0=(198-mw)/2;
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"198\\\" height=\\\"270\\\" viewBox=\\\"0 0 198 270\\\">\n  <title>Distributed JBOD</title>\n\";
   printf \"  <g transform=\\\"translate(%g,24) scale(%g) translate(-25,-39)\\\">\n\", x0, s;
@@ -77,7 +89,7 @@ rm -f _h-light.svg _h-dark.svg _v-light.svg _v-dark.svg
 
 # --- inline lockups: mark left, the name on one line, hyphenated or not
 inline_src () { # $1=out  $2=joiner entity  $3=muted colour  $4=ink colour  $5=title
-awk -f gen.awk -e "BEGIN{
+awk -f "$GEN" -e "BEGIN{
   mh=76; s=mh/178; mw=206*s; fs=48; cap=fs*0.7;
   yb = 24 + mh/2 + cap/2; tx = 24 + mw + 26; h = mh + 48;
   printf \"<svg xmlns=\\\"http://www.w3.org/2000/svg\\\" width=\\\"900\\\" height=\\\"%g\\\" viewBox=\\\"0 0 900 %g\\\">\n  <title>$5</title>\n\", h, h;

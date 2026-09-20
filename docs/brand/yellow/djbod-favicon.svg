@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Distributed JBOD</title>
+    <rect x="20" y="140" width="96" height="66" rx="33" fill="#2a78d6"/>
+    <rect x="20" y="50" width="96" height="66" rx="33" fill="#fab219"/>
+    <rect x="140" y="140" width="96" height="66" rx="33" fill="#fab219"/>
+    <rect x="140" y="50" width="96" height="66" rx="33" fill="#2a78d6"/>
+</svg>

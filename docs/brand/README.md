@@ -26,6 +26,7 @@ So: heterogeneous capacity, pooled across nodes, with integrity data striped ove
 | `djbod-appicon.svg` | dark rounded square, avatars / app tiles |
 | `png/` | rasterised exports of all of the above |
 | `proof.png`, `proof2.png`, `proof3.png` | contact sheets showing everything together |
+| `proof-palette.png` | orange vs yellow parity, on both UI surfaces |
 
 All type in the lockups is **converted to outlines**, so the SVGs render identically
 without Segoe UI installed.
@@ -34,11 +35,22 @@ without Segoe UI installed.
 
 | Role | Hex |
 |---|---|
-| Data slabs | `#0EA5E9` (`#38BDF8` on very dark backgrounds) |
+| Data slabs | `#2a78d6` (`#3987e5` on dark) — the UI's `--accent` |
 | Parity slab | `#F97316` |
 | Wordmark "JBOD" | `#0F172A` — `#F8FAFC` on dark |
 | "DISTRIBUTED" | `#64748B` — `#94A3B8` on dark |
 | App-icon background | `#0B1220` |
+
+The blues are not chosen independently: they are the `--accent` values from
+`crates/djbod-ui/ui.html`, light and dark, so the logo and the running app
+are the same blue. If `--accent` ever changes, rebuild the kit with the new
+value rather than letting the two drift.
+
+### Yellow alternate
+
+[`yellow/`](yellow/) is the whole kit with the parity slab in `#fab219` — the
+UI's `--warning` — instead of orange. Same geometry, same blues. It is kept
+for comparison; the orange set is the one in use.
 
 ## Usage rules
 
@@ -60,6 +72,13 @@ without Segoe UI installed.
 
 ```bash
 bash build.sh
+```
+
+Every colour is overridable, as is the output directory, so an alternate
+palette can be rendered beside the primary kit:
+
+```bash
+OUT=yellow ORANGE='#fab219' bash build.sh
 ```
 
 Set `INKSCAPE=/path/to/inkscape` if it isn't at the default Windows location.
