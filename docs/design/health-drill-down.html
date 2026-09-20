@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Health Drill-down</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --accent-track: #d6e6f9; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --accent: #2a78d6; --accent-track: #d6e6f9; --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding: 24px 16px 48px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .lede { color: var(--text-2); margin: 0 0 28px; max-width: 65ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 32px 0 6px; }
+  .note { color: var(--text-2); margin: 0 0 12px; max-width: 70ch; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
+  .state-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  .mock .frame { display: grid; grid-template-columns: 120px 1fr; }
+  .mock aside { background: var(--surface); border-right: 1px solid var(--line); padding: 8px 6px; font-size: 12px; }
+  .mock aside div { padding: 5px 8px; border-radius: 6px; color: var(--text-2); }
+  .mock aside div.on { background: var(--accent-track); color: var(--text); font-weight: 600; }
+  .mock main { padding: 10px 12px; }
+  .mock code { font-family: var(--mono); font-size: 11.5px; }
+  .health { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .health .mark { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; font-size: 17px; font-weight: 700; color: #fff; background: var(--good); flex: none; }
+  .health.bad .mark { background: var(--critical); }
+  .health .t { font-weight: 600; } .health .s { color: var(--text-2); font-size: 12px; }
+  .health .go { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+  .tile .l { color: var(--text-2); font-size: 11px; } .tile .v { font-size: 15px; font-weight: 600; }
+  /* chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; font-size: 12px; background: var(--surface); }
+  .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); flex: none; }
+  .chip.bad { border-color: var(--critical); background: var(--critical-soft); } .chip.bad::before { background: var(--critical); }
+  .chip.warn { border-color: var(--warning); background: var(--warning-soft); } .chip.warn::before { background: var(--warning); }
+  .chip .d { color: var(--text-2); }
+  /* expanded card */
+  .expanded { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .expanded .health { border: none; border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+  .expanded .inner { padding: 10px 12px; }
+  .expanded .toggle { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+  /* node cards */
+  .nodecards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .nodecard { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 8px 10px; border-top: 3px solid var(--good); }
+  .nodecard.bad { border-top-color: var(--critical); }
+  .nodecard .n { font-weight: 600; } .nodecard .a { color: var(--muted); font-size: 11.5px; }
+  .nodecard .devs { display: flex; gap: 4px; margin-top: 6px; }
+  .nodecard .dev { width: 22px; height: 12px; border-radius: 3px; background: var(--good); opacity: .85; }
+  .nodecard .dev.draining { background: var(--warning); } .nodecard .dev.off { background: var(--critical); }
+  .nodecard .k { color: var(--text-2); font-size: 12px; margin-top: 4px; }
+  .nodecard .k b { color: var(--critical); font-weight: 600; }
+  /* checks table */
+  table { width: 100%; border-collapse: collapse; background: var(--surface); font-size: 12px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--text-2); font-weight: 600; font-size: 11px; }
+  .ok::before { content: "\2713 "; color: var(--good); } .bad::before { content: "\2717 "; color: var(--critical); } .wn::before { content: "\26A0 "; }
+</style>
+</head>
+<body>
+<h1>Drilling down from the health card</h1>
+<p class="lede">Four ways to go from the card's one sentence to the state of each node and its devices. Each is shown with the cluster inconsistent, since that is when someone wants the detail: devbox holds document version 14, the current version is 15, and one of its devices is draining.</p>
+
+<h2>A · Card expands to a row of node chips</h2>
+<p class="note">A Show nodes link on the card unfolds a row of chips beneath it, one per node, each with its label, version, and a dot; the node that is off is the coloured one. Option D from the last round, kept inside the card so the page has one place for cluster health. Fits perhaps a dozen nodes before wrapping to several rows.</p>
+<div class="pair">
+  <div><p class="state-label">collapsed</p><div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Show nodes ▾</span></div><div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></main></div></div></div>
+  <div><p class="state-label">expanded</p><div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="expanded"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Hide nodes ▴</span></div><div class="inner"><div class="chips"><span class="chip">devbox4 <code>v15</code> <span class="d">3 devices</span></span><span class="chip bad">devbox <code>v14</code> <span class="d">2 devices, 1 draining</span></span></div></div></div><div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></main></div></div></div>
+</div>
+
+<h2>B · Card expands to node cards with device blocks</h2>
+<p class="note">The same fold, but each node becomes a small card with a coloured top edge, its version and build, and one block per device coloured by state: green active, amber draining, red removed or unreachable. The devices are visible without a second click, which is what "state of each device" asks for.</p>
+<div class="pair">
+  <div><p class="state-label">expanded</p><div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="expanded"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Hide nodes ▴</span></div><div class="inner"><div class="nodecards"><div class="nodecard"><div class="n">devbox4 <span class="a">192.168.1.234</span></div><div class="k">version 15 · build 5ddd227</div><div class="devs"><div class="dev"></div><div class="dev"></div><div class="dev"></div></div></div><div class="nodecard bad"><div class="n">devbox <span class="a">192.168.1.230</span></div><div class="k"><b>version 14</b> · build 5ddd227</div><div class="devs"><div class="dev"></div><div class="dev draining"></div></div></div></div></div></div></main></div></div></div>
+  <div><p class="state-label">expanded, dark</p><div class="mock dark"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="expanded"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Hide nodes ▴</span></div><div class="inner"><div class="nodecards"><div class="nodecard"><div class="n">devbox4 <span class="a">192.168.1.234</span></div><div class="k">version 15 · build 5ddd227</div><div class="devs"><div class="dev"></div><div class="dev"></div><div class="dev"></div></div></div><div class="nodecard bad"><div class="n">devbox <span class="a">192.168.1.230</span></div><div class="k"><b>version 14</b> · build 5ddd227</div><div class="devs"><div class="dev"></div><div class="dev draining"></div></div></div></div></div></div></main></div></div></div>
+</div>
+
+<h2>C · Card expands to the checks table</h2>
+<p class="note">The fold opens the per-node checks table of PR #84, one row per node, one cell per check, each pass or fail with the value judged. The most complete and the most text; suits diagnosing rather than glancing.</p>
+<div class="pair">
+  <div><p class="state-label">expanded</p><div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="expanded"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Hide checks ▴</span></div><table><thead><tr><th>Node</th><th>Reachable</th><th>Document</th><th>Build</th><th>Devices</th></tr></thead><tbody><tr><td>devbox4</td><td class="ok">answers</td><td class="ok">version 15</td><td class="ok">5ddd227</td><td class="ok">3 active</td></tr><tr><td>devbox</td><td class="ok">answers</td><td class="bad">version 14</td><td class="ok">5ddd227</td><td class="wn">1 active, 1 draining</td></tr></tbody></table></div></main></div></div></div>
+  <div><p class="state-label">expanded, dark</p><div class="mock dark"><div class="frame"><aside><div class="on">Overview</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="expanded"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Hide checks ▴</span></div><table><thead><tr><th>Node</th><th>Reachable</th><th>Document</th><th>Build</th><th>Devices</th></tr></thead><tbody><tr><td>devbox4</td><td class="ok">answers</td><td class="ok">version 15</td><td class="ok">5ddd227</td><td class="ok">3 active</td></tr><tr><td>devbox</td><td class="ok">answers</td><td class="bad">version 14</td><td class="ok">5ddd227</td><td class="wn">1 active, 1 draining</td></tr></tbody></table></div></main></div></div></div>
+</div>
+
+<h2>D · A Nodes page in the rail</h2>
+<p class="note">The card stays a summary and links to a new section, Nodes, in the left rail: the node cards of B at full size with their devices listed underneath, the label and remove actions moved there from the Overview. The Overview gets shorter; the rail gains its fifth entry, and the count it carries can be the number of nodes that are off.</p>
+<div class="pair">
+  <div><p class="state-label">the new page</p><div class="mock light"><div class="frame"><aside><div>Overview</div><div class="on">Nodes <span style="float:right;color:var(--critical)">1</span></div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="nodecards"><div class="nodecard"><div class="n">devbox4 <span class="a">192.168.1.234:5263</span></div><div class="k">version 15 · build 5ddd227 · answers</div><div class="devs"><div class="dev"></div><div class="dev"></div><div class="dev"></div></div><div class="k">demo-d0, demo-d1, demo-d2 active · 9.1 TiB free</div></div><div class="nodecard bad"><div class="n">devbox <span class="a">192.168.1.230:5263</span></div><div class="k"><b>version 14, current is 15</b> · build 5ddd227</div><div class="devs"><div class="dev"></div><div class="dev draining"></div></div><div class="k">nas-a active, nas-b draining · 1.8 TiB free</div></div></div></main></div></div></div>
+  <div><p class="state-label">the card on the overview</p><div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Nodes <span style="float:right;color:var(--critical)">1</span></div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div><span class="go">Sync documents → · Nodes →</span></div><div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></main></div></div></div>
+</div>
+</body>
+</html>
