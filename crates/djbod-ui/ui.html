@@ -333,6 +333,7 @@
         <button id="list-next" title="the next page">Next &#8250;</button>
         <span class="hint" id="list-count"></span>
       </div>
+      <div class="hint" id="list-cursor" style="margin:0 0 8px"></div>
       <div class="scroll">
         <table>
           <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
@@ -894,8 +895,8 @@ function renderListing() {
   $('list-next').disabled = !truncated;
   $('list-page').textContent = `Page ${page}`;
   const cursor = after[page - 1];
-  $('list-count').replaceChildren(`${keys.length} key(s) on this page${truncated ? ', more follow' : ''}`,
-    cursor ? el('span', {}, ', after ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
+  $('list-count').textContent = `${keys.length} key(s) on this page`;
+  $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
 }
 $('list-go').addEventListener('click', () => list());
 $('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
