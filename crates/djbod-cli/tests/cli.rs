@@ -905,3 +905,51 @@ async fn get_cluster_id_needs_no_cluster_id() {
     assert!(!ok);
     assert!(err.contains("no cluster id"), "{err}");
 }
+
+/// `--node` takes several addresses (SPEC 20.8): a dead one first is
+/// skipped, for ordinary commands and for `get-cluster-id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
+    let test = start_node(2, 1, 1).await;
+    let cluster = test.node.cluster_id().to_string();
+    let nodes = format!("127.0.0.1:1,{}", test.addr);
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+            .arg("--node")
+            .arg(&nodes)
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, out, err) = run(&["get-cluster-id"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), cluster);
+    let (ok, out, err) = run(&["--cluster", &cluster, "status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("cluster   {cluster}")), "{out}");
+    let (ok, out, err) = run(&["--cluster", &cluster, "identity"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("at {}", test.addr)), "{out}");
+    // Only dead addresses: every one is named.
+    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        .args([
+            "--node",
+            "127.0.0.1:1,127.0.0.1:2",
+            "--cluster",
+            &cluster,
+            "status",
+        ])
+        .output()
+        .expect("run djbod");
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("127.0.0.1:1") && err.contains("127.0.0.1:2"),
+        "{err}"
+    );
+}

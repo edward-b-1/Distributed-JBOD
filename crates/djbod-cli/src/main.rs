@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use djbod_client::connection::{ClientError, Connection, DEFAULT_BODY_CHUNK};
 use djbod_client::transport::Connector;
+use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
@@ -35,9 +36,15 @@ use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response
 #[derive(Parser)]
 #[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_client::BUILD)]
 struct Cli {
-    /// Address of any node in the cluster.
-    #[arg(long, env = "DJBOD_NODE", global = true)]
-    node: Option<SocketAddr>,
+    /// Address of a node in the cluster; several, comma-separated, are
+    /// tried in order, and a request moves to the next when one fails.
+    #[arg(
+        long = "node",
+        env = "DJBOD_NODE",
+        global = true,
+        value_delimiter = ','
+    )]
+    nodes: Vec<SocketAddr>,
     /// The cluster id, as printed by `djbod-node init-cluster`.
     #[arg(long, env = "DJBOD_CLUSTER", global = true)]
     cluster: Option<Uuid>,
@@ -61,12 +68,7 @@ struct Cli {
 /// The device a UUID or label names (SPEC 6.2.5.1), looked up in the
 /// cluster document.
 async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
-    let node = cli
-        .node
-        .context("no node address: pass --node or set DJBOD_NODE")?;
-    let cluster = cli
-        .cluster
-        .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+    let (node, cluster) = reachable_node(cli).await?;
     djbod_node::membership::resolve_device(&connector(cli)?, node, cluster, name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -75,12 +77,7 @@ async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
 /// The node a UUID or label names (SPEC 6.2.5.1), looked up in the
 /// cluster document.
 async fn resolve_node(cli: &Cli, name: &str) -> anyhow::Result<NodeId> {
-    let node = cli
-        .node
-        .context("no node address: pass --node or set DJBOD_NODE")?;
-    let cluster = cli
-        .cluster
-        .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+    let (node, cluster) = reachable_node(cli).await?;
     djbod_node::membership::resolve_node(&connector(cli)?, node, cluster, name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -313,17 +310,99 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn connect(cli: &Cli) -> anyhow::Result<Connection> {
-    let node = cli
-        .node
-        .context("no node address: pass --node or set DJBOD_NODE")?;
+/// The client library's client (SPEC 20.8): the configured nodes, tried
+/// in order, and the cluster id, which every command but `identity` and
+/// `get-cluster-id` requires.
+async fn connect(cli: &Cli) -> anyhow::Result<Client> {
+    if cli.nodes.is_empty() {
+        bail!("no node address: pass --node or set DJBOD_NODE");
+    }
     let cluster = cli
         .cluster
         .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
-    Connection::connect_with(&connector(cli)?, node, Connection::client_hello(cluster))
+    connect_with_cluster(cli, Some(cluster)).await
+}
+
+async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Result<Client> {
+    if cli.nodes.is_empty() {
+        bail!("no node address: pass --node or set DJBOD_NODE");
+    }
+    let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
+    options.cluster = cluster;
+    Client::connect(options).await.map_err(client_err)
+}
+
+/// A connection of its own, for conversations the client has no method
+/// for or that another task must drive: the event streams and the
+/// re-encode pipe.
+async fn raw_connection(cli: &Cli) -> anyhow::Result<Connection> {
+    connect(cli)
+        .await?
+        .into_connection()
         .await
-        .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
-        .with_context(|| format!("connecting to {node}"))
+        .map_err(client_err)
+}
+
+/// A node that answers, and the cluster id, for the membership
+/// procedures, which take one peer address.
+async fn reachable_node(cli: &Cli) -> anyhow::Result<(SocketAddr, Uuid)> {
+    let client = connect(cli).await?;
+    let node = client.node_address().context("not connected")?;
+    Ok((node, client.cluster_id()))
+}
+
+/// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1). A
+/// node from before that item refuses the nil id as a mismatch; its
+/// refusal names the cluster it serves, so the id is taken from there,
+/// with a note that the node wants upgrading.
+async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
+    if cli.nodes.is_empty() {
+        bail!("no node address: pass --node or set DJBOD_NODE");
+    }
+    let connector = connector(cli)?;
+    let mut attempts = Vec::new();
+    for &address in &cli.nodes {
+        match djbod_client::ask(&connector, address).await {
+            Ok(identity) => return Ok(identity),
+            Err(e) => {
+                if let Some(cluster_id) =
+                    e.detail().and_then(|d| cluster_id_from_refusal(&d.message))
+                {
+                    eprintln!(
+                        "note: the node at {address} runs a build from before `get-cluster-id`; it should be upgraded. Its refusal named its cluster, used here."
+                    );
+                    return Ok(djbod_client::Identity {
+                        address,
+                        cluster_id,
+                        cluster_name: None,
+                        node: e.detail().and_then(|d| d.node),
+                        build: None,
+                        document_version: 0,
+                    });
+                }
+                attempts.push(format!("{address}: {}", client_err(e)));
+            }
+        }
+    }
+    bail!("no node answered: {}", attempts.join("; "))
+}
+
+/// The cluster id in an older node's refusal of the nil id, whose text
+/// is fixed: "peer belongs to cluster <nil>, this node to <id>".
+fn cluster_id_from_refusal(message: &str) -> Option<Uuid> {
+    let rest = message.strip_prefix(&format!(
+        "peer belongs to cluster {}, this node to ",
+        Uuid::nil()
+    ))?;
+    rest.get(..36)?.parse().ok()
+}
+
+/// The library's error as an administrator wants to read it (SPEC 16.2).
+fn client_err(e: djbod_client::Error) -> anyhow::Error {
+    match e {
+        djbod_client::Error::Client(inner) => remote(*inner),
+        other => anyhow::anyhow!("{other}"),
+    }
 }
 
 /// Render a client error the way an administrator wants to read it: the
@@ -366,54 +445,28 @@ fn remote(e: ClientError) -> anyhow::Error {
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
         Command::GetClusterId => {
-            let node = cli
-                .node
-                .context("no node address: pass --node or set DJBOD_NODE")?;
-            // The nil id asks (SPEC 19.1.5.1); the node answers with its
-            // Hello and closes.
-            let conn = Connection::connect_with(
-                &connector(&cli)?,
-                node,
-                Connection::client_hello(Uuid::nil()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
-            .with_context(|| format!("connecting to {node}"))?;
-            let hello = conn.peer_hello();
+            let identity = ask_any_node(&cli).await?;
             if cli.json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "cluster_id": hello.cluster_id,
-                        "cluster_name": hello.cluster_name,
-                        "node": hello.node_id,
-                        "build": hello.build,
+                        "cluster_id": identity.cluster_id,
+                        "cluster_name": identity.cluster_name,
+                        "node": identity.node,
+                        "build": identity.build,
                     }))?
                 );
             } else {
-                println!("{}", hello.cluster_id);
+                println!("{}", identity.cluster_id);
             }
         }
         Command::Identity => {
-            let node = cli
-                .node
-                .context("no node address: pass --node or set DJBOD_NODE")?;
             // Ask first (SPEC 19.1.5.1), then connect properly with the
             // answer for what only the document knows: label and address.
-            let asked = Connection::connect_with(
-                &connector(&cli)?,
-                node,
-                Connection::client_hello(Uuid::nil()),
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
-            .with_context(|| format!("connecting to {node}"))?;
-            let hello = asked.peer_hello().clone();
-            let document =
-                djbod_node::membership::fetch_document(&connector(&cli)?, node, hello.cluster_id)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let entry = hello.node_id.and_then(|id| document.node(id).cloned());
+            let hello = ask_any_node(&cli).await?;
+            let mut client = connect_with_cluster(&cli, Some(hello.cluster_id)).await?;
+            let document = client.cluster_document().await.map_err(client_err)?;
+            let entry = hello.node.and_then(|id| document.node(id).cloned());
             let label = entry.as_ref().and_then(|n| n.label.clone());
             let addresses: Vec<String> = entry.map(|n| n.addresses).unwrap_or_default();
             if cli.json {
@@ -422,7 +475,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     serde_json::to_string_pretty(&serde_json::json!({
                         "cluster_id": hello.cluster_id,
                         "cluster_name": document.name,
-                        "node": hello.node_id,
+                        "node": hello.node,
                         "node_label": label,
                         "addresses": addresses,
                         "build": hello.build,
@@ -432,7 +485,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 );
             } else {
                 println!("cluster   {}", document.title());
-                let node_text = match (&label, hello.node_id) {
+                let node_text = match (&label, hello.node) {
                     (Some(label), Some(id)) => format!("{label} ({})", id.0),
                     (None, Some(id)) => id.0.to_string(),
                     (_, None) => "-".to_string(),
@@ -447,16 +500,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Status => {
-            let mut conn = connect(&cli).await?;
-            match conn.request(Request::Status).await.map_err(remote)? {
-                Response::Status {
-                    cluster_id,
-                    cluster_name,
-                    document_version,
-                    coordinator,
-                    transport,
-                    devices,
-                } => {
+            let mut client = connect(&cli).await?;
+            let djbod_client::Status {
+                cluster_id,
+                cluster_name,
+                document_version,
+                coordinator,
+                transport,
+                devices,
+            } = client.status().await.map_err(client_err)?;
+            {
+                {
                     if cli.json {
                         println!(
                             "{}",
@@ -496,7 +550,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
-                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Put {
@@ -504,30 +557,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             file,
             content_type,
         } => {
-            let mut conn = connect(&cli).await?;
+            let mut client = connect(&cli).await?;
             let version = if file.as_os_str() == "-" {
                 let mut body = Vec::new();
                 tokio::io::stdin()
                     .read_to_end(&mut body)
                     .await
                     .context("reading standard input")?;
-                conn.put_object(key, &body, DEFAULT_BODY_CHUNK, content_type.clone())
+                client
+                    .put(key, &body, content_type.clone())
                     .await
-                    .map_err(remote)?
+                    .map_err(client_err)?
             } else {
                 let mut source = tokio::fs::File::open(file)
                     .await
                     .with_context(|| format!("opening {}", file.display()))?;
                 let size = source.metadata().await?.len();
-                conn.put_object_from_reader(
-                    key,
-                    size,
-                    &mut source,
-                    DEFAULT_BODY_CHUNK,
-                    content_type.clone(),
-                )
-                .await
-                .map_err(remote)?
+                client
+                    .put_from_reader(
+                        key,
+                        size,
+                        &mut source,
+                        content_type.clone(),
+                        Default::default(),
+                    )
+                    .await
+                    .map_err(client_err)?
             };
             if cli.json {
                 println!(
@@ -539,18 +594,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Get { key, file } => {
-            let mut conn = connect(&cli).await?;
+            let mut client = connect(&cli).await?;
             if file.as_os_str() == "-" {
                 let mut stdout = tokio::io::stdout();
-                conn.get_object_to_writer(key, &mut stdout)
+                client
+                    .get_to_writer(key, &mut stdout)
                     .await
-                    .map_err(remote)?;
+                    .map_err(client_err)?;
                 stdout.flush().await?;
             } else {
                 let mut sink = tokio::fs::File::create(file)
                     .await
                     .with_context(|| format!("creating {}", file.display()))?;
-                let result = conn.get_object_to_writer(key, &mut sink).await;
+                let result = client.get_to_writer(key, &mut sink).await;
                 match result {
                     Ok(record) => {
                         sink.sync_all().await?;
@@ -567,7 +623,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     Err(e) => {
                         drop(sink);
                         remove_partial(file);
-                        return Err(remote(e)).with_context(|| {
+                        return Err(client_err(e)).with_context(|| {
                             format!("fetching {key}; partial output {} removed", file.display())
                         });
                     }
@@ -575,13 +631,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Head { key } => {
-            let mut conn = connect(&cli).await?;
-            match conn
-                .request(Request::HeadObject { key: key.clone() })
-                .await
-                .map_err(remote)?
+            let mut client = connect(&cli).await?;
+            let record = client.head(key).await.map_err(client_err)?;
             {
-                Response::HeadObject { record } => {
+                {
                     if cli.json {
                         println!("{}", serde_json::to_string_pretty(&record)?);
                     } else {
@@ -602,14 +655,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
-                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Delete { key } => {
-            let mut conn = connect(&cli).await?;
-            conn.request(Request::DeleteObject { key: key.clone() })
-                .await
-                .map_err(remote)?;
+            let mut client = connect(&cli).await?;
+            client.delete(key).await.map_err(client_err)?;
             if !cli.json {
                 println!("deleted {key}");
             }
@@ -619,17 +669,17 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             start_after,
             limit,
         } => {
-            let mut conn = connect(&cli).await?;
-            match conn
-                .request(Request::ListKeys(ListQuery {
+            let mut client = connect(&cli).await?;
+            let djbod_client::ListPage { keys, truncated } = client
+                .list(ListQuery {
                     prefix: prefix.clone(),
                     start_after: start_after.clone(),
                     limit: *limit,
-                }))
+                })
                 .await
-                .map_err(remote)?
+                .map_err(client_err)?;
             {
-                Response::ListKeys { keys, truncated } => {
+                {
                     if cli.json {
                         println!(
                             "{}",
@@ -650,12 +700,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
-                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Scrub { rate_mib, repair } => {
             use djbod_proto::message::ScrubEvent;
-            let mut conn = connect(&cli).await?;
+            let mut conn = raw_connection(&cli).await?;
             let id = conn
                 .start_scrub(rate_mib.map(|m| m * 1024 * 1024), *repair)
                 .await
@@ -744,7 +793,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(name) => Some(resolve_device(&cli, name).await?),
                 None => None,
             };
-            let mut conn = connect(&cli).await?;
+            let mut conn = raw_connection(&cli).await?;
             match conn
                 .request(Request::MoveShard {
                     key: key.clone(),
@@ -788,13 +837,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::Repair { key } => {
-            let mut conn = connect(&cli).await?;
-            match conn
-                .request(Request::RepairObject { key: key.clone() })
-                .await
-                .map_err(remote)?
+            let mut client = connect(&cli).await?;
+            let report = client.repair(key).await.map_err(client_err)?;
             {
-                Response::RepairObject(report) => {
+                {
                     if cli.json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
                     } else {
@@ -829,16 +875,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("{count} shard(s) rewritten");
                     }
                 }
-                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Cluster { command } => {
-            let node = cli
-                .node
-                .context("no node address: pass --node or set DJBOD_NODE")?;
-            let cluster = cli
-                .cluster
-                .context("no cluster id: pass --cluster or set DJBOD_CLUSTER")?;
+            let (node, cluster) = reachable_node(&cli).await?;
             match command {
                 ClusterCommand::Show => {
                     let document =
@@ -1345,17 +1385,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
         }
         Command::ClusterConfig => {
-            let mut conn = connect(&cli).await?;
-            match conn
-                .request(Request::GetClusterConfig)
-                .await
-                .map_err(remote)?
-            {
-                Response::GetClusterConfig { document } => {
-                    println!("{}", serde_json::to_string_pretty(&document)?);
-                }
-                other => bail!("unexpected response {other:?}"),
-            }
+            let mut client = connect(&cli).await?;
+            let document = client.cluster_document().await.map_err(client_err)?;
+            println!("{}", serde_json::to_string_pretty(&document)?);
         }
     }
     Ok(())
@@ -1371,28 +1403,9 @@ fn at_current_scheme(
 
 /// Every key in the cluster, in pages.
 async fn all_keys(cli: &Cli) -> anyhow::Result<Vec<String>> {
-    let mut conn = connect(cli).await?;
-    let mut start_after: Option<String> = None;
-    let mut all = Vec::new();
-    loop {
-        let (keys, truncated) = match conn
-            .request(Request::ListKeys(ListQuery {
-                prefix: None,
-                start_after: start_after.clone(),
-                limit: Some(1000),
-            }))
-            .await
-            .map_err(remote)?
-        {
-            Response::ListKeys { keys, truncated } => (keys, truncated),
-            other => bail!("unexpected response {other:?}"),
-        };
-        start_after = keys.last().map(|e| e.key.clone());
-        all.extend(keys.into_iter().map(|e| e.key));
-        if !truncated || start_after.is_none() {
-            return Ok(all);
-        }
-    }
+    let mut client = connect(cli).await?;
+    let keys = client.list_all(None).await.map_err(client_err)?;
+    Ok(keys.into_iter().map(|e| e.key).collect())
 }
 
 /// How many objects are stored at a scheme or block size other than the
@@ -1401,20 +1414,12 @@ async fn count_versions_behind(
     cli: &Cli,
     document: &djbod_core::cluster::ClusterDocument,
 ) -> anyhow::Result<usize> {
-    let mut conn = connect(cli).await?;
+    let mut client = connect(cli).await?;
     let mut behind = 0usize;
     for key in all_keys(cli).await? {
-        match conn
-            .request(Request::HeadObject { key })
-            .await
-            .map_err(remote)?
-        {
-            Response::HeadObject { record } => {
-                if !at_current_scheme(&record, document) {
-                    behind += 1;
-                }
-            }
-            other => bail!("unexpected response {other:?}"),
+        let record = client.head(&key).await.map_err(client_err)?;
+        if !at_current_scheme(&record, document) {
+            behind += 1;
         }
     }
     Ok(behind)
@@ -1436,15 +1441,11 @@ async fn reencode_all(
     for key in all_keys(cli).await? {
         {
             examined += 1;
-            let record = match lister
-                .request(Request::HeadObject { key: key.clone() })
-                .await
-            {
-                Ok(Response::HeadObject { record }) => record,
-                Ok(other) => bail!("unexpected response {other:?}"),
+            let record = match lister.head(&key).await {
+                Ok(record) => record,
                 Err(e) => {
                     failures += 1;
-                    println!("FAILED   {key}  head: {}", describe_error(&e));
+                    println!("FAILED   {key}  head: {}", client_err(e));
                     continue;
                 }
             };
@@ -1492,8 +1493,8 @@ async fn reencode_one(
     cli: &Cli,
     record: &djbod_core::record::MetadataRecord,
 ) -> anyhow::Result<djbod_core::version::VersionId> {
-    let mut reader_connection = connect(cli).await?;
-    let mut writer_connection = connect(cli).await?;
+    let mut reader_connection = raw_connection(cli).await?;
+    let mut writer_connection = raw_connection(cli).await?;
     let (mut pipe_in, mut pipe_out) = tokio::io::duplex(4 * 1024 * 1024);
     let key = record.key.clone();
     let get = tokio::spawn(async move {
@@ -1597,16 +1598,11 @@ async fn force_remove_node(
         );
     }
     // Step 3: rebuild, one repair per affected key, through a live node.
-    let mut conn = connect(cli).await?;
+    let mut client = connect(cli).await?;
     let mut failed = 0usize;
     for reference in &plan.affected {
-        match conn
-            .request(Request::RepairObject {
-                key: reference.key.clone(),
-            })
-            .await
-        {
-            Ok(Response::RepairObject(report)) => {
+        match client.repair(&reference.key).await {
+            Ok(report) => {
                 if cli.json {
                     println!("{}", serde_json::to_string(&report)?);
                 } else {
@@ -1621,10 +1617,9 @@ async fn force_remove_node(
                     );
                 }
             }
-            Ok(other) => bail!("unexpected response {other:?}"),
             Err(e) => {
                 failed += 1;
-                println!("LOST     {}  {}", reference.key, describe_error(&e));
+                println!("LOST     {}  {}", reference.key, client_err(e));
             }
         }
     }
@@ -1640,7 +1635,7 @@ async fn force_remove_node(
 /// Run one drain and print its progress. Returns whether every version
 /// was moved.
 async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
-    let mut conn = connect(cli).await?;
+    let mut conn = raw_connection(cli).await?;
     let id = conn.start_drain(device, partial).await.map_err(remote)?;
     let mut moved = 0usize;
     let mut deleted = 0usize;
@@ -1767,5 +1762,26 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cluster_id_is_read_from_an_older_nodes_refusal() {
+        let id = Uuid::new_v4();
+        let message = format!(
+            "peer belongs to cluster {}, this node to {id}; this node serves cluster {id}",
+            Uuid::nil()
+        );
+        assert_eq!(cluster_id_from_refusal(&message), Some(id));
+        assert_eq!(cluster_id_from_refusal("something else"), None);
+        assert_eq!(
+            cluster_id_from_refusal(&format!("peer belongs to cluster {id}, this node to {id}")),
+            None,
+            "only a refusal of the nil id is an answer"
+        );
     }
 }
