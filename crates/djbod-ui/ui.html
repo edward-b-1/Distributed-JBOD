@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Distributed-JBOD</title>
+<script>try { const t = localStorage.getItem('theme'); if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t; } catch (_) {}</script>
 <link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
 <link rel="alternate icon" type="image/png" sizes="32x32" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" sizes="256x256" href="/brand/appicon-256.png">
@@ -27,8 +28,14 @@
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  /* Three theme states: the system's preference by default, or a choice
+     stamped on the root as data-theme="light" or "dark" by the switch in
+     the header, remembered per browser. The dark tokens are listed twice
+     because CSS cannot share a block between a media query and a selector. */
+  :root { color-scheme: light; }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #121211;
       --surface: #1a1a19;
       --line: #2e2e2c;
@@ -42,6 +49,22 @@
       --good-soft: #17301a;
     }
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+      --bg: #121211;
+      --surface: #1a1a19;
+      --line: #2e2e2c;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --muted: #8a8984;
+      --accent: #3987e5;
+      --accent-track: #1d3a5e;
+      --warning-soft: #3a2f16;
+      --critical-soft: #3d1c1c;
+      --good-soft: #17301a;
+  }
+  #theme-toggle { display: inline-flex; align-items: center; gap: 6px; }
+  #theme-toggle svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
   /* The page is a column that fills the window; the frame takes what the
@@ -256,14 +279,15 @@
 </head>
 <body>
 <header>
-  <h1><picture><source srcset="/brand/lockup-dark.svg" media="(prefers-color-scheme: dark)"><img src="/brand/lockup.svg" alt="Distributed JBOD" width="254" height="60"></picture></h1>
+  <h1><img id="lockup" src="/brand/lockup.svg" alt="Distributed JBOD" width="254" height="60"></h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
   <span class="meta">ui build <code id="h-build">…</code></span>
   <span class="meta" id="h-refreshed"></span>
   <span class="meta"><a href="https://github.com/edward-b-1/Distributed-JBOD" target="_blank" rel="noopener" title="AGPL-3.0: the source of the program you are using">source</a></span>
-  <button id="refresh" style="margin-left:auto">Refresh</button>
+  <button id="theme-toggle" style="margin-left:auto" aria-label="Switch to the dark theme" title="Switch to the dark theme"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="theme-icon" d=""/></svg><span id="theme-label"></span></button>
+  <button id="refresh">Refresh</button>
 </header>
 <div id="banners"></div>
 <div class="frame">
@@ -560,6 +584,35 @@ function logLine(log, text, cls) {
 }
 
 // ------------------------------------------------------------ tabs
+
+// The theme switch: dark or light, remembered per browser; with nothing
+// remembered the system's preference applies. The lockup is swapped here
+// too, since a media query cannot see the choice.
+const SUN = 'M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6L4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+const MOON = 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z';
+function effectiveTheme() {
+  const chosen = document.documentElement.dataset.theme;
+  if (chosen === 'dark' || chosen === 'light') return chosen;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function applyTheme() {
+  const dark = effectiveTheme() === 'dark';
+  const chosen = document.documentElement.dataset.theme;
+  $('lockup').src = dark ? "/brand/lockup-dark.svg" : "/brand/lockup.svg";
+  $('theme-icon').setAttribute('d', dark ? SUN : MOON);
+  $('theme-label').textContent = dark ? 'Light' : 'Dark';
+  const label = dark ? 'Switch to the light theme' : 'Switch to the dark theme';
+  $('theme-toggle').setAttribute('aria-label', label + (chosen ? '' : ' (following the system now)'));
+  $('theme-toggle').title = $('theme-toggle').getAttribute('aria-label');
+}
+$('theme-toggle').addEventListener('click', () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch (_) { /* per-browser convenience only */ }
+  applyTheme();
+});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+applyTheme();
 
 // Wrap each rail label so the collapsed rail can hide it and show it as
 // a tooltip instead; the buttons' markup stays as it is.
