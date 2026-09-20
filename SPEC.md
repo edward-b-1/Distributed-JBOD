@@ -1739,7 +1739,11 @@ the id, so a client pointed at the wrong cluster still fails before it
 can act. `djbod get-cluster-id --node <address>` is the command, needing
 no `--cluster`; it prints the id alone so that `export
 DJBOD_CLUSTER=$(djbod get-cluster-id ...)` works, and with `--json` the
-name and build too. A node from before this item refuses the nil id as a
+name and build too. `djbod identity --node <address>` asks the same way
+and then, with the answer, fetches the document to say in words who is
+there: the cluster's name and id, the node's label, id, and addresses,
+its build, the document version it holds, and the transport. A node from
+before this item refuses the nil id as a
 mismatch, and its refusal names the cluster it serves, so the id is
 learned either way. The nil UUID is therefore never a cluster id (6.2.1).
 

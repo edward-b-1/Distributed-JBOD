@@ -93,7 +93,8 @@ until enough devices exist.
 
 You need the **cluster id** for the client. If you lose it, any running
 node repeats it: `djbod get-cluster-id --node 127.0.0.1:5263` needs no
-`--cluster`, and `--json` adds the cluster's name. It is also in
+`--cluster`, and `djbod identity --node 127.0.0.1:5263` says in words who
+is there: cluster, node, build, and document version. The id is also in
 `/tmp/djbod/state/cluster.json`.
 
 The warning about devices sharing a filesystem is expected here.

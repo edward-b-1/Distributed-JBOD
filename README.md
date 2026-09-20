@@ -150,7 +150,7 @@ scale, and years of production use. Distributed-JBOD is young, as the
 | Tool | What it is for |
 |------|----------------|
 | `djbod-node` | The node process. `init-cluster`, `join`, `add-device`, `run`, and an offline `scrub` of one machine's disks. |
-| `djbod` | The client and administration tool: `put`, `get`, `head`, `list`, `delete`, `status`, `repair`, `scrub`, `move-shard`, and `cluster` for membership and settings. `--json` everywhere. |
+| `djbod` | The client and administration tool: `put`, `get`, `head`, `list`, `delete`, `status`, `repair`, `scrub`, `move-shard`, and `cluster` for membership and settings. `identity` and `get-cluster-id` need only a node address. `--json` everywhere. |
 | `djbod-ui` | A web page for the same operations: status, devices, objects, upload and download, scrub, drain, repair. Binds to localhost. |
 | `djbod-recover` | `list` and `extract` objects from device directories with nothing running. |
 | `scripts/djbod-pki.sh` | Issues the certificate authority and node and client certificates. |
@@ -236,7 +236,8 @@ request, so point the client at whichever is nearest:
 
 ```sh
 export DJBOD_NODE=10.0.0.1:5263
-export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you; --json adds the name
+export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you
+djbod identity              # who is at DJBOD_NODE: cluster, node, build, document version
 djbod cluster show          # three nodes, one document version, each node's build
 djbod status                # nine disks, their labels, state, and free space
 djbod put backups/2026-09.tar backup.tar

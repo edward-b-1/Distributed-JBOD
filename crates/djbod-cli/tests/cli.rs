@@ -875,6 +875,31 @@ async fn get_cluster_id_needs_no_cluster_id() {
     assert_eq!(json["cluster_id"], cluster);
     assert_eq!(json["cluster_name"], "Home NAS");
     assert_eq!(json["build"], djbod_node::BUILD);
+    // `identity` builds on it: who is at --node, in words.
+    let node_id = test.node.id().0.to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = run(&["identity"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("node      nas1 ({node_id}) at {}", test.addr)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("build     {}", djbod_node::BUILD)),
+        "{out}"
+    );
+    assert!(out.contains("transport plain"), "{out}");
+    let (ok, out, err) = run(&["--json", "identity"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["node_label"], "nas1");
+    assert_eq!(json["addresses"][0], test.addr.to_string());
+    assert_eq!(json["document_version"], test.node.document_version());
     // Every other command still needs the id.
     let (ok, _, err) = run(&["status"]);
     assert!(!ok);
