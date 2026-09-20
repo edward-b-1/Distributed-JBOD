@@ -260,7 +260,7 @@ coding work.
 and a cluster id. Every node holds a copy. A joining node fetches it from a
 bootstrap peer.
 
-6.2.2 [D] Contents: `k`, `m`, shard block size `B`, the independence level
+6.2.2 [D] Contents: an optional cluster `name` (6.2.5.3), `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
 the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
@@ -333,6 +333,39 @@ address, is outside both. The last resort is to stop every node and write
 the same next document, with the version increased by one, into every
 node's `cluster.json`; with any node running or any copy differing this
 creates the disagreement 6.2.6.1 forbids.
+
+6.2.5.3 [D] **Cluster name.** The document may carry a `name`, an
+administrator-chosen name for the cluster: 1 to 128 bytes of text with no
+control characters and no leading or trailing whitespace. Unlike a label
+(6.2.5.1) it may contain spaces, since it is text for people and never
+stands in for the id in a command. The
+cluster id stays the identity: `Hello` checks the id (19.1.5), `--cluster`
+takes the id, and nothing inside one cluster can make names unique across
+clusters. The name is shown beside the id, never instead of it: `status`
+and `cluster show` print `name (id)`, the web UI's header and title show
+the name first, the node's startup log line carries both, and a node
+refusing a client of another cluster says which cluster it serves. It is
+set with `djbod-node init-cluster --name` and set or cleared with `djbod
+cluster set-name`, a document change like any other. `Status` and `Hello`
+carry it so a client need not fetch the document. An absent name means an
+unnamed cluster; documents written before the field are valid, and a node
+on a build from before it refuses a document that carries one (6.2.6.4).
+The reasoning is in `docs/proposals/cluster-name.md`.
+
+6.2.5.3.1 [O] **A client naming the cluster.** `--cluster` takes the id,
+and a client that knows only the name has nothing to put in its `Hello`,
+since a node refuses a mismatched id before saying anything. The name is
+display text and this is not a shortcoming, but one option is recorded
+should it be wanted: a client `Hello` may carry no cluster id, meaning
+"tell me"; a node accepts that from clients only, never from nodes
+(6.2.7); the node's own `Hello` gives its id and name, and the client
+closes the connection itself if the name is not the one it expected. The
+check of 19.1.5 then rests on the name being unique among the operator's
+clusters rather than on the id, and names would have to be
+distinguishable from a UUID so `--cluster` could take either. This
+concerns only the check, not how a client finds a node, which stays
+`--node ip:port`. The alternatives and the reasons for deferring are in
+`docs/proposals/cluster-name.md`, section 5.
 
 6.2.6 [D] **Changing the document without a master.** Any process holding
 the current document may propose the next version: an administrator's
@@ -1513,7 +1546,8 @@ coordinator, and those nodes send to each other. Every response is either
 **Client to coordinator**
 
 `Status`
-: Request: none. Response: cluster id, document version, coordinator node
+: Request: none. Response: cluster id, cluster name if set (6.2.5.3),
+  document version, coordinator node
   UUID, and for every device in the cluster: UUID, owning node, state,
   total bytes, free bytes. Implemented by broadcasting `LocalStatus`.
 
@@ -1685,8 +1719,10 @@ addresses by design.
 19.1.5 [D] Every connection begins with each side sending one `Hello`
 carrying the protocol version, its peer kind (node or client), its node id
 if a node, the cluster id, its cluster document version (0 for a
-client), and its software build (crate version and git commit; absent
-from builds before it was added, which `cluster show` reports as older). A node closes the connection if the protocol version is
+client), its software build (crate version and git commit; absent
+from builds before it was added, which `cluster show` reports as older),
+and, from a node, the cluster's name if it has one (6.2.5.3),
+informational. A node closes the connection if the protocol version is
 unsupported, the cluster id differs, or a node peer's document version
 differs (6.2.7), with an error naming which. This catches a node or client
 pointed at the wrong cluster and a node running stale software or

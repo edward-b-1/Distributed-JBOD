@@ -506,12 +506,15 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
     match conn.request(Request::Status).await? {
         Reply::Status {
             cluster_id,
+            cluster_name,
             document_version,
             coordinator,
             transport,
             devices,
         } => Ok(Json(json!({
             "cluster_id": cluster_id,
+            // The cluster's name, if it has one (SPEC 6.2.5.3).
+            "cluster_name": cluster_name,
             "document_version": document_version,
             "coordinator": coordinator,
             // The cluster's transport (SPEC 19.1.6.3): plain, tls-optional,
