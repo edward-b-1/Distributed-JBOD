@@ -26,7 +26,7 @@ So: heterogeneous capacity, pooled across nodes, with integrity data striped ove
 | `djbod-appicon.svg` | dark rounded square, avatars / app tiles |
 | `png/` | rasterised exports of all of the above |
 | `proof.png`, `proof2.png`, `proof3.png` | contact sheets showing everything together |
-| `proof-palette.png` | orange vs yellow parity, on both UI surfaces |
+| `proof-palette.png` | the three parity colours, on both UI surfaces |
 
 All type in the lockups is **converted to outlines**, so the SVGs render identically
 without Segoe UI installed.
@@ -46,11 +46,22 @@ The blues are not chosen independently: they are the `--accent` values from
 are the same blue. If `--accent` ever changes, rebuild the kit with the new
 value rather than letting the two drift.
 
-### Yellow alternate
+### Parity-colour alternates
 
-[`yellow/`](yellow/) is the whole kit with the parity slab in `#fab219` — the
-UI's `--warning` — instead of orange. Same geometry, same blues. It is kept
-for comparison; the orange set is the one in use.
+Two complete alternate kits sit beside the primary one. Same geometry, same
+blues; only the parity slab differs.
+
+| Folder | Parity slab | |
+|---|---|---|
+| *(root)* | `#F97316` | orange, the set in use |
+| [`yellow/`](yellow/) | `#fab219` | the UI's `--warning` |
+| [`status-light/`](status-light/) | `#FFD21A` + glow | reads as a lit indicator |
+
+`status-light/` is the brighter of the yellows and adds a soft glow behind the
+parity slabs, so they look like status LEDs rather than flat fills. The glow is
+an SVG filter scaled to the slab, and it survives down to 16 px — at that size
+it stops reading as a glow and simply warms the colour, which is a benign
+failure. `proof-palette.png` puts all three side by side on both UI surfaces.
 
 ## Usage rules
 

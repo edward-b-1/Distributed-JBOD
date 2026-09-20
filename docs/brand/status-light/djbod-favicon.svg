@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Distributed JBOD</title>
+    <defs><filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="19.8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    <rect x="20" y="140" width="96" height="66" rx="33" fill="#2a78d6"/>
+    <rect x="140" y="50" width="96" height="66" rx="33" fill="#2a78d6"/>
+    <g filter="url(#glow)">
+      <rect x="20" y="50" width="96" height="66" rx="33" fill="#FFD21A"/>
+      <rect x="140" y="140" width="96" height="66" rx="33" fill="#FFD21A"/>
+    </g>
+</svg>

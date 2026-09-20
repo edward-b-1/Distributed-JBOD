@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Distributed JBOD</title>
+  <rect width="512" height="512" rx="112" fill="#0B1220"/>
+  <g transform="translate(256,256) scale(1.42) translate(-128,-128)">
+    <defs><filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="12" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+    <rect x="26" y="189" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="26" y="135" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="100" y="189" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="174" y="135" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="174" y="81" width="56" height="40" rx="20" fill="#3987e5"/>
+    <rect x="174" y="27" width="56" height="40" rx="20" fill="#3987e5"/>
+    <g filter="url(#glow)">
+      <rect x="26" y="81" width="56" height="40" rx="20" fill="#FFD21A"/>
+      <rect x="100" y="135" width="56" height="40" rx="20" fill="#FFD21A"/>
+      <rect x="174" y="189" width="56" height="40" rx="20" fill="#FFD21A"/>
+    </g>
+  </g>
+</svg>
