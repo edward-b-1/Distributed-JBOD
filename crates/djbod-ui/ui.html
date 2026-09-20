@@ -47,7 +47,12 @@
   /* The page is a column that fills the window; the frame takes what the
      header (and any banners) leave, so the rail reaches the bottom on a
      short page without the page ever being taller than the window. */
-  body { min-height: 100vh; display: flex; flex-direction: column; }
+  /* The page is exactly the window's height and never scrolls itself:
+     the frame takes what the header and banners leave, and inside it the
+     content column scrolls when a tab is taller than the window. That is
+     what lets the Objects page size its key table by the space left. */
+  html, body { height: 100%; }
+  body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
   body > * { flex: none; }
   a { color: var(--accent); }
   header {
@@ -63,7 +68,7 @@
      where it means something, a live count; the selected one sits on a
      tinted background. On a narrow screen the rail becomes a row above
      the content. */
-  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; transition: grid-template-columns .15s; }
+  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; transition: grid-template-columns .15s; }
   .frame.collapsed { grid-template-columns: 60px minmax(0, 1fr); }
   aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 10px; display: flex; flex-direction: column; }
   aside.rail nav { position: sticky; top: 48px; display: flex; flex-direction: column; gap: 2px; }
@@ -107,7 +112,8 @@
     .rail-head { display: none; }
     .rail .count { margin-left: 4px; }
   }
-  main { padding: 16px 20px 20px; min-width: 0; max-width: 1640px; display: flex; flex-direction: column; min-height: 0; }
+  main { padding: 16px 20px 20px; min-width: 0; max-width: 1640px; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  aside.rail { overflow-y: auto; min-height: 0; }
   main > section { flex: 1 1 auto; min-height: 0; }
   /* The Objects section is a column that fills the window's height, so
      its key table can scroll inside a box sized by what is left rather
