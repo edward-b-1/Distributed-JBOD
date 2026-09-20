@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/djbod-lockup-horizontal-onDark.svg">
-  <img src="docs/brand/djbod-lockup-horizontal.svg" alt="Distributed JBOD" width="300">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/yellow/djbod-lockup-horizontal-onDark.svg">
+  <img src="docs/brand/yellow/djbod-lockup-horizontal.svg" alt="Distributed JBOD" width="300">
 </picture>
 
 # Distributed-JBOD
