@@ -135,8 +135,7 @@
   .state.removed::before { content: "\25CB  "; color: var(--muted); }
   .warn::before { content: "\26A0 "; }
   .cell-check { white-space: nowrap; }
-  .cell-check .why, .devices-by-state .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
-  .devices-by-state { margin-top: 4px; }
+  .cell-check .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
   .ok::before { content: "\2713 "; color: var(--good); }
   /* The health card at the top of the Overview: a mark, a sentence, and
      the way to the fix, in the status colour; green when every node
@@ -689,7 +688,7 @@ function renderOverview() {
   const check = (state, text, why) => el('span', { class: 'cell-check' }, el('span', { class: state, text }), why ? el('span', { class: 'why', text: why }) : null);
   const mixed = nodeBuilds(cluster).size > 1;
   $('nodes').parentElement.querySelector('thead').replaceChildren(el('tr', {},
-    ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', ''].map((h) => el('th', { text: h }))));
+    ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
     const entry = doc.nodes.find((d) => d.id === n.node) || {};
     const reachable = !n.error;
@@ -708,9 +707,10 @@ function renderOverview() {
       el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : atVersion ? check('ok', `version ${n.version}`) : check('bad', `version ${n.version}`, `current is ${doc.version}; Sync brings it up`)),
       el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : n.build ? check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null) : check('warn', 'older, unreported', 'from before builds were sent; upgrade')),
       el('td', {}, check(transport === 'tls' ? 'ok' : 'warn', transport === 'tls' ? 'required' : transport === 'tls-optional' ? 'optional' : 'plain', transport === 'tls' ? null : 'clients may connect without TLS')),
-      el('td', {},
-        check(deviceCount === 0 ? 'bad' : draining ? 'warn' : 'ok', String(deviceCount), inUse.length ? `${human(freeHere)} free` : 'no devices in use'),
-        byState.length ? el('div', { class: 'devices-by-state' }, el('span', { text: byState.map(([st, k]) => `${k} ${st}`).join(', ') }), draining ? el('span', { class: 'why', text: 'a drain is in progress or pending' }) : null) : null),
+      el('td', {}, check(deviceCount === 0 ? 'bad' : draining ? 'warn' : 'ok', String(deviceCount), inUse.length ? `${human(freeHere)} free` : 'no devices in use')),
+      // The devices by state, one line; the note about a pending drain is
+      // a tooltip so the row keeps its height.
+      el('td', {}, byState.length ? el('span', { class: draining ? 'warn' : '', text: byState.map(([st, k]) => `${k} ${st}`).join(', '), title: draining ? 'a drain is in progress or pending' : null }) : el('span', { class: 'hint', text: '\u2014' })),
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
         el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
