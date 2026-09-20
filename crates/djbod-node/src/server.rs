@@ -13,7 +13,7 @@ use crate::coordinator;
 use crate::local_ops;
 use crate::node::Node;
 use crate::transport::{self, Accepted};
-use crate::wire::{read_message, write_message, WireError};
+use djbod_client::wire::{read_message, write_message, WireError};
 
 /// Why a connection was closed. Every connection ends with one of these;
 /// only `PeerClosed` is silent.
@@ -107,7 +107,7 @@ pub fn our_hello(node: &Node) -> Hello {
         node_id: Some(node.id()),
         cluster_id: node.cluster_id(),
         document_version: node.document_version(),
-        build: Some(crate::BUILD.to_string()),
+        build: Some(djbod_client::BUILD.to_string()),
         cluster_name: node.document().name.clone(),
     }
 }
@@ -202,7 +202,7 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
                 // since what the request expected next is unknown.
                 let message = format!(
                     "this node (build {}) cannot decode the request: {reason}. A field it does not know means the peer is newer; upgrade this node",
-                    crate::BUILD
+                    djbod_client::BUILD
                 );
                 let detail = ErrorDetail {
                     node: Some(node.id()),

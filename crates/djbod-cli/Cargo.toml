@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 djbod-core = { workspace = true }
 djbod-proto = { workspace = true }
+djbod-client = { workspace = true }
 djbod-node = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true, features = ["env"] }

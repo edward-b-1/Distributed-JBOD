@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui"]
+members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-client", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,6 +20,7 @@ rustix = { version = "1", features = ["fs"] }
 ciborium = "0.2"
 djbod-core = { path = "crates/djbod-core" }
 djbod-proto = { path = "crates/djbod-proto" }
+djbod-client = { path = "crates/djbod-client" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "macros", "time", "fs"] }
 djbod-node = { path = "crates/djbod-node" }
 toml = "1"

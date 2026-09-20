@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djbod_client::connection::{ClientError, Connection};
 use djbod_core::cluster::Transport;
-use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node, NodeError};
@@ -483,9 +483,9 @@ fn a_client_connector_comes_from_three_optional_settings() {
 /// TLS stream again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_last_frame_of_a_tls_stream_is_flushed() {
+    use djbod_client::wire::{read_message, write_message};
     use djbod_core::checksum::checksum_block;
     use djbod_node::transport::{accept, Accepted};
-    use djbod_node::wire::{read_message, write_message};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;

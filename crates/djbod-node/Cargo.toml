@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 djbod-core = { workspace = true }
 djbod-proto = { workspace = true }
+djbod-client = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

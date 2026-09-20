@@ -4,10 +4,10 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 
+use djbod_client::transport::TlsPaths;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_node::transport::TlsPaths;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -739,10 +739,10 @@ async fn nodes_can_be_labelled_and_named_by_label() {
     assert!(out.contains("nas1"), "{out}");
     // Each node's build, for telling an older node apart (SPEC 6.2.6.4).
     assert!(out.contains("BUILD"), "{out}");
-    assert!(out.contains(djbod_node::BUILD), "{out}");
+    assert!(out.contains(djbod_client::BUILD), "{out}");
     let (ok, out, _) = djbod(&test, &["--version"]);
     assert!(ok);
-    assert!(out.contains(djbod_node::BUILD), "{out}");
+    assert!(out.contains(djbod_client::BUILD), "{out}");
 
     // A device may carry the same label as a node: separate namespaces.
     let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "nas1"]);
@@ -874,7 +874,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
     let json: serde_json::Value = serde_json::from_str(&out).expect("json");
     assert_eq!(json["cluster_id"], cluster);
     assert_eq!(json["cluster_name"], "Home NAS");
-    assert_eq!(json["build"], djbod_node::BUILD);
+    assert_eq!(json["build"], djbod_client::BUILD);
     // `identity` builds on it: who is at --node, in words.
     let node_id = test.node.id().0.to_string();
     let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
@@ -890,7 +890,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
         "{out}"
     );
     assert!(
-        out.contains(&format!("build     {}", djbod_node::BUILD)),
+        out.contains(&format!("build     {}", djbod_client::BUILD)),
         "{out}"
     );
     assert!(out.contains("transport plain"), "{out}");

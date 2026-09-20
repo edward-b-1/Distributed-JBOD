@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use djbod_client::connection::{ClientError, Connection, StreamItem};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
@@ -16,7 +17,6 @@ use djbod_core::record::{
 };
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
-use djbod_node::client::{ClientError, Connection, StreamItem};
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;

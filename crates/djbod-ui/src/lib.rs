@@ -69,13 +69,13 @@ use serde_json::{json, Value};
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
+use djbod_client::connection::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
+use djbod_client::transport::Connector;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
-use djbod_node::client::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_node::membership::{self, MembershipError};
-use djbod_node::transport::Connector;
 use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response as Reply};
 
 /// The page, embedded so the binary is self-contained.
@@ -359,7 +359,7 @@ fn refuse(code: &str, message: impl Into<String>) -> Response {
 /// segment, so a browser may cache the assets indefinitely and still
 /// see a new logo the moment a new build serves the page.
 static PAGE_FOR_THIS_BUILD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    PAGE.replace("\"/brand/", &format!("\"/brand/{}/", djbod_node::BUILD))
+    PAGE.replace("\"/brand/", &format!("\"/brand/{}/", djbod_client::BUILD))
 });
 
 async fn page() -> Html<&'static str> {
@@ -561,7 +561,7 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             "transport": transport,
             "ui_to_node_tls": conn.is_tls(),
             // This server's own build, shown in the page header.
-            "ui_build": djbod_node::BUILD,
+            "ui_build": djbod_client::BUILD,
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),

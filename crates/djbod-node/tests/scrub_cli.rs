@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 
+use djbod_client::connection::Connection;
 use djbod_core::keyhash::hash_key;
 use djbod_core::layout::shard_file_name;
-use djbod_node::client::Connection;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;

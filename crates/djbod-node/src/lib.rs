@@ -5,9 +5,6 @@
 //! - [`config`]: the per-node TOML configuration file (6.1).
 //! - [`node`]: opening a node's devices and cluster document, and creating
 //!   a new cluster from one node.
-//! - [`wire`]: reading and writing protocol frames over tokio streams.
-//! - [`client`]: a connection to a node, used by the coordinator, the
-//!   command-line tool, and the tests.
 //! - [`server`]: accepting connections, the `Hello` exchange, and
 //!   dispatching requests.
 //! - [`local_ops`]: the node-to-node operations (19.1.3), served from this
@@ -20,14 +17,12 @@
 //!   joining a node, syncing stragglers, and startup adoption (6.2.6,
 //!   18.1).
 //!
+//! Frames and connections come from the `djbod-client` crate, which the
+//! coordinator uses to reach holders and every client program uses too.
+//!
 //! Disk work runs on tokio's blocking pool via `spawn_blocking`;
 //! `djbod-core` stays synchronous (4.4).
 
-/// This software's build, crate version and git commit, sent in every
-/// `Hello` and printed by `--version`. The commit comes from `build.rs`.
-pub const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("DJBOD_GIT_COMMIT"));
-
-pub mod client;
 pub mod config;
 pub mod coordinator;
 pub mod local_ops;
@@ -36,4 +31,3 @@ pub mod node;
 pub mod server;
 pub mod transport;
 pub mod ulid;
-pub mod wire;

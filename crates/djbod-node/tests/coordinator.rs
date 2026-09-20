@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use djbod_client::connection::{ClientError, Connection};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
 use djbod_core::erasure::ShardIndex;
@@ -12,7 +13,6 @@ use djbod_core::keyhash::hash_key;
 use djbod_core::layout::shard_file_name;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
@@ -441,7 +441,7 @@ async fn a_body_shorter_or_longer_than_declared_is_refused_and_leaves_nothing() 
             .await
             .expect("send");
         client
-            .send_data(id, djbod_node::client::body_frame(0, body))
+            .send_data(id, djbod_client::connection::body_frame(0, body))
             .await
             .expect("data");
         client
@@ -451,7 +451,7 @@ async fn a_body_shorter_or_longer_than_declared_is_refused_and_leaves_nothing() 
         // The refusal arrives as a failed stream end, then the connection
         // is closed.
         match client.read_stream_item(id).await {
-            Ok(djbod_node::client::StreamItem::End(end)) => {
+            Ok(djbod_client::connection::StreamItem::End(end)) => {
                 let error = end.error.expect("stream end carries the error");
                 assert_eq!(error.code, ErrorCode::ProtocolViolation);
             }

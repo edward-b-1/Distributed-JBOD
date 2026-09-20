@@ -1,0 +1,20 @@
+[package]
+name = "djbod-client"
+description = "The Distributed-JBOD client library: connections, framing, and the client side of TLS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+djbod-core = { workspace = true }
+djbod-proto = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-pemfile = "2"
+
+[lints]
+workspace = true

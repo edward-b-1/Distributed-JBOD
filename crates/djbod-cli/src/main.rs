@@ -26,14 +26,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
+use djbod_client::connection::{ClientError, Connection, DEFAULT_BODY_CHUNK};
+use djbod_client::transport::Connector;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
-use djbod_node::client::{ClientError, Connection, DEFAULT_BODY_CHUNK};
-use djbod_node::transport::Connector;
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
 
 #[derive(Parser)]
-#[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_node::BUILD)]
+#[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_client::BUILD)]
 struct Cli {
     /// Address of any node in the cluster.
     #[arg(long, env = "DJBOD_NODE", global = true)]
