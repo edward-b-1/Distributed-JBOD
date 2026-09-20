@@ -41,7 +41,7 @@ One machine, one node, started at boot and restarted if it fails.
    directory and devices end up owned by it:
 
    ```sh
-   sudo -u djbod djbod-node init-cluster --config /etc/djbod/node.toml --k 3 --m 1
+   sudo -u djbod djbod-node init-cluster --config /etc/djbod/node.toml --k 3 --m 1 --name home-nas
    # or, on every further machine:
    sudo -u djbod djbod-node join --config /etc/djbod/node.toml --peer 10.0.0.1:5263 --cluster <id>
    ```
@@ -97,17 +97,24 @@ owned by `djbod` and mode 600, and the client's three in `client.env`.
 Issue the files with `scripts/djbod-pki.sh` as the walkthrough describes.
 
 **Upgrading**: install the new binaries, `systemctl restart djbod-node` on
-each machine in turn. The on-disk format is versioned and every record
-carries its format version; a node refuses a document or record it does
-not understand rather than guessing.
+each machine in turn. Finish every machine before changing the cluster
+document: a node refuses a document with a field its build does not know
+rather than dropping it (SPEC 6.2.6.4), and the error names the node.
+`djbod cluster show` prints each node's build, the same string as
+`djbod-node --version`, so a machine that was missed stands out. The
+on-disk format is versioned too; a node refuses a record it does not
+understand rather than guessing.
 
 ## Docker
 
 The image in the repository's `Dockerfile` holds all four binaries and
-runs the node as an unprivileged user. Build it once:
+runs the node as an unprivileged user. Build it once, passing the commit
+so the binaries report a build id (`.git` is outside the build context;
+without the argument they say `unknown`):
 
 ```sh
-docker build -t djbod .
+docker build -t djbod --build-arg DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) .
+docker run --rm --entrypoint djbod-node djbod --version   # djbod-node 0.1.0+<commit>
 ```
 
 The entry point creates or joins a cluster the first time the state
@@ -121,6 +128,7 @@ volume is empty, then runs the node, all from environment variables:
 | `DJBOD_CLUSTER_ID` | The cluster id: chosen for the first node (any UUID), required for a node that joins. |
 | `DJBOD_JOIN_PEER` | Set on a joining node: a running node's IP and port. The entry point retries until the peer answers. |
 | `DJBOD_K`, `DJBOD_M` | The scheme, read by the first node only; default `3` and `1`. |
+| `DJBOD_CLUSTER_NAME` | A name shown beside the cluster id, read by the first node only; `djbod cluster set-name` changes it later. |
 | `DJBOD_BOOTSTRAP_PEERS` | Other nodes to consult at startup for a newer cluster document, comma-separated. |
 | `DJBOD_TLS_CERT`, `DJBOD_TLS_KEY`, `DJBOD_TLS_CA` | Paths of mounted TLS material, with the key readable only by uid 5263. |
 | `DJBOD_ALLOW_SHARED_FILESYSTEM` | `true` only for experiments where several devices share one disk. |
@@ -166,14 +174,16 @@ the web UI, on a private network with fixed addresses, and creates a
 one disk.
 
 ```sh
-docker compose -f deploy/docker-compose.yml up -d --build
+DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) \
+  docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml exec node1 djbod \
   --node 172.28.0.11:5263 --cluster 3d1e7b3a-0c3f-4b0e-9a7f-1a2b3c4d5e6f status
 open http://127.0.0.1:5264/
 docker compose -f deploy/docker-compose.yml down -v     # deletes the data too
 ```
 
-Node 1 creates the cluster with the id written in the file; nodes 2 and 3
+Node 1 creates the cluster with the id written in the file, named
+`compose trial`; nodes 2 and 3
 join it, retrying until node 1 answers, so the order the containers
 start in does not matter, and `docker compose ps` shows each node healthy
 once it serves. Stop and start the stack and every node comes back with

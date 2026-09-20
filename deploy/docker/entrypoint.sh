@@ -12,6 +12,8 @@
 #                       for a joining one
 #   DJBOD_JOIN_PEER     set on a joining node: IP:port of a running node
 #   DJBOD_K, DJBOD_M    the scheme, first node only (default 3+1)
+#   DJBOD_CLUSTER_NAME  a name shown beside the cluster id, first node only;
+#                       `djbod cluster set-name` changes it later
 #   DJBOD_BOOTSTRAP_PEERS, DJBOD_TLS_*, and the rest as for djbod-node
 set -eu
 

@@ -3,7 +3,7 @@
 # needs to be baked in or mounted; TLS material, when used, is mounted
 # and named by DJBOD_TLS_CERT, DJBOD_TLS_KEY, DJBOD_TLS_CA.
 #
-#   docker build -t djbod .
+#   docker build -t djbod --build-arg DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) .
 #   docker run -d --network host -e DJBOD_NODE_ID=... -e DJBOD_LISTEN=10.0.0.1:5263 \
 #     -v /var/lib/djbod:/var/lib/djbod -v /mnt/disk0/djbod:/data/d0 -v /mnt/disk1/djbod:/data/d1 djbod
 #
@@ -12,6 +12,11 @@
 FROM rust:1.98.1-trixie AS build
 WORKDIR /src
 COPY . .
+# The build id the binaries report (`--version`, the Hello handshake,
+# `djbod cluster show`; SPEC 6.2.6.4). `.git` is not in the build context,
+# so the commit is passed in; without it the binaries say "unknown".
+ARG DJBOD_GIT_COMMIT=unknown
+ENV DJBOD_GIT_COMMIT=$DJBOD_GIT_COMMIT
 # --locked: build exactly the dependency versions in Cargo.lock.
 RUN cargo build --release --workspace --locked
 
