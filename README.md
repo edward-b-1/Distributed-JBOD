@@ -2,7 +2,7 @@
 
 # Distributed-JBOD
 
-A distributed, resilient, object store.
+A distributed, resilient, object store. Built with Rust.
 
 Distributed-JBOD solves the problem of a user who requires a large pool of
 network connected storage, but who does not have access to datacenter grade
@@ -107,12 +107,13 @@ objects with no cluster running, and turning on TLS.
   a certificate authority you create with `openssl`, or the included
   script. A running cluster switches from plain to TLS in two steps.
 
-## Why not MinIO, Garage, SeaweedFS, or Ceph?
+## Alternatives?
 
-Each of these is a good system, and for many needs the right one. The
-job Distributed-JBOD is built for is narrower: a few small machines with
-whatever disks are to hand, erasure coding across all of them, every
-block checked on every read, and nothing else to run.
+Distributed-JBOD is designed for a specific use case: non-uniform nodes
+with non-uniform storage devices. The typical deployment is a few small
+machines with whatever disks are available, with erasure coding enabled
+across all of them, every block checked on every read, and nothing else
+to run.
 
 - **MinIO** erasure-codes S3 storage, but lays it out in erasure sets of
   uniform drives and grows by adding whole pools. A pile of odd-sized
