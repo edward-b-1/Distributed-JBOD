@@ -31,9 +31,7 @@ transparent background. `-lockup.svg` puts it beside the wordmark. Concept 05 ha
 `-wordmark.svg` instead of a lockup because the type *is* the mark.
 
 The PNGs in `png/` were exported with Inkscape 1.4 from the SVGs, for anywhere SVG
-is not accepted. Mark PNGs keep the transparent background. The lockup PNGs were
-rendered on a machine without Space Grotesk, so their type is the Segoe UI fallback;
-re-export after installing the font for the intended face.
+is not accepted. Mark PNGs keep the transparent background.
 
 Shared system across all six:
 
@@ -44,9 +42,9 @@ Shared system across all six:
 | Wordmark | Space Grotesk, "Distributed" at 500 weight, "JBOD" at 700 |
 | Labels | IBM Plex Mono |
 
-The lockup and wordmark SVGs use **live text**, not outlines, so they need Space
-Grotesk installed (free from Google Fonts) to render as intended; they fall back to
-Segoe UI otherwise. The marks themselves have no text and render anywhere.
+All type in the lockup and wordmark SVGs is **converted to outlines** (Inkscape,
+from the Space Grotesk variable font), so the files render identically without the
+font installed, the same convention as the main kit. The marks contain no text.
 
 ## The canvas boards
 
