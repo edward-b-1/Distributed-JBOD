@@ -364,6 +364,9 @@ pub enum Response {
     // ---- client to coordinator
     Status {
         cluster_id: Uuid,
+        /// The cluster's name, if it has one (SPEC 6.2.5.3).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cluster_name: Option<String>,
         document_version: u64,
         coordinator: NodeId,
         #[serde(default)]

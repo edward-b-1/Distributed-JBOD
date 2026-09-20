@@ -178,6 +178,16 @@ enum ClusterCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Give the cluster a name shown beside its id, or clear it with
+    /// --clear. The id stays what `--cluster` takes.
+    SetName {
+        /// The new name: 1 to 128 characters; spaces are allowed, so quote
+        /// it.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        name: Option<String>,
+        #[arg(long)]
+        clear: bool,
+    },
     /// Give a node a short name shown beside its UUID, or clear it with
     /// --clear. Node labels are unique within the cluster.
     SetNodeLabel {
@@ -352,6 +362,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             match conn.request(Request::Status).await.map_err(remote)? {
                 Response::Status {
                     cluster_id,
+                    cluster_name,
                     document_version,
                     coordinator,
                     transport,
@@ -362,6 +373,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             "{}",
                             serde_json::to_string_pretty(&serde_json::json!({
                                 "cluster_id": cluster_id,
+                                "cluster_name": cluster_name,
                                 "document_version": document_version,
                                 "coordinator": coordinator,
                                 "transport": transport.to_string(),
@@ -369,7 +381,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             }))?
                         );
                     } else {
-                        println!("cluster   {cluster_id}");
+                        match &cluster_name {
+                            Some(name) => println!("cluster   {name} ({cluster_id})"),
+                            None => println!("cluster   {cluster_id}"),
+                        }
                         println!("document  version {document_version}");
                         println!("answered  by node {}", coordinator.0);
                         println!("transport {transport}");
@@ -760,7 +775,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .collect();
                         println!("{}", serde_json::to_string_pretty(&rows)?);
                     } else {
-                        println!("cluster   {}", document.cluster_id);
+                        println!("cluster   {}", document.title());
                         println!("document  version {} as held by {node}", document.version);
                         println!();
                         println!(
@@ -1040,6 +1055,39 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!(
                             "label cleared from device {} (document version {})",
                             device_id.0, document.version
+                        );
+                    }
+                }
+                ClusterCommand::SetName { name, clear: _ } => {
+                    let (document, changed) = djbod_node::membership::set_cluster_name(
+                        &connector(&cli)?,
+                        node,
+                        cluster,
+                        name.clone(),
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "cluster_id": cluster,
+                                "name": name,
+                                "document_version": document.version,
+                                "changed": changed,
+                            }))?
+                        );
+                    } else if !changed {
+                        println!("nothing changed");
+                    } else if let Some(name) = name {
+                        println!(
+                            "cluster {cluster} is now named {name} (document version {})",
+                            document.version
+                        );
+                    } else {
+                        println!(
+                            "name cleared from cluster {cluster} (document version {})",
+                            document.version
                         );
                     }
                 }

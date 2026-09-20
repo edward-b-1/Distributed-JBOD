@@ -795,6 +795,32 @@ pub async fn set_node_label(
     Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
+/// Set or clear the cluster's name (SPEC 6.2.5.3). Returns the document
+/// and whether anything changed; the validator refuses an unusable name.
+pub async fn set_cluster_name(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    name: Option<String>,
+) -> Result<(ClusterDocument, bool), MembershipError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(connector, peer, cluster_id).await?;
+        if current.name == name {
+            return Ok((current, false));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        next.name = name.clone();
+        match propose(connector, &current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(MembershipError::Superseded { .. })
+            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
 /// Replace a node's address list (SPEC 6.2.5.2). Returns the document and
 /// whether anything changed; the validator refuses an empty list, an
 /// address that is not `ip:port`, or one already listed for a node. The

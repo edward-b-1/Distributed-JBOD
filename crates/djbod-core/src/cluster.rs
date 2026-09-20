@@ -145,6 +145,31 @@ pub fn validate_label(label: &str) -> Result<(), ClusterDocumentError> {
     Ok(())
 }
 
+/// A cluster name (SPEC 6.2.5.3) is text for people and nothing else,
+/// so spaces are allowed: 1 to 128 bytes, no control characters, and no
+/// leading or trailing whitespace, which would be invisible.
+pub fn validate_cluster_name(name: &str) -> Result<(), ClusterDocumentError> {
+    if name.is_empty() || name.len() > MAX_LABEL_BYTES {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: format!("must be 1 to {MAX_LABEL_BYTES} bytes"),
+        });
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: "must not contain control characters".to_string(),
+        });
+    }
+    if name.trim() != name {
+        return Err(ClusterDocumentError::BadClusterName {
+            name: name.to_string(),
+            reason: "must not start or end with whitespace".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// The only independence level v1 accepts (SPEC 7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -161,6 +186,10 @@ pub struct ClusterDocument {
     /// Monotonically increasing; every change is a new version (6.2.1).
     pub version: u64,
     pub cluster_id: Uuid,
+    /// An administrator-chosen name shown beside the id (SPEC 6.2.5.3);
+    /// the id stays the identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub k: u8,
     pub m: u8,
     /// Shard block size B, in bytes.
@@ -218,6 +247,8 @@ pub enum ClusterDocumentError {
     DuplicateDevice(DeviceId),
     #[error("label {label:?} is not usable: {reason}")]
     BadLabel { label: String, reason: String },
+    #[error("cluster name {name:?} is not usable: {reason}")]
+    BadClusterName { name: String, reason: String },
     #[error("label {label:?} is used by more than one device")]
     DuplicateLabel { label: String },
     #[error("device {device:?} names node {node:?}, which is not in the document")]
@@ -308,6 +339,9 @@ impl ClusterDocument {
                 labels.push(label);
             }
         }
+        if let Some(name) = &self.name {
+            validate_cluster_name(name)?;
+        }
         let mut node_labels: Vec<&str> = Vec::new();
         for node in &self.nodes {
             if let Some(label) = &node.label {
@@ -321,6 +355,14 @@ impl ClusterDocument {
             }
         }
         Ok(())
+    }
+
+    /// The cluster for people: `name (id)`, or the id alone when unnamed.
+    pub fn title(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name} ({})", self.cluster_id),
+            None => self.cluster_id.to_string(),
+        }
     }
 
     pub fn scheme(&self) -> Result<Scheme, SchemeError> {
@@ -392,6 +434,7 @@ mod tests {
         ClusterDocument {
             version: 1,
             cluster_id: Uuid::from_u128(0xC1),
+            name: None,
             k: 3,
             m: 1,
             block_size: 1 << 20,
@@ -452,6 +495,28 @@ mod tests {
         json["nodes"][0]["label"] = "nas1".into();
         let document: ClusterDocument = serde_json::from_value(json).expect("read");
         assert_eq!(document.nodes[0].label.as_deref(), Some("nas1"));
+    }
+
+    #[test]
+    fn a_cluster_name_is_text_with_spaces_and_shows_beside_the_id() {
+        let mut document = sample();
+        assert_eq!(document.title(), document.cluster_id.to_string());
+        document.name = Some("Home NAS".to_string());
+        document.validate().expect("a usable name");
+        assert_eq!(
+            document.title(),
+            format!("Home NAS ({})", document.cluster_id)
+        );
+        for bad in ["", " padded", "padded ", "two\nlines", &"x".repeat(129)] {
+            document.name = Some(bad.to_string());
+            assert!(
+                matches!(
+                    document.validate(),
+                    Err(ClusterDocumentError::BadClusterName { .. })
+                ),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]

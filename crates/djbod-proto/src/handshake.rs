@@ -38,6 +38,10 @@ pub struct Hello {
     /// from builds before it, so `cluster show` can name an older node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
+    /// The cluster's name from the document, if it has one (6.2.5.3).
+    /// Informational: the id is what is checked. Clients send none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_name: Option<String>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]

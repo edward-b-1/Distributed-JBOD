@@ -163,6 +163,7 @@ async fn status_and_cluster_describe_the_node() {
     let (status, json) = get_json(&test, "/api/status").await;
     assert_eq!(status, StatusCode::OK, "{json}");
     assert_eq!(json["cluster_id"], test.node.cluster_id().to_string());
+    assert!(json["cluster_name"].is_null(), "unnamed: {json}");
     assert_eq!(json["devices"].as_array().unwrap().len(), 4);
     assert_eq!(json["devices"][0]["state"], "active");
     assert_eq!(json["transport"], "plain");

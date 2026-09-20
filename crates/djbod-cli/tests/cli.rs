@@ -805,3 +805,42 @@ async fn a_nodes_address_can_be_set_from_the_command_line() {
     assert!(!ok);
     assert!(err.contains("no node is named"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_cluster_can_be_named_from_the_command_line() {
+    let test = start_node(2, 1, 1).await;
+    let cluster = test.node.cluster_id().to_string();
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("is now named Home NAS"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
+        "{out}"
+    );
+    let (ok, out, _) = djbod(&test, &["cluster", "show"]);
+    assert!(ok);
+    assert!(
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
+        "{out}"
+    );
+    let (ok, out, _) = djbod(&test, &["--json", "status"]);
+    assert!(ok);
+    assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
+
+    let (ok, out, _) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
+    assert!(ok);
+    assert!(out.contains("nothing changed"), "{out}");
+    let (ok, _, err) = djbod(&test, &["cluster", "set-name", " padded"]);
+    assert!(!ok);
+    assert!(err.contains("start or end with whitespace"), "{err}");
+
+    let (ok, out, err) = djbod(&test, &["cluster", "set-name", "--clear"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("name cleared"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains(&format!("cluster   {cluster}\n")), "{out}");
+}

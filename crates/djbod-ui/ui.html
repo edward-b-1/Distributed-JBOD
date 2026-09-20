@@ -199,6 +199,7 @@
   <span class="meta">transport <code id="h-transport">…</code></span>
   <span class="meta">ui build <code id="h-build">…</code></span>
   <span class="meta" id="h-refreshed"></span>
+  <span class="meta"><a href="https://github.com/edward-b-1/Distributed-JBOD" target="_blank" rel="noopener" title="AGPL-3.0: the source of the program you are using">source</a></span>
   <button id="refresh" style="margin-left:auto">Refresh</button>
 </header>
 <div id="banners"></div>
@@ -539,7 +540,9 @@ function renderHealth() {
 }
 function renderHeader() {
   const { status, cluster } = state;
-  $('h-cluster').textContent = status.cluster_id;
+  // The cluster's name first, its id in parentheses (SPEC 6.2.5.3).
+  $('h-cluster').textContent = status.cluster_name ? `${status.cluster_name} (${short(status.cluster_id)})` : status.cluster_id;
+  $('h-cluster').title = status.cluster_id;
   $('h-version').textContent = status.document_version;
   $('h-node').textContent = nodeText(status.coordinator);
   $('h-node').title = status.coordinator;
@@ -548,7 +551,7 @@ function renderHeader() {
   $('h-build').textContent = status.ui_build || '?';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
   renderHealth();
-  document.title = `Distributed-JBOD ${short(status.cluster_id)}`;
+  document.title = `Distributed-JBOD ${status.cluster_name || short(status.cluster_id)}`;
 }
 // Warnings about unencrypted links, one line each, dismissable for the
 // session. Two links are judged: the cluster's own transport, which the

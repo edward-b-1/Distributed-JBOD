@@ -306,6 +306,16 @@ target/release/djbod cluster show                 # LABEL column
 target/release/djbod cluster drain --node-id nas1
 ```
 
+The cluster itself can be named too, at creation with `init-cluster
+--name home-nas` or later. The id stays what `--cluster` takes; the name
+appears beside it in `status`, `cluster show`, the web UI, and the node's
+log:
+
+```sh
+target/release/djbod cluster set-name home-nas
+target/release/djbod status                       # cluster   home-nas (2e79b3df-…)
+```
+
 **Moving a node.** The cluster document records where each node is
 reached. To change it while the node is still answering at its old
 address, tell the cluster:
@@ -513,7 +523,7 @@ The commands below are what `scripts/djbod-pki.sh` runs; use the script
 if you would rather not type them:
 
 ```sh
-scripts/djbod-pki.sh --dir ~/djbod-pki init-ca
+scripts/djbod-pki.sh --dir ~/djbod-pki init-ca --name home-nas   # the CA's subject; the cluster name suits
 scripts/djbod-pki.sh --dir ~/djbod-pki node nas1 10.0.0.1
 scripts/djbod-pki.sh --dir ~/djbod-pki client admin
 scripts/djbod-pki.sh --dir ~/djbod-pki list
