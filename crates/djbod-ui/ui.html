@@ -60,9 +60,19 @@
      where it means something, a live count; the selected one sits on a
      tinted background. On a narrow screen the rail becomes a row above
      the content. */
-  .frame { display: grid; grid-template-columns: 184px minmax(0, 1fr); flex: 1 1 auto; }
-  aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 8px; }
-  aside.rail nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; transition: grid-template-columns .15s; }
+  .frame.collapsed { grid-template-columns: 60px minmax(0, 1fr); }
+  aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 10px; display: flex; flex-direction: column; }
+  aside.rail nav { position: sticky; top: 48px; display: flex; flex-direction: column; gap: 2px; }
+  /* Collapsed: icons only, the label as a tooltip, the count hidden. */
+  .collapsed .rail .label, .collapsed .rail .count { display: none; }
+  .collapsed .rail button { justify-content: center; padding: 8px 0; }
+  #rail-toggle { margin-bottom: 6px; align-self: flex-end; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; color: var(--muted); cursor: pointer; font: inherit; }
+  #rail-toggle:hover { color: var(--text); background: var(--bg); }
+  #rail-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; transition: transform .15s; }
+  .collapsed #rail-toggle { align-self: center; }
+  .collapsed #rail-toggle svg { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .frame, #rail-toggle svg { transition: none; } }
   .rail button {
     display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
     background: none; border: 1px solid transparent; border-radius: 7px; padding: 8px 10px;
@@ -75,10 +85,13 @@
   .rail .count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
   .rail button[aria-selected="true"] .count { color: var(--text-2); }
   @media (max-width: 760px) {
-    .frame { grid-template-columns: 1fr; }
-    aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; }
+    .frame, .frame.collapsed { grid-template-columns: 1fr; }
+    aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; flex-direction: row; }
     aside.rail nav { position: static; flex-direction: row; }
     .rail button { width: auto; }
+    .collapsed .rail .label, .collapsed .rail .count { display: initial; }
+    .collapsed .rail button { justify-content: flex-start; padding: 8px 10px; }
+    #rail-toggle { display: none; }
     .rail .count { margin-left: 4px; }
   }
   main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
@@ -204,6 +217,7 @@
 <div id="banners"></div>
 <div class="frame">
 <aside class="rail">
+  <button id="rail-toggle" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
   <nav role="tablist" aria-label="Sections">
     <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview<span class="count" id="count-overview"></span></button>
     <button role="tab" data-tab="objects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count" id="count-objects"></span></button>
@@ -477,6 +491,27 @@ function logLine(log, text, cls) {
 
 // ------------------------------------------------------------ tabs
 
+// Wrap each rail label so the collapsed rail can hide it and show it as
+// a tooltip instead; the buttons' markup stays as it is.
+for (const button of document.querySelectorAll('.rail [role=tab]')) {
+  for (const node of [...button.childNodes]) {
+    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+      const span = el('span', { class: 'label', text: node.textContent.trim() });
+      button.replaceChild(span, node);
+      button.title = span.textContent;
+    }
+  }
+}
+const frame = document.querySelector('.frame');
+function setRail(collapsed) {
+  frame.classList.toggle('collapsed', collapsed);
+  const t = $('rail-toggle');
+  t.setAttribute('aria-label', collapsed ? 'Expand the sidebar' : 'Collapse the sidebar');
+  t.title = t.getAttribute('aria-label');
+  try { localStorage.setItem('rail-collapsed', collapsed ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+}
+$('rail-toggle').addEventListener('click', () => setRail(!frame.classList.contains('collapsed')));
+try { if (localStorage.getItem('rail-collapsed')) setRail(true); } catch (_) { /* fine */ }
 for (const button of document.querySelectorAll('nav [role=tab]')) {
   button.addEventListener('click', () => {
     for (const b of document.querySelectorAll('nav [role=tab]')) b.setAttribute('aria-selected', b === button);
