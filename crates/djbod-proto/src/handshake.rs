@@ -57,6 +57,13 @@ pub enum HelloError {
 }
 
 impl Hello {
+    /// A client that does not know the cluster id sends the nil UUID,
+    /// meaning "tell me" (19.1.5.1): the node answers with its own `Hello`
+    /// and closes. Never accepted from a node.
+    pub fn asks_cluster_id(&self) -> bool {
+        self.kind == PeerKind::Client && self.cluster_id.is_nil()
+    }
+
     /// The checks a node applies to a peer's `Hello` (19.1.5, 6.2.7).
     /// Clients are not held to the document version.
     pub fn check_against(
@@ -70,7 +77,7 @@ impl Hello {
                 ours: PROTOCOL_VERSION,
             });
         }
-        if self.cluster_id != our_cluster_id {
+        if self.cluster_id != our_cluster_id && !self.asks_cluster_id() {
             return Err(HelloError::ClusterId {
                 peer: self.cluster_id,
                 ours: our_cluster_id,

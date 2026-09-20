@@ -844,3 +844,64 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     assert!(ok);
     assert!(out.contains(&format!("cluster   {cluster}\n")), "{out}");
 }
+
+/// `get-cluster-id` needs only `--node` (SPEC 19.1.5.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_cluster_id_needs_no_cluster_id() {
+    let test = start_node(2, 1, 1).await;
+    let cluster = test.node.cluster_id().to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
+    assert!(ok, "{err}");
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+            .arg("--node")
+            .arg(test.addr.to_string())
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, out, err) = run(&["get-cluster-id"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), cluster, "the id alone, for $(...)");
+    let (ok, out, err) = run(&["--json", "get-cluster-id"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["cluster_id"], cluster);
+    assert_eq!(json["cluster_name"], "Home NAS");
+    assert_eq!(json["build"], djbod_node::BUILD);
+    // `identity` builds on it: who is at --node, in words.
+    let node_id = test.node.id().0.to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = run(&["identity"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("node      nas1 ({node_id}) at {}", test.addr)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("build     {}", djbod_node::BUILD)),
+        "{out}"
+    );
+    assert!(out.contains("transport plain"), "{out}");
+    let (ok, out, err) = run(&["--json", "identity"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["node_label"], "nas1");
+    assert_eq!(json["addresses"][0], test.addr.to_string());
+    assert_eq!(json["document_version"], test.node.document_version());
+    // Every other command still needs the id.
+    let (ok, _, err) = run(&["status"]);
+    assert!(!ok);
+    assert!(err.contains("no cluster id"), "{err}");
+}

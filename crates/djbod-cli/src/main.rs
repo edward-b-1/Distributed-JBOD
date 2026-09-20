@@ -101,6 +101,14 @@ fn connector(cli: &Cli) -> anyhow::Result<Connector> {
 enum Command {
     /// Show every device's state and free space.
     Status,
+    /// Ask a node which cluster it serves. Needs --node only; prints the
+    /// cluster id alone, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
+    /// --json adds the name and the node's build.
+    GetClusterId,
+    /// Who is at --node: the cluster's name and id, the node's label, id
+    /// and address, its build, the document version it holds, and the
+    /// transport. Needs --node only.
+    Identity,
     /// Store a file (or standard input with `-`) under a key.
     Put {
         key: String,
@@ -357,6 +365,87 @@ fn remote(e: ClientError) -> anyhow::Error {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
+        Command::GetClusterId => {
+            let node = cli
+                .node
+                .context("no node address: pass --node or set DJBOD_NODE")?;
+            // The nil id asks (SPEC 19.1.5.1); the node answers with its
+            // Hello and closes.
+            let conn = Connection::connect_with(
+                &connector(&cli)?,
+                node,
+                Connection::client_hello(Uuid::nil()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
+            .with_context(|| format!("connecting to {node}"))?;
+            let hello = conn.peer_hello();
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "cluster_id": hello.cluster_id,
+                        "cluster_name": hello.cluster_name,
+                        "node": hello.node_id,
+                        "build": hello.build,
+                    }))?
+                );
+            } else {
+                println!("{}", hello.cluster_id);
+            }
+        }
+        Command::Identity => {
+            let node = cli
+                .node
+                .context("no node address: pass --node or set DJBOD_NODE")?;
+            // Ask first (SPEC 19.1.5.1), then connect properly with the
+            // answer for what only the document knows: label and address.
+            let asked = Connection::connect_with(
+                &connector(&cli)?,
+                node,
+                Connection::client_hello(Uuid::nil()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
+            .with_context(|| format!("connecting to {node}"))?;
+            let hello = asked.peer_hello().clone();
+            let document =
+                djbod_node::membership::fetch_document(&connector(&cli)?, node, hello.cluster_id)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let entry = hello.node_id.and_then(|id| document.node(id).cloned());
+            let label = entry.as_ref().and_then(|n| n.label.clone());
+            let addresses: Vec<String> = entry.map(|n| n.addresses).unwrap_or_default();
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "cluster_id": hello.cluster_id,
+                        "cluster_name": document.name,
+                        "node": hello.node_id,
+                        "node_label": label,
+                        "addresses": addresses,
+                        "build": hello.build,
+                        "document_version": document.version,
+                        "transport": document.transport.to_string(),
+                    }))?
+                );
+            } else {
+                println!("cluster   {}", document.title());
+                let node_text = match (&label, hello.node_id) {
+                    (Some(label), Some(id)) => format!("{label} ({})", id.0),
+                    (None, Some(id)) => id.0.to_string(),
+                    (_, None) => "-".to_string(),
+                };
+                println!("node      {node_text} at {}", addresses.join(", "));
+                println!(
+                    "build     {}",
+                    hello.build.as_deref().unwrap_or("older, unreported")
+                );
+                println!("document  version {}", document.version);
+                println!("transport {}", document.transport);
+            }
+        }
         Command::Status => {
             let mut conn = connect(&cli).await?;
             match conn.request(Request::Status).await.map_err(remote)? {

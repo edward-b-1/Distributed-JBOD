@@ -247,6 +247,8 @@ pub enum ClusterDocumentError {
     DuplicateDevice(DeviceId),
     #[error("label {label:?} is not usable: {reason}")]
     BadLabel { label: String, reason: String },
+    #[error("the nil UUID is not a cluster id; it means \"unknown\" in a client's Hello (SPEC 19.1.5.1)")]
+    NilClusterId,
     #[error("cluster name {name:?} is not usable: {reason}")]
     BadClusterName { name: String, reason: String },
     #[error("label {label:?} is used by more than one device")]
@@ -259,6 +261,9 @@ impl ClusterDocument {
     /// The sanity checks of SPEC 6.2.4, applied whenever a document is
     /// created or received.
     pub fn validate(&self) -> Result<(), ClusterDocumentError> {
+        if self.cluster_id.is_nil() {
+            return Err(ClusterDocumentError::NilClusterId);
+        }
         Scheme::new(self.k, self.m)?;
         if !self.block_size.is_multiple_of(4096)
             || self.block_size < MIN_BLOCK_SIZE_BYTES

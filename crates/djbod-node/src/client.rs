@@ -79,7 +79,7 @@ impl Connection {
         write_message(&mut connection.writer, &Message::Hello(our_hello.clone())).await?;
         match read_message(&mut connection.reader).await? {
             Message::Hello(hello) => {
-                if hello.cluster_id != our_hello.cluster_id {
+                if hello.cluster_id != our_hello.cluster_id && !our_hello.asks_cluster_id() {
                     return Err(ClientError::Hello(HelloError::ClusterId {
                         peer: hello.cluster_id,
                         ours: our_hello.cluster_id,

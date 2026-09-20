@@ -23,6 +23,8 @@ pub enum ConnectionEnd {
     Wire(WireError),
     ProtocolViolation(String),
     HelloRefused(String),
+    /// A client asked which cluster this is and was told (19.1.5.1).
+    ClusterIdGiven,
 }
 
 impl From<WireError> for ConnectionEnd {
@@ -67,6 +69,9 @@ pub async fn serve(node: Arc<Node>, listener: TcpListener) {
                         let end = handle_connection(node, stream).await;
                         match end {
                             ConnectionEnd::PeerClosed => tracing::debug!("connection closed"),
+                            ConnectionEnd::ClusterIdGiven => {
+                                tracing::debug!("told a client the cluster id")
+                            }
                             other => tracing::info!(?other, "connection ended"),
                         }
                     }
@@ -169,6 +174,11 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
     }
     if let Err(e) = write_message(&mut writer, &Message::Hello(our_hello(&node))).await {
         return e.into();
+    }
+    if hello.asks_cluster_id() {
+        // Our Hello carried the id, name, and build; nothing else is
+        // served to a client that did not name the cluster.
+        return ConnectionEnd::ClusterIdGiven;
     }
     let span = tracing::Span::current();
     span.record("kind", tracing::field::debug(hello.kind));
