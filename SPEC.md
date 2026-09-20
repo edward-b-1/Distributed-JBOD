@@ -2055,6 +2055,7 @@ future credential.
 | 21.2 | Free-space query on every write versus a cached heartbeat. | 10.3 | Query per write. |
 | 21.3 | Where the maximum object size (9.3.1, 1 TiB) and the key length sanity limit (9.1.5, 16 KiB) live. | 6.2.2, 9.1.5 | Settled in milestone 4 (e): both are fields of the cluster document, defaulted when absent, changed with `djbod cluster set-limits`. |
 | 21.4 | Encrypting and authenticating the browser link of the web UI: a TLS reverse proxy, or TLS terminated by `djbod-ui` with a browser client certificate. | 20.3.3 | Native TLS with a required client certificate for a LAN with its own CA; a proxy where the UI is reachable more widely. Decide with users and permissions (22). |
+| 21.5 | The license. | README, `Cargo.toml` | Settled 20 September 2026: `AGPL-3.0-only`, copyright edward-b-1. A storage service with a web UI is exactly what the GPL's run-as-a-service gap leaves uncovered; the AGPL's network clause means a modified djbod offered to others must offer them its source. Permissive licenses (MIT, Apache-2.0) were not chosen for that reason. Every dependency is permissive and compatible; their notices ship in `THIRD-PARTY-NOTICES`, regenerated from `Cargo.lock` by `scripts/third-party-notices.py`. |
 
 ## 22. Deferred items
 
