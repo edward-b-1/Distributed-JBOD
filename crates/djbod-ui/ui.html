@@ -133,6 +133,7 @@
   .state.active::before { content: "\25CF  "; color: var(--good); }
   .state.draining::before { content: "\25D0  "; color: var(--warning); }
   .state.removed::before { content: "\25CB  "; color: var(--muted); }
+  .warn::before { content: "\26A0 "; }
   .ok::before { content: "\2713 "; color: var(--good); }
   /* The health card at the top of the Overview: a mark, a sentence, and
      the way to the fix, in the status colour; green when every node
@@ -684,9 +685,18 @@ function renderOverview() {
     const version = n.error
       ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
       : el('span', {}, el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` }),
+          n.version === doc.version ? null : el('div', { class: 'hint', text: `current is ${doc.version}; Sync brings it up` }),
           el('div', { class: 'hint' + (mixed ? ' bad' : ''), text: nodeBuild(n), title: 'the software build this node runs; djbod-node --version prints it' }));
+    // The node's devices by state, and the space free on those in use.
+    const own = devices.filter((d) => d.node === n.node);
+    const byState = ['active', 'draining', 'removed'].map((st) => [st, own.filter((d) => d.state === st).length]).filter(([, k]) => k > 0);
+    const draining = own.some((d) => d.state === 'draining');
+    const freeHere = own.filter((d) => d.state !== 'removed').reduce((a, d) => a + d.free_bytes, 0);
+    const deviceCell = el('td', { class: 'num' },
+      el('span', { class: draining ? 'warn' : '', text: byState.length ? byState.map(([st, k]) => `${k} ${st}`).join(', ') : 'none' }),
+      own.length ? el('div', { class: 'hint', text: `${human(freeHere)} free` }) : null);
     return el('tr', {}, el('td', {}, nodeCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
-      el('td', { class: 'num', text: deviceCount }),
+      deviceCell,
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
         el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
