@@ -47,7 +47,12 @@
   /* The page is a column that fills the window; the frame takes what the
      header (and any banners) leave, so the rail reaches the bottom on a
      short page without the page ever being taller than the window. */
-  body { min-height: 100vh; display: flex; flex-direction: column; }
+  /* The page is exactly the window's height and never scrolls itself:
+     the frame takes what the header and banners leave, and inside it the
+     content column scrolls when a tab is taller than the window. That is
+     what lets the Objects page size its key table by the space left. */
+  html, body { height: 100%; }
+  body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
   body > * { flex: none; }
   a { color: var(--accent); }
   header {
@@ -63,7 +68,7 @@
      where it means something, a live count; the selected one sits on a
      tinted background. On a narrow screen the rail becomes a row above
      the content. */
-  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; transition: grid-template-columns .15s; }
+  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; transition: grid-template-columns .15s; }
   .frame.collapsed { grid-template-columns: 60px minmax(0, 1fr); }
   aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 10px; display: flex; flex-direction: column; }
   aside.rail nav { position: sticky; top: 48px; display: flex; flex-direction: column; gap: 2px; }
@@ -107,7 +112,15 @@
     .rail-head { display: none; }
     .rail .count { margin-left: 4px; }
   }
-  main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
+  main { padding: 16px 20px 20px; min-width: 0; max-width: 1640px; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  aside.rail { overflow-y: auto; min-height: 0; }
+  main > section { flex: 1 1 auto; min-height: 0; }
+  /* The Objects section is a column that fills the window's height, so
+     its key table can scroll inside a box sized by what is left rather
+     than by a guess, and the paging row stays in view above it. */
+  #tab-objects { display: flex; flex-direction: column; }
+  #tab-objects .split { flex: 1 1 auto; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
+  #tab-objects .list-column { display: flex; flex-direction: column; min-height: 0; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
   [hidden] { display: none !important; }
@@ -198,6 +211,15 @@
      detail column and squeeze the list. Let both columns shrink; wide
      content then scrolls inside its own box. */
   .split > * { min-width: 0; }
+  /* The key table scrolls in its own box rather than with the window,
+     its header staying put; the box takes the height left under the
+     controls, and at least enough for a few rows. */
+  .scroll { flex: 1 1 auto; min-height: 8em; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .scroll table { border: none; border-radius: 0; }
+  .scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: 0 1px 0 var(--line); }
+  .paging { margin: 0 0 8px; flex: none; }
+  .paging #list-page { font-variant-numeric: tabular-nums; }
+  .paging .cursor { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
   .filter-spacer { display: none; }
   @media (min-width: 900px) { .filter-spacer { display: block; } }
   #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
@@ -304,12 +326,19 @@
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
     </div>
     <div class="filter-spacer"></div>
-    <div>
-      <table>
-        <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
-        <tbody id="objects"></tbody>
-      </table>
-      <div class="row"><button id="list-more" hidden>More</button><span class="hint" id="list-count"></span></div>
+    <div class="list-column">
+      <div class="row paging">
+        <button id="list-prev" title="the previous page">&#8249; Previous</button>
+        <span id="list-page" class="hint">Page 1</span>
+        <button id="list-next" title="the next page">Next &#8250;</button>
+        <span class="hint" id="list-count"></span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
+          <tbody id="objects"></tbody>
+        </table>
+      </div>
     </div>
     <div class="card" id="object-detail"><div class="empty">Select an object to see its record.</div></div>
   </div>
@@ -376,7 +405,11 @@
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false }, selectedKey: null, failures: {} };
+const PAGE_SIZE = 100;
+// The listing is paged through the node's own cursor (SPEC 15.2.1): page
+// n starts after the last key of page n-1, and `after` remembers each
+// page's starting key so Previous can go back the same way.
+const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false, page: 1, after: [null] }, selectedKey: null, failures: {} };
 
 // ------------------------------------------------------------ helpers
 
@@ -831,16 +864,21 @@ $('refresh').addEventListener('click', refresh);
 
 // ------------------------------------------------------------ objects
 
-async function list(startAfter) {
+async function list(page = 1) {
   const prefix = $('prefix').value;
+  const listing = state.listing;
+  if (prefix !== listing.prefix || page === 1) { listing.prefix = prefix; listing.after = [null]; page = 1; }
+  const startAfter = listing.after[page - 1];
+  if (page > 1 && startAfter === undefined) return;
   try {
-    const params = new URLSearchParams({ limit: '200' });
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
     if (prefix) params.set('prefix', prefix);
     if (startAfter) params.set('start_after', startAfter);
     const r = await api('/objects?' + params);
-    if (startAfter) state.listing.keys.push(...r.keys); else state.listing = { prefix, keys: r.keys, truncated: false };
-    state.listing.truncated = r.truncated;
+    listing.keys = r.keys; listing.truncated = r.truncated; listing.page = page;
+    if (r.truncated && r.keys.length) listing.after[page] = r.keys.at(-1).key;
     renderListing();
+    document.querySelector('.scroll').scrollTop = 0;
   } catch (e) { fail('list', e); }
 }
 function renderListing() {
@@ -850,14 +888,20 @@ function renderListing() {
     el('td', { class: 'key', text: k.key }),
     el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
   if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
-  $('count-objects').textContent = keys.length ? `${keys.length}${truncated ? '+' : ''}` : '';
-  $('list-more').hidden = !truncated;
-  $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
+  const { page, after } = state.listing;
+  $('count-objects').textContent = keys.length ? `${keys.length}${truncated || page > 1 ? '+' : ''}` : '';
+  $('list-prev').disabled = page <= 1;
+  $('list-next').disabled = !truncated;
+  $('list-page').textContent = `Page ${page}`;
+  const cursor = after[page - 1];
+  $('list-count').replaceChildren(`${keys.length} key(s) on this page${truncated ? ', more follow' : ''}`,
+    cursor ? el('span', {}, ', after ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
 }
 $('list-go').addEventListener('click', () => list());
 $('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
-$('list-more').addEventListener('click', () => list(state.listing.keys.at(-1)?.key));
+$('list-prev').addEventListener('click', () => list(state.listing.page - 1));
+$('list-next').addEventListener('click', () => list(state.listing.page + 1));
 
 async function select(key) {
   state.selectedKey = key;
