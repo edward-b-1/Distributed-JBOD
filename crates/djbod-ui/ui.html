@@ -133,27 +133,36 @@
   @media (prefers-reduced-motion: reduce) { .meter .fill.working { animation: none; } }
   .meter .pct { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 12px; width: 3.5em; text-align: right; }
   .state { white-space: nowrap; }
-  .state.active::before { content: "\25CF  "; color: var(--good); }
-  .state.draining::before { content: "\25D0  "; color: var(--warning); }
-  .state.removed::before { content: "\25CB  "; color: var(--muted); }
-  .warn::before { content: "\26A0 "; }
+  /* Status marks are shapes, not glyphs: a dot for pass or active, a
+     square for fail, a triangle for warning or draining, a ring for off
+     or removed. The colour says it and the shape backs it up for anyone
+     who cannot tell the colours apart; drawn in CSS so they match
+     everywhere and scale with the text. */
+  .ok::before, .bad::before, .warn::before, .state::before, .health .mark::before {
+    content: ""; display: inline-block; width: .7em; height: .7em; margin-right: .45em; vertical-align: -.02em;
+    background: var(--good); border-radius: 50%; flex: none;
+  }
+  .bad::before { background: var(--critical); border-radius: .12em; }
+  .warn::before, .state.draining::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .state.removed::before { background: none; border: .15em solid var(--muted); box-sizing: border-box; }
+  .state.active::before { background: var(--good); }
   .cell-check { white-space: nowrap; }
   .cell-check .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
-  .ok::before { content: "\2713 "; color: var(--good); }
   /* The health card at the top of the Overview: a mark, a sentence, and
      the way to the fix, in the status colour; green when every node
      answers and holds the current document, red when one does not, amber
      when only the builds differ. */
   .health { display: flex; align-items: center; gap: 14px; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
-  .health .mark { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-size: 20px; font-weight: 700; color: #fff; background: var(--good); flex: none; }
-  .health.bad .mark { background: var(--critical); }
-  .health.warn .mark { background: var(--warning); color: #3a2f16; }
+  /* The card's mark is the same shape, large, on a soft disc of its colour. */
+  .health .mark { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--good-soft); flex: none; font-size: 30px; }
+  .health .mark::before { margin: 0; }
+  .health.bad .mark { background: var(--critical-soft); } .health.bad .mark::before { background: var(--critical); border-radius: .12em; }
+  .health.warn .mark { background: var(--warning-soft); } .health.warn .mark::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
   .health .title { font-weight: 600; font-size: 15px; }
   .health .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
   .health .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
   .health .actions a { color: var(--accent); font-size: 13px; white-space: nowrap; cursor: pointer; text-decoration: none; }
   .health .actions a:hover { text-decoration: underline; }
-  .bad::before { content: "\2717 "; color: var(--critical); }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   button, input, select {
     font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line);
@@ -561,19 +570,19 @@ function renderHealth() {
   const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build || 'older'));
   const older = nodes.filter((n) => !n.error && !n.build);
   const names = (list) => list.map((n) => nodeText(n.node)).join(', ');
-  let cls = 'ok', mark = '\u2713', title, sub;
+  let cls = 'ok', title, sub;
   const actions = [];
   if (unreachable.length) {
-    cls = 'bad'; mark = '!';
+    cls = 'bad';
     title = `${unreachable.length} of ${nodes.length} node(s) unreachable`;
     sub = unreachable.map((n) => `${nodeText(n.node)} at ${n.address}: ${n.error}`).join('; ');
   } else if (behind.length) {
-    cls = 'bad'; mark = '!';
+    cls = 'bad';
     title = 'Cluster inconsistent';
     sub = `${names(behind)} ${behind.length === 1 ? 'holds' : 'hold'} document version ${behind.map((n) => n.version).join(', ')}; the current version is ${status.document_version}`;
     actions.push(['Sync documents \u2192', () => $('sync').click()]);
   } else if (builds.size > 1) {
-    cls = 'warn'; mark = '\u2261';
+    cls = 'warn';
     title = 'Consistent, builds differ';
     sub = older.length ? `${names(older)} ${older.length === 1 ? 'runs' : 'run'} an older build; upgrade before the next change to the cluster document` : `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
   } else {
@@ -581,7 +590,7 @@ function renderHealth() {
     sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
   }
   $('health').replaceChildren(el('div', { class: 'health ' + cls },
-    el('div', { class: 'mark', 'aria-hidden': 'true', text: mark }),
+    el('div', { class: 'mark', 'aria-hidden': 'true' }),
     el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
     el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
 }
