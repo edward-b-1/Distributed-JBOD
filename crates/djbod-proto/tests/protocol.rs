@@ -250,6 +250,27 @@ fn hello_checks_catch_wrong_cluster_wrong_version_and_stale_nodes() {
     };
     assert_eq!(good.check_against(ours, 7), Ok(()));
 
+    // The nil id asks for the cluster id (19.1.5.1): accepted from a
+    // client, refused from a node like any other mismatch.
+    let asking_client = Hello {
+        kind: PeerKind::Client,
+        node_id: None,
+        cluster_id: Uuid::nil(),
+        document_version: 0,
+        ..good.clone()
+    };
+    assert!(asking_client.asks_cluster_id());
+    assert_eq!(asking_client.check_against(ours, 7), Ok(()));
+    let asking_node = Hello {
+        cluster_id: Uuid::nil(),
+        ..good.clone()
+    };
+    assert!(!asking_node.asks_cluster_id());
+    assert!(matches!(
+        asking_node.check_against(ours, 7),
+        Err(HelloError::ClusterId { .. })
+    ));
+
     let wrong_cluster = Hello {
         cluster_id: Uuid::from_u128(0xC2),
         ..good.clone()

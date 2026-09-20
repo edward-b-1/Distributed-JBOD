@@ -257,8 +257,8 @@ coding work.
 ### 6.2 Cluster-wide (versioned document held by every node)
 
 6.2.1 [D] The document carries a monotonically increasing version number
-and a cluster id. Every node holds a copy. A joining node fetches it from a
-bootstrap peer.
+and a cluster id, never the nil UUID (19.1.5.1). Every node holds a copy. A
+joining node fetches it from a bootstrap peer.
 
 6.2.2 [D] Contents: an optional cluster `name` (6.2.5.3), `k`, `m`, shard block size `B`, the independence level
 (section 7; the only valid value in v1 is `device`), the headroom fraction,
@@ -356,11 +356,12 @@ The reasoning is in `docs/proposals/cluster-name.md`.
 and a client that knows only the name has nothing to put in its `Hello`,
 since a node refuses a mismatched id before saying anything. The name is
 display text and this is not a shortcoming, but one option is recorded
-should it be wanted: a client `Hello` may carry no cluster id, meaning
-"tell me"; a node accepts that from clients only, never from nodes
-(6.2.7); the node's own `Hello` gives its id and name, and the client
-closes the connection itself if the name is not the one it expected. The
-check of 19.1.5 then rests on the name being unique among the operator's
+should it be wanted, and its first half is now built as 19.1.5.1: a
+client `Hello` may carry the nil cluster id, meaning "tell me"; a node
+accepts that from clients only, never from nodes (6.2.7), and its own
+`Hello` gives its id and name. What remains open is letting the client
+continue on such a connection after checking the name itself, closing if
+it is not the one expected. The check of 19.1.5 then rests on the name being unique among the operator's
 clusters rather than on the id, and names would have to be
 distinguishable from a UUID so `--cluster` could take either. This
 concerns only the check, not how a client finds a node, which stays
@@ -1727,6 +1728,20 @@ unsupported, the cluster id differs, or a node peer's document version
 differs (6.2.7), with an error naming which. This catches a node or client
 pointed at the wrong cluster and a node running stale software or
 configuration. It authenticates nothing; see 6.1.2 and 19.1.6.
+
+19.1.5.1 [D] **Asking for the cluster id.** A client that does not know
+the id sends the nil UUID as its cluster id, meaning "tell me". A node
+accepts that from a client only, never from a node, answers with its own
+`Hello`, which carries the id, the cluster's name if it has one, and its
+build, and then closes the connection; nothing else is served to a
+client that did not name the cluster. Every other command still requires
+the id, so a client pointed at the wrong cluster still fails before it
+can act. `djbod get-cluster-id --node <address>` is the command, needing
+no `--cluster`; it prints the id alone so that `export
+DJBOD_CLUSTER=$(djbod get-cluster-id ...)` works, and with `--json` the
+name and build too. A node from before this item refuses the nil id as a
+mismatch, and its refusal names the cluster it serves, so the id is
+learned either way. The nil UUID is therefore never a cluster id (6.2.1).
 
 19.1.6 [D] **TLS.** Optional; when enabled it authenticates nodes to each
 other, authenticates clients, and encrypts every connection. TLS wraps

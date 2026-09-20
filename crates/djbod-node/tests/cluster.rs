@@ -1862,3 +1862,62 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
     assert_eq!(document.name, None);
     assert_eq!(document.title(), cluster.to_string());
 }
+
+/// SPEC 19.1.5.1: a client that sends the nil cluster id is told the id,
+/// name, and build in the node's Hello, then the connection is closed; a
+/// node sending the nil id is refused like any mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_client_can_ask_which_cluster_a_node_serves() {
+    let a = first_node(1, 1, 0).await;
+    let cluster = a.node.cluster_id();
+    membership::set_cluster_name(
+        &Connector::plain(),
+        a.addr,
+        cluster,
+        Some("Home NAS".to_string()),
+    )
+    .await
+    .expect("name");
+
+    let mut asking = Connection::connect(a.addr, Connection::client_hello(Uuid::nil()))
+        .await
+        .expect("asking connects");
+    assert_eq!(asking.peer_hello().cluster_id, cluster);
+    assert_eq!(
+        asking.peer_hello().cluster_name.as_deref(),
+        Some("Home NAS")
+    );
+    assert_eq!(
+        asking.peer_hello().build.as_deref(),
+        Some(djbod_node::BUILD)
+    );
+    assert_eq!(asking.peer_hello().node_id, Some(a.node.id()));
+    // Nothing else is served on that connection.
+    assert!(
+        matches!(
+            asking.request(Request::Status).await,
+            Err(ClientError::Wire(_))
+        ),
+        "the node closes after answering"
+    );
+
+    let asking_node = Hello {
+        protocol_version: PROTOCOL_VERSION,
+        kind: PeerKind::Node,
+        node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
+        cluster_id: Uuid::nil(),
+        document_version: a.node.document_version(),
+        build: None,
+        cluster_name: None,
+    };
+    match Connection::connect(a.addr, asking_node).await {
+        Err(ClientError::Remote(detail)) => {
+            assert!(
+                detail.message.contains("belongs to cluster"),
+                "{}",
+                detail.message
+            )
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+}

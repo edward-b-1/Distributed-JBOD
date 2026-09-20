@@ -101,6 +101,10 @@ fn connector(cli: &Cli) -> anyhow::Result<Connector> {
 enum Command {
     /// Show every device's state and free space.
     Status,
+    /// Ask a node which cluster it serves. Needs --node only; prints the
+    /// cluster id, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
+    /// --json adds the name and the node's build.
+    GetClusterId,
     /// Store a file (or standard input with `-`) under a key.
     Put {
         key: String,
@@ -357,6 +361,35 @@ fn remote(e: ClientError) -> anyhow::Error {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match &cli.command {
+        Command::GetClusterId => {
+            let node = cli
+                .node
+                .context("no node address: pass --node or set DJBOD_NODE")?;
+            // The nil id asks (SPEC 19.1.5.1); the node answers with its
+            // Hello and closes.
+            let conn = Connection::connect_with(
+                &connector(&cli)?,
+                node,
+                Connection::client_hello(Uuid::nil()),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", describe_error(&e)))
+            .with_context(|| format!("connecting to {node}"))?;
+            let hello = conn.peer_hello();
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "cluster_id": hello.cluster_id,
+                        "cluster_name": hello.cluster_name,
+                        "node": hello.node_id,
+                        "build": hello.build,
+                    }))?
+                );
+            } else {
+                println!("{}", hello.cluster_id);
+            }
+        }
         Command::Status => {
             let mut conn = connect(&cli).await?;
             match conn.request(Request::Status).await.map_err(remote)? {

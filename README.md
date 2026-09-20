@@ -49,12 +49,11 @@ target/release/djbod-node run --config /tmp/djbod/node.toml
 ```
 
 `--k 3 --m 1` splits every object into three data shards and one parity
-shard, so any one of the four devices may be lost. In another terminal,
-with the cluster id `init-cluster` printed:
+shard, so any one of the four devices may be lost. In another terminal:
 
 ```sh
 export DJBOD_NODE=127.0.0.1:5263
-export DJBOD_CLUSTER=<the cluster id>
+export DJBOD_CLUSTER=$(target/release/djbod get-cluster-id)   # or paste what init-cluster printed
 
 target/release/djbod put photos/cat.jpg cat.jpg --content-type image/jpeg
 target/release/djbod list --prefix photos/
@@ -209,7 +208,8 @@ djbod-node init-cluster --config /etc/djbod/node.toml --name home-nas --k 4 --m 
 djbod-node run --config /etc/djbod/node.toml
 ```
 
-`init-cluster` prints the cluster id; keep it. `4+2` puts six shards of
+`init-cluster` prints the cluster id, and any running node repeats it to
+`djbod get-cluster-id --node <address>`. `4+2` puts six shards of
 every object on six different disks and survives any two of them
 failing, for 50% overhead; `3+1` costs 33% and survives one. Nine disks
 is comfortably more than the six a `4+2` write needs, and the choice can
@@ -236,7 +236,7 @@ request, so point the client at whichever is nearest:
 
 ```sh
 export DJBOD_NODE=10.0.0.1:5263
-export DJBOD_CLUSTER=<the cluster id>
+export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you; --json adds the name
 djbod cluster show          # three nodes, one document version, each node's build
 djbod status                # nine disks, their labels, state, and free space
 djbod put backups/2026-09.tar backup.tar
