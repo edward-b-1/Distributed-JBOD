@@ -226,23 +226,23 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
     Router::new()
         .route("/", get(page))
         .route(
-            "/brand/lockup.svg",
+            "/brand/{version}/lockup.svg",
             get(|| async { asset(LOCKUP, "image/svg+xml") }),
         )
         .route(
-            "/brand/lockup-dark.svg",
+            "/brand/{version}/lockup-dark.svg",
             get(|| async { asset(LOCKUP_DARK, "image/svg+xml") }),
         )
         .route(
-            "/brand/favicon.svg",
+            "/brand/{version}/favicon.svg",
             get(|| async { asset(FAVICON_SVG, "image/svg+xml") }),
         )
         .route(
-            "/brand/favicon-32.png",
+            "/brand/{version}/favicon-32.png",
             get(|| async { asset(FAVICON_PNG, "image/png") }),
         )
         .route(
-            "/brand/appicon-256.png",
+            "/brand/{version}/appicon-256.png",
             get(|| async { asset(APP_ICON, "image/png") }),
         )
         .nest("/api", api)
@@ -350,8 +350,15 @@ fn refuse(code: &str, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// The page, with every brand asset path given this build's id as a
+/// segment, so a browser may cache the assets indefinitely and still
+/// see a new logo the moment a new build serves the page.
+static PAGE_FOR_THIS_BUILD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    PAGE.replace("\"/brand/", &format!("\"/brand/{}/", djbod_node::BUILD))
+});
+
 async fn page() -> Html<&'static str> {
-    Html(PAGE)
+    Html(PAGE_FOR_THIS_BUILD.as_str())
 }
 
 fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
@@ -360,10 +367,9 @@ fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
             (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (
                 header::CACHE_CONTROL,
-                // Revalidated on every load: the assets are small, and a
-                // day's cache would keep an old logo on screen after a
-                // rebuild served a new one at the same path.
-                HeaderValue::from_static("no-cache"),
+                // The path carries the build id, so the content at a given
+                // path never changes and may be cached for good.
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
             ),
         ],
         bytes,

@@ -1196,28 +1196,40 @@ async fn node_labels_are_set_shown_and_cleared() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_brand_assets_are_served_for_the_tab_and_the_header() {
     let test = start_node(4, 3, 1).await;
-    for (path, kind, magic) in [
-        ("/brand/lockup.svg", "image/svg+xml", &b"<?xml"[..]),
-        ("/brand/lockup-dark.svg", "image/svg+xml", &b"<?xml"[..]),
-        ("/brand/favicon.svg", "image/svg+xml", &b"<"[..]),
-        ("/brand/favicon-32.png", "image/png", &b"\x89PNG"[..]),
-        ("/brand/appicon-256.png", "image/png", &b"\x89PNG"[..]),
+    let build = djbod_node::BUILD;
+    for (name, kind, magic) in [
+        ("lockup.svg", "image/svg+xml", &b"<?xml"[..]),
+        ("lockup-dark.svg", "image/svg+xml", &b"<?xml"[..]),
+        ("favicon.svg", "image/svg+xml", &b"<"[..]),
+        ("favicon-32.png", "image/png", &b"\x89PNG"[..]),
+        ("appicon-256.png", "image/png", &b"\x89PNG"[..]),
     ] {
+        let path = format!("/brand/{build}/{name}");
         let (status, headers, body) = call(
             &test,
-            Request::get(path).body(Body::empty()).expect("request"),
+            Request::get(&path).body(Body::empty()).expect("request"),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{path}");
         assert_eq!(headers[header::CONTENT_TYPE], kind, "{path}");
         assert!(body.starts_with(magic), "{path} has the wrong content");
+        assert!(headers[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable"));
     }
+    // The page names the assets under this build's id, so a browser that
+    // cached an older build's logo fetches the new one.
     let (_, _, page) = call(
         &test,
         Request::get("/").body(Body::empty()).expect("request"),
     )
     .await;
     let text = String::from_utf8_lossy(&page);
-    assert!(text.contains(r#"<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">"#));
-    assert!(text.contains(r#"src="/brand/lockup.svg""#));
+    assert!(
+        text.contains(&format!(r#"href="/brand/{build}/favicon.svg""#)),
+        "{build}"
+    );
+    assert!(text.contains(&format!(r#"src="/brand/{build}/lockup.svg""#)));
+    assert!(!text.contains(r#""/brand/lockup.svg""#));
 }
