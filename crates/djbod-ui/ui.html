@@ -72,12 +72,12 @@
   .collapsed .rail button { justify-content: center; padding: 8px 0; }
   /* The rail's head: a small title at the left, the collapse toggle at
      the right; collapsed, only the toggle, centred. */
-  /* The head spans the rail edge to edge (undoing the rail's side padding) so
-     the toggle sits flush against the rail's right border. */
-  .rail-head { display: flex; align-items: center; margin: 0 -10px 6px; padding-left: 20px; }
+  /* The head keeps the rail's side padding, so the toggle sits the same
+     distance from the rail's right border as the section buttons do. */
+  .rail-head { display: flex; align-items: center; margin: 0 0 6px; padding-left: 10px; }
   #rail-toggle { margin-left: auto; }
   .rail-title { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
-  .collapsed .rail-head { justify-content: center; padding-left: 0; margin: 0 0 6px; }
+  .collapsed .rail-head { justify-content: center; padding-left: 0; }
   .collapsed #rail-toggle { margin-left: 0; }
   /* Not a section button: it keeps its own width rather than the rail
      buttons' full width, or its icon would sit at the row's left. */
