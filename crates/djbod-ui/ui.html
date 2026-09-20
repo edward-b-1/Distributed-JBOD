@@ -710,7 +710,7 @@ function renderOverview() {
     return el('tr', {},
       el('td', {}, nodeCell(n.node)),
       el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
-      el('td', {}, reachable ? check('ok', 'answers') : check('bad', 'unreachable', n.error)),
+      el('td', {}, reachable ? check('ok', 'ping ok') : check('bad', 'ping failed', n.error)),
       el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : atVersion ? check('ok', `version ${n.version}`) : check('bad', `version ${n.version}`, `current is ${doc.version}; Sync brings it up`)),
       el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : n.build ? check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null) : check('warn', 'older, unreported', 'from before builds were sent; upgrade')),
       el('td', {}, check(transport === 'tls' ? 'ok' : 'warn', transport === 'tls' ? 'required' : transport === 'tls-optional' ? 'optional' : 'plain', transport === 'tls' ? null : 'clients may connect without TLS')),
