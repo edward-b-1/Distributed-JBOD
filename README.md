@@ -1,4 +1,7 @@
-<img src="crates/djbod-ui/icon/djbod-256.png" alt="" width="96" align="right">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/djbod-lockup-horizontal-onDark.svg">
+  <img src="docs/brand/djbod-lockup-horizontal.svg" alt="Distributed JBOD" width="300">
+</picture>
 
 # Distributed-JBOD
 
