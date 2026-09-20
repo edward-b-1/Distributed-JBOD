@@ -80,10 +80,16 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
-/// The icon, for the browser tab and the header: dark ink on transparent,
-/// and a variant with the ink inverted for a dark surface.
-pub const ICON: &[u8] = include_bytes!("../icon/djbod-256.png");
-pub const ICON_DARK: &[u8] = include_bytes!("../icon/djbod-256-dark.png");
+/// The brand assets the page uses, from docs/brand (see its README):
+/// the horizontal lockup for the header in its light and dark forms,
+/// the 2x2 favicon reduction for the tab with a PNG fallback, and the
+/// app icon for home screens.
+pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-horizontal.svg");
+pub const LOCKUP_DARK: &[u8] =
+    include_bytes!("../../../docs/brand/djbod-lockup-horizontal-onDark.svg");
+pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/djbod-favicon.svg");
+pub const FAVICON_PNG: &[u8] = include_bytes!("../../../docs/brand/png/djbod-favicon-32.png");
+pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/png/djbod-appicon-256.png");
 
 /// A read of an object that the node stopped because of damage, kept so
 /// the page can say why a download failed after the browser has reported
@@ -219,8 +225,26 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
     });
     Router::new()
         .route("/", get(page))
-        .route("/icon.png", get(|| async { icon(ICON) }))
-        .route("/icon-dark.png", get(|| async { icon(ICON_DARK) }))
+        .route(
+            "/brand/lockup.svg",
+            get(|| async { asset(LOCKUP, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/lockup-dark.svg",
+            get(|| async { asset(LOCKUP_DARK, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/favicon.svg",
+            get(|| async { asset(FAVICON_SVG, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/favicon-32.png",
+            get(|| async { asset(FAVICON_PNG, "image/png") }),
+        )
+        .route(
+            "/brand/appicon-256.png",
+            get(|| async { asset(APP_ICON, "image/png") }),
+        )
         .nest("/api", api)
         .layer(middleware::from_fn_with_state(
             app.clone(),
@@ -330,10 +354,10 @@ async fn page() -> Html<&'static str> {
     Html(PAGE)
 }
 
-fn icon(bytes: &'static [u8]) -> Response {
+fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
     (
         [
-            (header::CONTENT_TYPE, HeaderValue::from_static("image/png")),
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("public, max-age=86400"),

@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Distributed-JBOD</title>
-<link rel="icon" type="image/png" sizes="256x256" href="/icon.png">
+<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
+<link rel="alternate icon" type="image/png" sizes="32x32" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" sizes="256x256" href="/brand/appicon-256.png">
 <style>
   :root {
     --bg: #f5f5f3;
@@ -52,8 +54,9 @@
     display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
     padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
   }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; display: flex; align-items: center; gap: 9px; }
-  header h1 img { width: 26px; height: 26px; display: block; }
+  header h1 { margin: 0; display: flex; align-items: center; }
+  /* The horizontal lockup, at the height of a line of the header. */
+  header h1 img { height: 34px; width: auto; display: block; }
   header .meta { color: var(--text-2); font-size: 13px; }
   header .meta code { font-family: var(--mono); }
   /* Navigation is a left rail: one button per section with an icon and,
@@ -211,7 +214,7 @@
 </head>
 <body>
 <header>
-  <h1><picture><source srcset="/icon-dark.png" media="(prefers-color-scheme: dark)"><img src="/icon.png" alt="" width="26" height="26"></picture>Distributed-JBOD</h1>
+  <h1><picture><source srcset="/brand/lockup-dark.svg" media="(prefers-color-scheme: dark)"><img src="/brand/lockup.svg" alt="Distributed JBOD" width="80" height="34"></picture></h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
