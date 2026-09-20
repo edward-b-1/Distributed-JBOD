@@ -115,6 +115,11 @@
   .state.active::before { content: "\25CF  "; color: var(--good); }
   .state.draining::before { content: "\25D0  "; color: var(--warning); }
   .state.removed::before { content: "\25CB  "; color: var(--muted); }
+  /* The health checks: one row per node, one cell per check, each cell
+     saying pass or fail and the value it judged. */
+  #checks td.check { white-space: nowrap; }
+  #checks .warn::before { content: "\26A0 "; }
+  #checks .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
   .ok::before { content: "\2713 "; color: var(--good); }
   .bad::before { content: "\2717 "; color: var(--critical); }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -206,8 +211,16 @@
     <tbody id="nodes"></tbody>
   </table>
   <div class="row">
+    <button id="checks-toggle" aria-expanded="false" aria-controls="checks">Show health checks</button>
     <button id="sync">Sync documents</button>
     <span class="hint">Brings every reachable node up to the highest document version any holds. Removing a dead node needs the command line: <code>djbod cluster remove-node &lt;id&gt; --force</code>.</span>
+  </div>
+  <div id="checks" hidden>
+    <table>
+      <thead><tr><th>Node</th><th>Reachable</th><th>Document</th><th>Build</th><th>TLS</th><th>Devices</th><th class="num">Free</th><th>Addresses</th></tr></thead>
+      <tbody id="checks-body"></tbody>
+    </table>
+    <p class="hint" id="checks-summary"></p>
   </div>
   <h2>Devices</h2>
   <table>
@@ -547,6 +560,47 @@ function nodeBuild(n) {
 function nodeBuilds(cluster) {
   return new Set(cluster.nodes.filter((n) => !n.error).map(nodeBuild));
 }
+// The drill-down under the Nodes table: every check behind the health
+// card, one row per node, each cell a pass or fail with the value it
+// judged, so the reason for a red or amber card is one glance away.
+function renderChecks() {
+  const { status, cluster } = state;
+  const doc = cluster.document;
+  const latestBuild = status.ui_build;
+  const cell = (ok, text, why, warn) => el('td', { class: 'check' }, el('span', { class: ok ? 'ok' : warn ? 'warn' : 'bad', text }), why ? el('span', { class: 'why', text: why }) : null);
+  let failing = 0, warning = 0;
+  $('checks-body').replaceChildren(...cluster.nodes.map((n) => {
+    const entry = doc.nodes.find((d) => d.id === n.node) || {};
+    const devices = status.devices.filter((d) => d.node === n.node);
+    const active = devices.filter((d) => d.state === 'active').length, draining = devices.filter((d) => d.state === 'draining').length, removed = devices.filter((d) => d.state === 'removed').length;
+    const free = devices.filter((d) => d.state !== 'removed').reduce((a, d) => a + d.free_bytes, 0);
+    const reachable = !n.error;
+    const atVersion = reachable && n.version === status.document_version;
+    const buildOk = reachable && !!n.build && (!latestBuild || n.build === latestBuild);
+    const buildWarn = reachable && !buildOk;
+    if (!reachable || (reachable && !atVersion)) failing++;
+    if (buildWarn) warning++;
+    if (reachable && draining) warning++;
+    return el('tr', {},
+      el('td', {}, nodeCell(n.node)),
+      cell(reachable, reachable ? 'answers' : 'unreachable', reachable ? null : n.error),
+      reachable ? cell(atVersion, `version ${n.version}`, atVersion ? null : `current is ${status.document_version}; Sync brings it up`) : cell(false, 'unknown', 'not reachable'),
+      reachable ? cell(buildOk, n.build || 'older, unreported', buildOk ? null : (n.build ? `the UI runs ${latestBuild}` : 'from before builds were sent; upgrade'), true) : cell(false, 'unknown', 'not reachable'),
+      cell(true, status.transport === 'tls' ? 'required' : status.transport === 'tls-optional' ? 'optional' : 'plain', null, status.transport !== 'tls'),
+      cell(!draining, `${active} active${draining ? `, ${draining} draining` : ''}${removed ? `, ${removed} removed` : ''}`, draining ? 'a drain is in progress or pending' : null, true),
+      el('td', { class: 'num', text: human(free) }),
+      el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }));
+  }));
+  $('checks-summary').textContent = failing ? `${failing} check(s) failing` : warning ? `all checks pass; ${warning} warning(s)` : 'all checks pass';
+}
+$('checks-toggle').addEventListener('click', () => {
+  const open = $('checks').hidden;
+  $('checks').hidden = !open;
+  $('checks-toggle').textContent = open ? 'Hide health checks' : 'Show health checks';
+  $('checks-toggle').setAttribute('aria-expanded', String(open));
+  try { sessionStorage.setItem('checks-open', open ? '1' : ''); } catch (_) { /* fine */ }
+});
+try { if (sessionStorage.getItem('checks-open')) { $('checks').hidden = false; $('checks-toggle').textContent = 'Hide health checks'; $('checks-toggle').setAttribute('aria-expanded', 'true'); } } catch (_) { /* fine */ }
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
 }
@@ -577,6 +631,7 @@ function renderOverview() {
   $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
     el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));
 
+  renderChecks();
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
     const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
     const mixed = nodeBuilds(cluster).size > 1;
