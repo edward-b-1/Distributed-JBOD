@@ -2084,13 +2084,24 @@ one body chunk at a time (3.6); errors carry the node's detail of 16.2.
 A blocking facade runs the same client on a runtime of its own, for
 programs and language bindings that call from ordinary threads.
 
-20.8.1 [P] **Bindings.** Other languages wrap the Rust client rather than
+20.8.1 [D] **Bindings.** Other languages wrap the Rust client rather than
 implementing the protocol again, so the awkward parts, paging, error
-detail, TLS, and failover, exist once. Python first, through PyO3, as a
-blocking module built with maturin; a C header follows if a language
-without a Rust binding route needs one. The protocol of 19.1 remains the
-contract, so a native client in any language stays possible where
-installing a compiled module is not.
+detail, TLS, and failover, exist once. Python is built: the `djbod`
+package (`crates/djbod-python`, C.2) wraps the blocking client with PyO3
+as an `abi3` extension module built with maturin, one wheel for every
+Python from 3.10. `djbod.Client(nodes, cluster=None, tls_ca=..., ...)`
+takes the same inputs as the `djbod` command; every method blocks and
+releases the interpreter lock while it waits; `put_file` and
+`get_to_file` stream. Errors are Python exceptions defined in Python:
+`djbod.NodeError` carries the node's code and detail of 16.2 as `djbod
+--json` spells them, `djbod.NotFound` is its subclass for the common
+case, and `djbod.Unreachable` lists every address tried. Structured
+results the node reports, the device list, a repair report, the cluster
+document, are plain dicts with the JSON field names, so what the
+command-line tool prints and what Python sees are the same. A C header
+follows if a language without a Rust binding route needs one. The
+protocol of 19.1 remains the contract, so a native client in any
+language stays possible where installing a compiled module is not.
 
 ## 21. Open questions
 
@@ -2294,6 +2305,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3, data frames, stream ends. Runtime-agnostic (bytes in, messages out). Shared by node, client, and tools. |
 | `djbod-client` | The client library: frames over tokio streams, the client side of TLS, and one connection to a node with the `Hello` exchange, requests, and the streaming operations. What the node, the CLI, the web UI, and any other client are built on; the node-to-node shard transfers are here too, since they are the same conversation. |
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. Depends on `djbod-client` for reaching other nodes. |
+| `djbod-python` | The `djbod` Python package (20.8.1): the blocking client wrapped with PyO3, built with maturin. In the workspace so it compiles with everything else; its tests are Python, run by `scripts/python-tests.sh`. |
 | `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |
 | `djbod-ui` | The administration web UI of 20.3: an HTTP server serving one embedded page and a JSON API under `/api`, each call of which is one native-protocol operation or one membership procedure sent to a node as the `djbod` client would send it. |

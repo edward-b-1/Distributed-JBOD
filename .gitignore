@@ -1,2 +1,6 @@
 /target/
 /target-rust-analyzer/
+.venv/
+__pycache__/
+*.pyc
+*.so

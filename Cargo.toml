@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-client", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui"]
+members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-client", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui", "crates/djbod-python"]
 
 [workspace.package]
 version = "0.1.0"
