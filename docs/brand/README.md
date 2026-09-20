@@ -74,3 +74,7 @@ With ImageMagick installed:
 ```bash
 magick png/djbod-favicon-16.png png/djbod-favicon-24.png png/djbod-favicon-32.png png/djbod-icon-48.png favicon.ico
 ```
+
+## Alternative directions
+
+Six earlier exploratory concepts are kept in [`concepts/`](concepts/README.md) for reference.

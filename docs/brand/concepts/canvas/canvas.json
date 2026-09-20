@@ -1,0 +1,27 @@
+{
+  "v": 3,
+  "createdOnFiles": {"v": 1, "at": "2026-09-20T12:00:00Z"},
+  "title": "Distributed-JBOD Logo Concepts",
+  "launch": {"view": "canvas"},
+  "pages": [],
+  "boards": {
+    "Concept01-MosaicPool.dc.html": {"x": 0, "y": 0, "w": 880, "h": 560, "title": "01 Mosaic Pool"},
+    "Concept02-Lattice.dc.html": {"x": 960, "y": 0, "w": 880, "h": 560, "title": "02 Lattice"},
+    "Concept03-StripeD.dc.html": {"x": 1920, "y": 0, "w": 880, "h": 560, "title": "03 Stripe D"},
+    "Concept04-Bunch.dc.html": {"x": 0, "y": 680, "w": 880, "h": 560, "title": "04 Bunch of Disks"},
+    "Concept05-BlockHyphen.dc.html": {"x": 960, "y": 680, "w": 880, "h": 560, "title": "05 Block Hyphen"},
+    "Concept06-ErasureD.dc.html": {"x": 1920, "y": 680, "w": 880, "h": 560, "title": "06 Erasure D"}
+  },
+  "order": [
+    "Concept01-MosaicPool.dc.html",
+    "Concept02-Lattice.dc.html",
+    "Concept03-StripeD.dc.html",
+    "Concept04-Bunch.dc.html",
+    "Concept05-BlockHyphen.dc.html",
+    "Concept06-ErasureD.dc.html"
+  ],
+  "notes": {
+    "title": {"x": 0, "y": -300, "text": "Distributed-JBOD — six logo directions", "kind": "title1", "maxW": 2800}
+  },
+  "designSystems": []
+}
