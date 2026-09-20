@@ -80,16 +80,21 @@ use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response 
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
-/// The brand assets the page uses, from docs/brand (see its README):
-/// the one-line unhyphenated lockup for the header in its light and dark forms,
+/// The brand assets the page uses, from docs/brand (see its README). The
+/// parity slabs are yellow throughout: the header's lockup is the
+/// status-light kit, whose slabs glow like lit indicators, and the tab
+/// and app icons are the plain yellow kit, which reads better small.
+/// The one-line unhyphenated lockup for the header in its light and dark forms,
 /// the 2x2 favicon reduction for the tab with a PNG fallback, and the
 /// app icon for home screens.
-pub const LOCKUP: &[u8] = include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen.svg");
+pub const LOCKUP: &[u8] =
+    include_bytes!("../../../docs/brand/status-light/djbod-lockup-inline-nohyphen.svg");
 pub const LOCKUP_DARK: &[u8] =
-    include_bytes!("../../../docs/brand/djbod-lockup-inline-nohyphen-onDark.svg");
-pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/djbod-favicon.svg");
-pub const FAVICON_PNG: &[u8] = include_bytes!("../../../docs/brand/png/djbod-favicon-32.png");
-pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/png/djbod-appicon-256.png");
+    include_bytes!("../../../docs/brand/status-light/djbod-lockup-inline-nohyphen-onDark.svg");
+pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/yellow/djbod-favicon.svg");
+pub const FAVICON_PNG: &[u8] =
+    include_bytes!("../../../docs/brand/yellow/png/djbod-favicon-32.png");
+pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/yellow/png/djbod-appicon-256.png");
 
 /// A read of an object that the node stopped because of damage, kept so
 /// the page can say why a download failed after the browser has reported
