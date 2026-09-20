@@ -92,6 +92,9 @@
   .tile .label { color: var(--text-2); font-size: 12px; }
   .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
   .tile .sub { color: var(--muted); font-size: 12px; }
+  .tile.link { cursor: pointer; }
+  .tile.link:hover { border-color: var(--accent); }
+  .tile.link .label::after { content: " \2192"; color: var(--accent); }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -616,8 +619,8 @@ function renderOverview() {
   const unreachable = cluster.nodes.filter((n) => n.error).length;
   const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
   const tiles = [
-    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering'],
-    ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed`],
+    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
+    ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed`, 'nodes'],
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
     ['Scheme', `${doc.k}+${doc.m}`, `${human(doc.block_size)} blocks, any ${doc.m} of ${doc.k + doc.m} may fail`],
@@ -630,8 +633,15 @@ function renderOverview() {
   $('count-overview').textContent = `${counts.active + counts.draining} dev`;
   const damaged = Object.keys(state.failures || {}).length;
   $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
-  $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
-    el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));
+  // A tile with a fourth element names the tab that holds its detail and
+  // opens it on click, when that tab exists.
+  $('tiles').replaceChildren(...tiles.map(([label, value, sub, tab]) => {
+    const target = tab && document.querySelector(`[data-tab="${tab}"]`);
+    return el('div', { class: 'tile' + (target ? ' link' : ''), role: target ? 'link' : null, tabindex: target ? '0' : null,
+      onclick: target ? () => target.click() : null,
+      onkeydown: target ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); target.click(); } } : null },
+      el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }));
+  }));
 
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
     const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
