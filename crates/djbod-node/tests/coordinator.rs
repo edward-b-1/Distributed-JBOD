@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use djbod_client::admin;
 use djbod_client::connection::{ClientError, Connection};
-use djbod_client::membership as admin;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
 use djbod_core::erasure::ShardIndex;
@@ -1139,7 +1139,7 @@ async fn set_state_changes_placement_and_nothing_else() {
     )
     .await
     {
-        Err(admin::MembershipError::UnknownDevice(_)) => {}
+        Err(admin::AdminError::UnknownDevice(_)) => {}
         other => panic!("expected UnknownDevice, got {other:?}"),
     }
 }

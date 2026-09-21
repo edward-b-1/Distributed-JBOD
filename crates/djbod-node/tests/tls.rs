@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djbod_client::admin;
 use djbod_client::connection::{ClientError, Connection};
-use djbod_client::membership as admin;
 use djbod_core::cluster::Transport;
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
@@ -359,7 +359,7 @@ async fn moving_off_plain_is_refused_while_a_node_lacks_material() {
     let b = joined_node(&a, None).await;
     let cluster = a.node.cluster_id();
     match admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::TlsOptional).await {
-        Err(admin::MembershipError::NodeNotTlsReady { node, .. }) => {
+        Err(admin::AdminError::NodeNotTlsReady { node, .. }) => {
             assert_eq!(node, b.node.id())
         }
         other => panic!("expected NodeNotTlsReady, got {other:?}"),
@@ -423,10 +423,10 @@ async fn a_node_joins_a_tls_cluster_with_its_own_certificate() {
     let (_, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(addr, vec![a.addr.to_string()], None);
     match membership::join(&config, a.addr, cluster, false).await {
-        Err(membership::LocalMembershipError::Membership(
-            admin::MembershipError::Unreachable { .. }
-            | admin::MembershipError::PeerUnreachable { .. }
-            | admin::MembershipError::TlsRequired { .. },
+        Err(membership::MembershipError::Admin(
+            admin::AdminError::Unreachable { .. }
+            | admin::AdminError::PeerUnreachable { .. }
+            | admin::AdminError::TlsRequired { .. },
         )) => {}
         other => panic!("expected a refusal, got {other:?}"),
     }

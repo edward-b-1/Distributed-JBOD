@@ -5,8 +5,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use djbod_client::admin;
 use djbod_client::connection::{ClientError, Connection};
-use djbod_client::membership as admin;
 use djbod_client::wire;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::record::DeviceId;
@@ -284,11 +284,11 @@ async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
         .await
         .expect("first proposal");
     match admin::propose(&Connector::plain(), &current, &second).await {
-        Err(admin::MembershipError::StaleProposal {
+        Err(admin::AdminError::StaleProposal {
             expected: 2,
             found: 3,
         }) => {}
-        Err(admin::MembershipError::Superseded { .. }) => {}
+        Err(admin::AdminError::Superseded { .. }) => {}
         other => panic!("expected the second proposal to lose, got {other:?}"),
     }
     assert_eq!(a.node.document().headroom, 0.10);
@@ -315,7 +315,7 @@ async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
     fifth.version = 5;
     assert!(matches!(
         admin::propose(&Connector::plain(), &fourth, &fifth).await,
-        Err(admin::MembershipError::VersionsDiffer(_))
+        Err(admin::AdminError::VersionsDiffer(_))
     ));
 
     // Sync brings b up; requests work again.
@@ -384,9 +384,8 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
     let (_listener, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(1, addr, vec![]);
     match membership::join(&config, a.addr, Uuid::new_v4(), false).await {
-        Err(membership::LocalMembershipError::Membership(
-            admin::MembershipError::PeerUnreachable { .. }
-            | admin::MembershipError::WrongCluster { .. },
+        Err(membership::MembershipError::Admin(
+            admin::AdminError::PeerUnreachable { .. } | admin::AdminError::WrongCluster { .. },
         )) => {}
         other => panic!("expected refusal, got {other:?}"),
     }
@@ -421,7 +420,7 @@ async fn join_is_refused_for_the_wrong_cluster_and_can_add_devices_later() {
             false
         )
         .await,
-        Err(membership::LocalMembershipError::AlreadyMember { .. })
+        Err(membership::MembershipError::AlreadyMember { .. })
     ));
     let reopened = Node::open(config).expect("reopen with the new device");
     assert_eq!(reopened.devices().len(), 2);
@@ -452,11 +451,11 @@ async fn documents_that_differ_at_the_same_version_stop_proposals_and_sync() {
     next.version += 1;
     assert!(matches!(
         admin::propose(&Connector::plain(), &other, &next).await,
-        Err(admin::MembershipError::Diverged { .. })
+        Err(admin::AdminError::Diverged { .. })
     ));
     assert!(matches!(
         admin::sync(&Connector::plain(), a.addr, a.node.cluster_id()).await,
-        Err(admin::MembershipError::Diverged { .. })
+        Err(admin::AdminError::Diverged { .. })
     ));
 }
 
@@ -1077,7 +1076,7 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
 
     // An active device cannot be removed, referenced or not (issue #28).
     match admin::remove_device(&Connector::plain(), c.addr, cluster, device).await {
-        Err(admin::MembershipError::DeviceActive(found)) => assert_eq!(found, device),
+        Err(admin::AdminError::DeviceActive(found)) => assert_eq!(found, device),
         other => panic!("expected DeviceActive, got {other:?}"),
     }
     assert_eq!(
@@ -1095,7 +1094,7 @@ async fn remove_device_is_refused_while_referenced_and_marks_it_removed_after_a_
     .expect("set state");
     // Draining but still holding shards: refused with the keys.
     match admin::remove_device(&Connector::plain(), c.addr, cluster, device).await {
-        Err(admin::MembershipError::StillReferenced {
+        Err(admin::AdminError::StillReferenced {
             versions, examples, ..
         }) => {
             assert!(versions >= 1);
@@ -1156,7 +1155,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
 
     // A node with an active device cannot be removed (issue #28).
     match admin::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
-        Err(admin::MembershipError::NodeHasActiveDevices { node, devices }) => {
+        Err(admin::AdminError::NodeHasActiveDevices { node, devices }) => {
             assert_eq!(node, d_id);
             assert_eq!(devices, vec![device]);
         }
@@ -1173,7 +1172,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     .expect("set state");
     if records.iter().any(|r| r.shard_on(device).is_some()) {
         match admin::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
-            Err(admin::MembershipError::StillReferenced { .. }) => {}
+            Err(admin::AdminError::StillReferenced { .. }) => {}
             other => panic!("expected StillReferenced, got {other:?}"),
         }
         drain_clean(&mut client, device).await;
@@ -1206,7 +1205,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     }
     // Nor can its device rejoin unwiped; wiped, it joins as a new device.
     match membership::join(&d.config, a.addr, cluster, false).await {
-        Err(membership::LocalMembershipError::RemovedDevice {
+        Err(membership::MembershipError::RemovedDevice {
             path,
             device: found,
         }) => {
@@ -1261,7 +1260,7 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
 
     // A live node cannot be forced.
     match admin::plan_forced_removal(&Connector::plain(), a.addr, cluster, d_id).await {
-        Err(admin::MembershipError::NodeIsAlive { node, .. }) => assert_eq!(node, d_id),
+        Err(admin::AdminError::NodeIsAlive { node, .. }) => assert_eq!(node, d_id),
         other => panic!("expected NodeIsAlive, got {other:?}"),
     }
 
@@ -1577,7 +1576,7 @@ async fn a_nodes_address_can_be_changed_through_another_node() {
         )
         .await;
         assert!(
-            matches!(result, Err(admin::MembershipError::Document(_))),
+            matches!(result, Err(admin::AdminError::Document(_))),
             "{bad:?}: {result:?}"
         );
     }
@@ -1635,7 +1634,7 @@ async fn a_restarting_node_adopts_its_configured_address() {
     assert!(
         matches!(
             result,
-            Err(membership::LocalMembershipError::AddressChangeFailed { .. })
+            Err(membership::MembershipError::AddressChangeFailed { .. })
         ),
         "{result:?}"
     );
@@ -1834,7 +1833,7 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
     )
     .await;
     assert!(
-        matches!(result, Err(admin::MembershipError::Document(_))),
+        matches!(result, Err(admin::AdminError::Document(_))),
         "{result:?}"
     );
     let (_, changed) = admin::set_cluster_name(

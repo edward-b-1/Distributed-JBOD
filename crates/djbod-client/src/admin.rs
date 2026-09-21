@@ -38,7 +38,7 @@ pub struct NodeDocument {
 }
 
 #[derive(Debug, Error)]
-pub enum MembershipError {
+pub enum AdminError {
     #[error("{node} at {address} has no usable address: {reason}")]
     BadAddress {
         node: NodeId,
@@ -142,14 +142,11 @@ pub enum MembershipError {
     },
 }
 
-pub fn first_address(
-    document: &ClusterDocument,
-    node: NodeId,
-) -> Result<SocketAddr, MembershipError> {
+pub fn first_address(document: &ClusterDocument, node: NodeId) -> Result<SocketAddr, AdminError> {
     let entry = document.node(node).expect("node taken from this document");
     let text = entry.addresses.first().cloned().unwrap_or_default();
     text.parse()
-        .map_err(|e: std::net::AddrParseError| MembershipError::BadAddress {
+        .map_err(|e: std::net::AddrParseError| AdminError::BadAddress {
             node,
             address: text.clone(),
             reason: e.to_string(),
@@ -161,7 +158,7 @@ pub async fn fetch_document(
     connector: &Connector,
     address: SocketAddr,
     cluster_id: Uuid,
-) -> Result<ClusterDocument, MembershipError> {
+) -> Result<ClusterDocument, AdminError> {
     fetch_document_and_hello(connector, address, cluster_id)
         .await
         .map(|(document, _)| document)
@@ -173,7 +170,7 @@ async fn fetch_document_and_hello(
     connector: &Connector,
     address: SocketAddr,
     cluster_id: Uuid,
-) -> Result<(ClusterDocument, Hello), MembershipError> {
+) -> Result<(ClusterDocument, Hello), AdminError> {
     let mut connection =
         Connection::connect_with(connector, address, Connection::client_hello(cluster_id))
             .await
@@ -181,7 +178,7 @@ async fn fetch_document_and_hello(
                 ClientError::Hello(djbod_proto::handshake::HelloError::ClusterId {
                     peer,
                     ours,
-                }) => MembershipError::WrongCluster {
+                }) => AdminError::WrongCluster {
                     address,
                     expected: ours,
                     found: peer,
@@ -190,11 +187,11 @@ async fn fetch_document_and_hello(
                     code: ErrorCode::ProtocolViolation,
                     message,
                     ..
-                }) if message.contains("cluster") => MembershipError::PeerUnreachable {
+                }) if message.contains("cluster") => AdminError::PeerUnreachable {
                     address,
                     reason: message,
                 },
-                other => MembershipError::PeerUnreachable {
+                other => AdminError::PeerUnreachable {
                     address,
                     reason: other.to_string(),
                 },
@@ -203,11 +200,11 @@ async fn fetch_document_and_hello(
         Ok(Response::GetClusterConfig { document }) => {
             Ok((document, connection.peer_hello().clone()))
         }
-        Ok(other) => Err(MembershipError::UnexpectedResponse {
+        Ok(other) => Err(AdminError::UnexpectedResponse {
             address,
             response: format!("{other:?}"),
         }),
-        Err(e) => Err(MembershipError::PeerUnreachable {
+        Err(e) => Err(AdminError::PeerUnreachable {
             address,
             reason: e.to_string(),
         }),
@@ -255,7 +252,7 @@ pub async fn propose(
     connector: &Connector,
     current: &ClusterDocument,
     next: &ClusterDocument,
-) -> Result<(), MembershipError> {
+) -> Result<(), AdminError> {
     propose_skipping(connector, current, next, None).await
 }
 
@@ -267,7 +264,7 @@ pub async fn propose_skipping(
     current: &ClusterDocument,
     next: &ClusterDocument,
     skip: Option<NodeId>,
-) -> Result<(), MembershipError> {
+) -> Result<(), AdminError> {
     next.validate()?;
     // Step 1: check.
     let mut versions = Vec::new();
@@ -279,7 +276,7 @@ pub async fn propose_skipping(
                 documents.push((report.node, document));
             }
             Err(reason) => {
-                return Err(MembershipError::Unreachable {
+                return Err(AdminError::Unreachable {
                     node: report.node,
                     address: report.address,
                     reason,
@@ -289,12 +286,12 @@ pub async fn propose_skipping(
     }
     if versions.iter().any(|(_, v)| *v != current.version) {
         if versions.iter().all(|(_, v)| *v == versions[0].1) {
-            return Err(MembershipError::StaleProposal {
+            return Err(AdminError::StaleProposal {
                 expected: current.version,
                 found: versions[0].1,
             });
         }
-        return Err(MembershipError::VersionsDiffer(versions));
+        return Err(AdminError::VersionsDiffer(versions));
     }
     // Same version everywhere must mean the same document everywhere
     // (6.2.6.1). Anything else is a bug or a hand-edited file, and no
@@ -313,13 +310,13 @@ pub async fn propose_skipping(
         match outcome {
             Ok(()) => applied.push(entry.id),
             Err(reason) if position == 0 => {
-                return Err(MembershipError::Superseded {
+                return Err(AdminError::Superseded {
                     node: entry.id,
                     reason,
                 })
             }
             Err(reason) => {
-                return Err(MembershipError::Partial {
+                return Err(AdminError::Partial {
                     applied,
                     failed: entry.id,
                     reason,
@@ -331,11 +328,11 @@ pub async fn propose_skipping(
 }
 
 /// Two nodes holding the same version must hold the same document.
-fn check_same_content(documents: &[(NodeId, ClusterDocument)]) -> Result<(), MembershipError> {
+fn check_same_content(documents: &[(NodeId, ClusterDocument)]) -> Result<(), AdminError> {
     for (i, (node_a, doc_a)) in documents.iter().enumerate() {
         for (node_b, doc_b) in &documents[..i] {
             if doc_a.version == doc_b.version && doc_a != doc_b {
-                return Err(MembershipError::Diverged {
+                return Err(AdminError::Diverged {
                     version: doc_a.version,
                     a: *node_b,
                     b: *node_a,
@@ -385,7 +382,7 @@ pub async fn sync(
     connector: &Connector,
     seed: SocketAddr,
     cluster_id: Uuid,
-) -> Result<SyncReport, MembershipError> {
+) -> Result<SyncReport, AdminError> {
     let seed_document = fetch_document(connector, seed, cluster_id).await?;
     // The seed's membership list may itself be stale; use the highest
     // version's list, found by asking everyone the seed knows about.
@@ -442,11 +439,11 @@ pub async fn set_device_state(
     cluster_id: Uuid,
     device: DeviceId,
     state: DeviceState,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let Some(entry) = current.device(device) else {
-            return Err(MembershipError::UnknownDevice(device));
+            return Err(AdminError::UnknownDevice(device));
         };
         if entry.state == state {
             return Ok((current, false));
@@ -460,12 +457,11 @@ pub async fn set_device_state(
         }
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Change the global scheme, and optionally the block size, in the
@@ -480,7 +476,7 @@ pub async fn set_scheme(
     k: u8,
     m: u8,
     block_size: Option<u64>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let block_size = block_size.unwrap_or(current.block_size);
@@ -494,7 +490,7 @@ pub async fn set_scheme(
             .count();
         let needed = k as usize + m as usize;
         if active < needed {
-            return Err(MembershipError::TooFewActiveDevices {
+            return Err(AdminError::TooFewActiveDevices {
                 active,
                 needed,
                 k,
@@ -508,12 +504,11 @@ pub async fn set_scheme(
         next.block_size = block_size;
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Change the key length, object size, and user metadata limits in the
@@ -526,7 +521,7 @@ pub async fn set_limits(
     max_key_bytes: Option<u64>,
     max_object_bytes: Option<u64>,
     max_user_metadata_bytes: Option<u64>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let mut next = current.clone();
@@ -540,12 +535,11 @@ pub async fn set_limits(
         next.version += 1;
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// The device a UUID or label names, in the current document.
@@ -554,12 +548,12 @@ pub async fn resolve_device(
     peer: SocketAddr,
     cluster_id: Uuid,
     name: &str,
-) -> Result<DeviceId, MembershipError> {
+) -> Result<DeviceId, AdminError> {
     let document = fetch_document(connector, peer, cluster_id).await?;
     document
         .device_by_name(name)
         .map(|d| d.id)
-        .ok_or_else(|| MembershipError::UnknownDeviceName(name.to_string()))
+        .ok_or_else(|| AdminError::UnknownDeviceName(name.to_string()))
 }
 
 /// The node a UUID or label names, in the current document.
@@ -568,12 +562,12 @@ pub async fn resolve_node(
     peer: SocketAddr,
     cluster_id: Uuid,
     name: &str,
-) -> Result<NodeId, MembershipError> {
+) -> Result<NodeId, AdminError> {
     let document = fetch_document(connector, peer, cluster_id).await?;
     document
         .node_by_name(name)
         .map(|n| n.id)
-        .ok_or_else(|| MembershipError::UnknownNodeName(name.to_string()))
+        .ok_or_else(|| AdminError::UnknownNodeName(name.to_string()))
 }
 
 /// Set or clear a node's label (SPEC 6.2.5.1). Returns the document and
@@ -584,11 +578,11 @@ pub async fn set_node_label(
     cluster_id: Uuid,
     node: NodeId,
     label: Option<String>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let Some(entry) = current.node(node) else {
-            return Err(MembershipError::UnknownNode(node));
+            return Err(AdminError::UnknownNode(node));
         };
         if entry.label == label {
             return Ok((current, false));
@@ -602,12 +596,11 @@ pub async fn set_node_label(
         }
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Set or clear the cluster's name (SPEC 6.2.5.3). Returns the document
@@ -617,7 +610,7 @@ pub async fn set_cluster_name(
     peer: SocketAddr,
     cluster_id: Uuid,
     name: Option<String>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         if current.name == name {
@@ -628,12 +621,11 @@ pub async fn set_cluster_name(
         next.name = name.clone();
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Replace a node's address list (SPEC 6.2.5.2). Returns the document and
@@ -647,11 +639,11 @@ pub async fn set_node_addresses(
     cluster_id: Uuid,
     node: NodeId,
     addresses: Vec<String>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let Some(entry) = current.node(node) else {
-            return Err(MembershipError::UnknownNode(node));
+            return Err(AdminError::UnknownNode(node));
         };
         if entry.addresses == addresses {
             return Ok((current, false));
@@ -659,12 +651,11 @@ pub async fn set_node_addresses(
         let next = with_node_addresses(&current, node, addresses.clone());
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// The successor of `current` in which `node` is listed at `addresses`.
@@ -692,11 +683,11 @@ pub async fn set_device_label(
     cluster_id: Uuid,
     device: DeviceId,
     label: Option<String>,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let Some(entry) = current.device(device) else {
-            return Err(MembershipError::UnknownDevice(device));
+            return Err(AdminError::UnknownDevice(device));
         };
         if entry.label == label {
             return Ok((current, false));
@@ -710,12 +701,11 @@ pub async fn set_device_label(
         }
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Change the cluster's transport (SPEC 19.1.6.4). Moving off `plain` is
@@ -727,7 +717,7 @@ pub async fn set_transport(
     peer: SocketAddr,
     cluster_id: Uuid,
     transport: djbod_core::cluster::Transport,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         if current.transport == transport {
@@ -736,7 +726,7 @@ pub async fn set_transport(
         if transport != djbod_core::cluster::Transport::Plain {
             for entry in &current.nodes {
                 let address = first_address(&current, entry.id)?;
-                let unreachable = |reason: String| MembershipError::Unreachable {
+                let unreachable = |reason: String| AdminError::Unreachable {
                     node: entry.id,
                     address: address.to_string(),
                     reason,
@@ -753,7 +743,7 @@ pub async fn set_transport(
                         tls_ready: true, ..
                     }) => {}
                     Ok(Response::LocalStatus { .. }) => {
-                        return Err(MembershipError::NodeNotTlsReady {
+                        return Err(AdminError::NodeNotTlsReady {
                             node: entry.id,
                             address: address.to_string(),
                         })
@@ -768,12 +758,11 @@ pub async fn set_transport(
         next.transport = transport;
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 // ------------------------------------------------------------- REMOVAL
@@ -806,11 +795,11 @@ pub async fn scan_references(
     document: &ClusterDocument,
     devices: &[DeviceId],
     skip: Option<NodeId>,
-) -> Result<Vec<VersionReference>, MembershipError> {
+) -> Result<Vec<VersionReference>, AdminError> {
     let mut current: BTreeMap<(String, VersionId), MetadataRecord> = BTreeMap::new();
     for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
         let address = first_address(document, entry.id)?;
-        let unreachable = |reason: String| MembershipError::Unreachable {
+        let unreachable = |reason: String| AdminError::Unreachable {
             node: entry.id,
             address: address.to_string(),
             reason,
@@ -888,8 +877,8 @@ pub async fn scan_references(
     Ok(references)
 }
 
-fn still_referenced(what: String, references: &[VersionReference]) -> MembershipError {
-    MembershipError::StillReferenced {
+fn still_referenced(what: String, references: &[VersionReference]) -> AdminError {
+    AdminError::StillReferenced {
         what,
         versions: references.len(),
         examples: references.iter().take(5).map(|r| r.key.clone()).collect(),
@@ -903,11 +892,11 @@ pub async fn remove_device(
     peer: SocketAddr,
     cluster_id: Uuid,
     device: DeviceId,
-) -> Result<(ClusterDocument, bool), MembershipError> {
+) -> Result<(ClusterDocument, bool), AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         let Some(entry) = current.device(device) else {
-            return Err(MembershipError::UnknownDevice(device));
+            return Err(AdminError::UnknownDevice(device));
         };
         if entry.state == DeviceState::Removed {
             return Ok((current, false));
@@ -916,7 +905,7 @@ pub async fn remove_device(
         // shard on it, so the scan below cannot be invalidated between the
         // scan and the proposal.
         if entry.state == DeviceState::Active {
-            return Err(MembershipError::DeviceActive(device));
+            return Err(AdminError::DeviceActive(device));
         }
         let references = scan_references(connector, &current, &[device], None).await?;
         if !references.is_empty() {
@@ -931,12 +920,11 @@ pub async fn remove_device(
         }
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok((next, true)),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 /// Drop a live node and its devices from the document (18.2.1) once no
@@ -947,14 +935,14 @@ pub async fn remove_node(
     peer: SocketAddr,
     cluster_id: Uuid,
     node: NodeId,
-) -> Result<ClusterDocument, MembershipError> {
+) -> Result<ClusterDocument, AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
         if current.node(node).is_none() {
-            return Err(MembershipError::UnknownNode(node));
+            return Err(AdminError::UnknownNode(node));
         }
         if current.nodes.len() == 1 {
-            return Err(MembershipError::LastNode);
+            return Err(AdminError::LastNode);
         }
         let devices: Vec<DeviceId> = current
             .devices
@@ -971,7 +959,7 @@ pub async fn remove_node(
             .map(|d| d.id)
             .collect();
         if !active.is_empty() {
-            return Err(MembershipError::NodeHasActiveDevices {
+            return Err(AdminError::NodeHasActiveDevices {
                 node,
                 devices: active,
             });
@@ -983,12 +971,11 @@ pub async fn remove_node(
         let next = document_without_node(&current, node);
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok(next),
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => continue,
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
 fn document_without_node(current: &ClusterDocument, node: NodeId) -> ClusterDocument {
@@ -1031,13 +1018,13 @@ pub async fn plan_forced_removal(
     peer: SocketAddr,
     cluster_id: Uuid,
     node: NodeId,
-) -> Result<ForcedRemovalPlan, MembershipError> {
+) -> Result<ForcedRemovalPlan, AdminError> {
     let current = fetch_document(connector, peer, cluster_id).await?;
     if current.node(node).is_none() {
-        return Err(MembershipError::UnknownNode(node));
+        return Err(AdminError::UnknownNode(node));
     }
     if current.nodes.len() == 1 {
-        return Err(MembershipError::LastNode);
+        return Err(AdminError::LastNode);
     }
     let address = first_address(&current, node)?;
     let unreachable_because = match tokio::time::timeout(
@@ -1047,7 +1034,7 @@ pub async fn plan_forced_removal(
     .await
     {
         Ok(Ok(_)) => {
-            return Err(MembershipError::NodeIsAlive {
+            return Err(AdminError::NodeIsAlive {
                 node,
                 address: address.to_string(),
             })
@@ -1079,7 +1066,7 @@ pub async fn plan_forced_removal(
 pub async fn execute_forced_removal(
     connector: &Connector,
     plan: &ForcedRemovalPlan,
-) -> Result<ClusterDocument, MembershipError> {
+) -> Result<ClusterDocument, AdminError> {
     let next = document_without_node(&plan.current, plan.node);
     propose_skipping(connector, &plan.current, &next, Some(plan.node)).await?;
     Ok(next)
