@@ -298,9 +298,10 @@ scrub, administration (re-placement, drain, removal, recovery, re-encode,
 size limits), TLS, and the web UI. Milestone 7, damage marks that remember
 what the checks found, is designed and next to build.
 
-The system has been tested by many nodes running in one process on one
-machine and by hand against the built binaries. It has not yet run for
-long on several real machines; do that before relying on it.
+The system is tested by many nodes running in one process on one machine
+in the test suite, and it runs as a cluster of three machines with six
+disks between them. It is young: expect to find rough edges, and keep
+another copy of anything you cannot lose until it has earned your trust.
 
 ## License
 
