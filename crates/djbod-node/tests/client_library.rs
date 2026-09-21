@@ -6,7 +6,7 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use djbod_client::{blocking, Client, ClientOptions, Error};
+use djbod_client::{blocking, Client, ClientError, ClientOptions};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
@@ -192,12 +192,12 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
 async fn connecting_needs_a_reachable_node() {
     assert!(matches!(
         Client::connect(ClientOptions::new(vec![])).await,
-        Err(Error::NoNodes)
+        Err(ClientError::NoNodes)
     ));
     let (_unused, dead) = reserve_port().await;
     drop(_unused);
     match Client::connect(ClientOptions::new(vec![dead])).await {
-        Err(Error::Unreachable(attempts)) => assert_eq!(attempts.len(), 1),
+        Err(ClientError::Unreachable(attempts)) => assert_eq!(attempts.len(), 1),
         other => panic!("expected unreachable, got {:?}", other.err()),
     }
 }
@@ -207,7 +207,7 @@ async fn the_blocking_client_does_the_same_without_async() {
     let (a, _b) = two_nodes().await;
     let options = ClientOptions::new(vec![a.addr]).cluster(a.node.cluster_id());
     // Its own runtime, so it runs on a plain thread, as a binding would.
-    let result = std::thread::spawn(move || -> Result<(usize, Vec<u8>, u64), Error> {
+    let result = std::thread::spawn(move || -> Result<(usize, Vec<u8>, u64), ClientError> {
         let mut client = blocking::Client::connect(options)?;
         client.put("one", b"first", None)?;
         let body: Vec<u8> = vec![7u8; BLOCK as usize + 5];

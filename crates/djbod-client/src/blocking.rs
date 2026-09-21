@@ -17,7 +17,7 @@ use djbod_core::record::MetadataRecord;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{KeyEntry, ListQuery, RepairReport};
 
-pub use crate::client::{ClientOptions, Error, Identity, ListPage, Status};
+pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, Status};
 
 pub struct Client {
     runtime: Runtime,
@@ -25,7 +25,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn connect(options: ClientOptions) -> Result<Client, Error> {
+    pub fn connect(options: ClientOptions) -> Result<Client, ClientError> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -47,7 +47,7 @@ impl Client {
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, Error> {
+    ) -> Result<VersionId, ClientError> {
         self.runtime
             .block_on(self.inner.put(key, body, content_type))
     }
@@ -61,7 +61,7 @@ impl Client {
         source: R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, Error> {
+    ) -> Result<VersionId, ClientError> {
         let mut source = BlockingReader(source);
         self.runtime.block_on(self.inner.put_from_reader(
             key,
@@ -72,7 +72,7 @@ impl Client {
         ))
     }
 
-    pub fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), Error> {
+    pub fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
         self.runtime.block_on(self.inner.get(key))
     }
 
@@ -81,41 +81,41 @@ impl Client {
         &mut self,
         key: &str,
         sink: W,
-    ) -> Result<MetadataRecord, Error> {
+    ) -> Result<MetadataRecord, ClientError> {
         let mut sink = BlockingWriter(sink);
         self.runtime
             .block_on(self.inner.get_to_writer(key, &mut sink))
     }
 
-    pub fn head(&mut self, key: &str) -> Result<MetadataRecord, Error> {
+    pub fn head(&mut self, key: &str) -> Result<MetadataRecord, ClientError> {
         self.runtime.block_on(self.inner.head(key))
     }
 
-    pub fn delete(&mut self, key: &str) -> Result<(), Error> {
+    pub fn delete(&mut self, key: &str) -> Result<(), ClientError> {
         self.runtime.block_on(self.inner.delete(key))
     }
 
-    pub fn list(&mut self, query: ListQuery) -> Result<ListPage, Error> {
+    pub fn list(&mut self, query: ListQuery) -> Result<ListPage, ClientError> {
         self.runtime.block_on(self.inner.list(query))
     }
 
-    pub fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, Error> {
+    pub fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
         self.runtime.block_on(self.inner.list_all(prefix))
     }
 
-    pub fn repair(&mut self, key: &str) -> Result<RepairReport, Error> {
+    pub fn repair(&mut self, key: &str) -> Result<RepairReport, ClientError> {
         self.runtime.block_on(self.inner.repair(key))
     }
 
-    pub fn status(&mut self) -> Result<Status, Error> {
+    pub fn status(&mut self) -> Result<Status, ClientError> {
         self.runtime.block_on(self.inner.status())
     }
 
-    pub fn cluster_document(&mut self) -> Result<ClusterDocument, Error> {
+    pub fn cluster_document(&mut self) -> Result<ClusterDocument, ClientError> {
         self.runtime.block_on(self.inner.cluster_document())
     }
 
-    pub fn identity(&mut self) -> Result<Identity, Error> {
+    pub fn identity(&mut self) -> Result<Identity, ClientError> {
         self.runtime.block_on(self.inner.identity())
     }
 }

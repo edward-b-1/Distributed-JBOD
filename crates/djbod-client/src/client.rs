@@ -18,7 +18,7 @@ use djbod_proto::message::{
     DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, RepairReport, Request, Response,
 };
 
-use crate::connection::{ClientError, Connection, DEFAULT_BODY_CHUNK};
+use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
 use crate::transport::Connector;
 
 /// How to reach the cluster.
@@ -58,21 +58,21 @@ impl ClientOptions {
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
+pub enum ClientError {
     #[error("no node addresses were given")]
     NoNodes,
     #[error("no node could be reached: {}", describe_attempts(.0))]
     Unreachable(Vec<(SocketAddr, String)>),
     /// Boxed: a node's `ErrorDetail` is large, and errors are rare.
     #[error(transparent)]
-    Client(Box<ClientError>),
+    Connection(Box<ConnectionError>),
     #[error("the node answered {got} to {request}")]
     UnexpectedResponse { request: &'static str, got: String },
 }
 
-impl From<ClientError> for Error {
-    fn from(e: ClientError) -> Error {
-        Error::Client(Box::new(e))
+impl From<ConnectionError> for ClientError {
+    fn from(e: ConnectionError) -> ClientError {
+        ClientError::Connection(Box::new(e))
     }
 }
 
@@ -84,12 +84,14 @@ fn describe_attempts(attempts: &[(SocketAddr, String)]) -> String {
         .join("; ")
 }
 
-impl Error {
+impl ClientError {
     /// The node's error, when the node answered with one (SPEC 16.2).
     pub fn detail(&self) -> Option<&ErrorDetail> {
         match self {
-            Error::Client(inner) => match inner.as_ref() {
-                ClientError::Remote(detail) | ClientError::StreamFailed(detail) => Some(detail),
+            ClientError::Connection(inner) => match inner.as_ref() {
+                ConnectionError::Remote(detail) | ConnectionError::StreamFailed(detail) => {
+                    Some(detail)
+                }
                 _ => None,
             },
             _ => None,
@@ -103,7 +105,7 @@ impl Error {
     /// Whether the connection failed, as opposed to the node refusing:
     /// the case in which another node may answer.
     fn is_connection_failure(&self) -> bool {
-        matches!(self, Error::Client(inner) if matches!(inner.as_ref(), ClientError::Wire(_)))
+        matches!(self, ClientError::Connection(inner) if matches!(inner.as_ref(), ConnectionError::Wire(_)))
     }
 }
 
@@ -159,9 +161,9 @@ pub struct Client {
 impl Client {
     /// Connect to the first node in `options.nodes` that answers. Without
     /// a cluster id, the first node that answers is asked for it.
-    pub async fn connect(options: ClientOptions) -> Result<Client, Error> {
+    pub async fn connect(options: ClientOptions) -> Result<Client, ClientError> {
         if options.nodes.is_empty() {
-            return Err(Error::NoNodes);
+            return Err(ClientError::NoNodes);
         }
         let mut attempts = Vec::new();
         for (position, &address) in options.nodes.iter().enumerate() {
@@ -193,7 +195,7 @@ impl Client {
                 Err(e) => attempts.push((address, e.to_string())),
             }
         }
-        Err(Error::Unreachable(attempts))
+        Err(ClientError::Unreachable(attempts))
     }
 
     pub fn cluster_id(&self) -> Uuid {
@@ -208,7 +210,7 @@ impl Client {
     /// Give up the client for its connection, reconnecting first if
     /// needed: for a conversation that must own the connection, such as a
     /// stream driven from another task.
-    pub async fn into_connection(mut self) -> Result<Connection, Error> {
+    pub async fn into_connection(mut self) -> Result<Connection, ClientError> {
         self.connection().await?;
         Ok(self.connection.take().expect("connected").1)
     }
@@ -216,7 +218,7 @@ impl Client {
     /// The open connection, reconnecting to the next node if the last one
     /// failed. For operations this client has no method for, such as the
     /// scrub and drain event streams.
-    pub async fn connection(&mut self) -> Result<&mut Connection, Error> {
+    pub async fn connection(&mut self) -> Result<&mut Connection, ClientError> {
         if self.connection.is_none() {
             self.reconnect().await?;
         }
@@ -224,7 +226,7 @@ impl Client {
     }
 
     /// Try every node once, starting after the one that failed.
-    async fn reconnect(&mut self) -> Result<(), Error> {
+    async fn reconnect(&mut self) -> Result<(), ClientError> {
         let count = self.options.nodes.len();
         let mut attempts = Vec::new();
         for offset in 0..count {
@@ -245,13 +247,13 @@ impl Client {
                 Err(e) => attempts.push((address, e.to_string())),
             }
         }
-        Err(Error::Unreachable(attempts))
+        Err(ClientError::Unreachable(attempts))
     }
 
     /// One request and its response. A request whose connection fails is
     /// sent once more over a fresh connection to another node when
     /// `retry` says it is safe to repeat; a refusal is never retried.
-    async fn request(&mut self, request: Request, retry: bool) -> Result<Response, Error> {
+    async fn request(&mut self, request: Request, retry: bool) -> Result<Response, ClientError> {
         let mut attempts_left = if retry { 2 } else { 1 };
         loop {
             attempts_left -= 1;
@@ -260,9 +262,9 @@ impl Client {
                 .await?
                 .request(request.clone())
                 .await
-                .map_err(Error::from);
+                .map_err(ClientError::from);
             match result {
-                Ok(Response::Error(detail)) => return Err(ClientError::Remote(detail).into()),
+                Ok(Response::Error(detail)) => return Err(ConnectionError::Remote(detail).into()),
                 Ok(response) => return Ok(response),
                 Err(e) if e.is_connection_failure() => {
                     self.connection = None;
@@ -275,8 +277,8 @@ impl Client {
         }
     }
 
-    fn unexpected(request: &'static str, got: Response) -> Error {
-        Error::UnexpectedResponse {
+    fn unexpected(request: &'static str, got: Response) -> ClientError {
+        ClientError::UnexpectedResponse {
             request,
             got: format!("{got:?}"),
         }
@@ -290,7 +292,7 @@ impl Client {
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, Error> {
+    ) -> Result<VersionId, ClientError> {
         let mut cursor = body;
         self.put_from_reader(
             key,
@@ -312,20 +314,20 @@ impl Client {
         source: &mut R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, Error> {
+    ) -> Result<VersionId, ClientError> {
         let chunk = self.options.body_chunk;
         let result = self
             .connection()
             .await?
             .put_object_with_metadata(key, size, source, chunk, content_type, user_metadata)
             .await
-            .map_err(Error::from);
+            .map_err(ClientError::from);
         self.forget_connection_on_failure(&result);
         result
     }
 
     /// Fetch an object and its record.
-    pub async fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), Error> {
+    pub async fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
         let mut body = Vec::new();
         let record = self.get_to_writer(key, &mut body).await?;
         Ok((record, body))
@@ -339,19 +341,19 @@ impl Client {
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<MetadataRecord, Error> {
+    ) -> Result<MetadataRecord, ClientError> {
         let result = self
             .connection()
             .await?
             .get_object_to_writer(key, sink)
             .await
-            .map_err(Error::from);
+            .map_err(ClientError::from);
         self.forget_connection_on_failure(&result);
         result
     }
 
     /// The object's record without its body.
-    pub async fn head(&mut self, key: &str) -> Result<MetadataRecord, Error> {
+    pub async fn head(&mut self, key: &str) -> Result<MetadataRecord, ClientError> {
         match self
             .request(
                 Request::HeadObject {
@@ -368,7 +370,7 @@ impl Client {
 
     /// Delete an object. Not retried over a fresh connection, since the
     /// first attempt may have succeeded before the connection failed.
-    pub async fn delete(&mut self, key: &str) -> Result<(), Error> {
+    pub async fn delete(&mut self, key: &str) -> Result<(), ClientError> {
         match self
             .request(
                 Request::DeleteObject {
@@ -384,7 +386,7 @@ impl Client {
     }
 
     /// One page of keys (15.2.1).
-    pub async fn list(&mut self, query: ListQuery) -> Result<ListPage, Error> {
+    pub async fn list(&mut self, query: ListQuery) -> Result<ListPage, ClientError> {
         match self.request(Request::ListKeys(query), true).await? {
             Response::ListKeys { keys, truncated } => Ok(ListPage { keys, truncated }),
             other => Err(Self::unexpected("ListKeys", other)),
@@ -393,7 +395,7 @@ impl Client {
 
     /// Every key under `prefix`, page after page. Holds them all in
     /// memory; for large listings page with [`Client::list`].
-    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, Error> {
+    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
         let mut keys = Vec::new();
         let mut start_after: Option<String> = None;
         loop {
@@ -413,7 +415,7 @@ impl Client {
     }
 
     /// Rebuild what is damaged or missing of one object (18.3, 18.4).
-    pub async fn repair(&mut self, key: &str) -> Result<RepairReport, Error> {
+    pub async fn repair(&mut self, key: &str) -> Result<RepairReport, ClientError> {
         match self
             .request(
                 Request::RepairObject {
@@ -430,7 +432,7 @@ impl Client {
 
     // ---------------------------------------------------------- cluster
 
-    pub async fn status(&mut self) -> Result<Status, Error> {
+    pub async fn status(&mut self) -> Result<Status, ClientError> {
         match self.request(Request::Status, true).await? {
             Response::Status {
                 cluster_id,
@@ -452,7 +454,7 @@ impl Client {
     }
 
     /// The cluster document as the connected node holds it.
-    pub async fn cluster_document(&mut self) -> Result<ClusterDocument, Error> {
+    pub async fn cluster_document(&mut self) -> Result<ClusterDocument, ClientError> {
         match self.request(Request::GetClusterConfig, true).await? {
             Response::GetClusterConfig { document } => Ok(document),
             other => Err(Self::unexpected("GetClusterConfig", other)),
@@ -460,7 +462,7 @@ impl Client {
     }
 
     /// Who the client is connected to, reconnecting first if it is not.
-    pub async fn identity(&mut self) -> Result<Identity, Error> {
+    pub async fn identity(&mut self) -> Result<Identity, ClientError> {
         self.connection().await?;
         let (address, connection) = self.connection.as_ref().expect("connected");
         let hello = connection.peer_hello();
@@ -474,7 +476,7 @@ impl Client {
         })
     }
 
-    fn forget_connection_on_failure<T>(&mut self, result: &Result<T, Error>) {
+    fn forget_connection_on_failure<T>(&mut self, result: &Result<T, ClientError>) {
         if matches!(result, Err(e) if e.is_connection_failure()) {
             self.connection = None;
         }
@@ -483,7 +485,7 @@ impl Client {
 
 /// Ask `address` who it is without naming a cluster (19.1.5.1): the
 /// node answers with its `Hello` and closes.
-pub async fn ask(connector: &Connector, address: SocketAddr) -> Result<Identity, Error> {
+pub async fn ask(connector: &Connector, address: SocketAddr) -> Result<Identity, ClientError> {
     let connection =
         Connection::connect_with(connector, address, Connection::client_hello(Uuid::nil())).await?;
     let hello = connection.peer_hello();
@@ -498,6 +500,9 @@ pub async fn ask(connector: &Connector, address: SocketAddr) -> Result<Identity,
 }
 
 /// Ask `address` which cluster it serves (19.1.5.1).
-pub async fn ask_cluster_id(connector: &Connector, address: SocketAddr) -> Result<Uuid, Error> {
+pub async fn ask_cluster_id(
+    connector: &Connector,
+    address: SocketAddr,
+) -> Result<Uuid, ClientError> {
     Ok(ask(connector, address).await?.cluster_id)
 }

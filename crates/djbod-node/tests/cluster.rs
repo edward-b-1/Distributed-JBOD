@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use djbod_client::admin;
-use djbod_client::connection::{ClientError, Connection};
+use djbod_client::connection::{Connection, ConnectionError};
 use djbod_client::wire;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::record::DeviceId;
@@ -228,7 +228,7 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
     b.stop();
     // Every operation that must reach b fails, naming it (16.1, 16.2).
     match client.request(Request::Status).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::NodeUnreachable);
             assert_eq!(detail.node, Some(b.node.id()));
         }
@@ -240,11 +240,11 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
         other => panic!("expected NodeUnreachable, got {other:?}"),
     }
     match client.put_object("k2", &body, 100_000, None).await {
-        Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::NodeUnreachable)
         }
         other => panic!("expected NodeUnreachable, got {other:?}"),
@@ -306,7 +306,7 @@ async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
     // because versions differ.
     let mut client = a.client().await;
     match client.request(Request::Status).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch)
         }
         other => panic!("expected DocumentVersionMismatch, got {other:?}"),
@@ -730,7 +730,7 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
     // on the same device is refused (SPEC 20.1.2.1).
     let mut second = Connection::connect(a.addr, hello()).await.expect("connect");
     match second.request(request.clone()).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::WriteFailed);
             assert!(
                 detail.message.contains("already being written"),
@@ -837,7 +837,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
         other => panic!("expected NodeUnreachable, got {other:?}"),
     }
     let listener = TcpListener::bind(d.addr).await.expect("rebind");
@@ -1813,7 +1813,7 @@ async fn a_cluster_can_be_named_at_creation_or_later() {
     // A client for another cluster is told which cluster this is.
     let stranger = Connection::client_hello(Uuid::new_v4());
     match Connection::connect(a.addr, stranger).await {
-        Err(ClientError::Remote(detail)) => assert!(
+        Err(ConnectionError::Remote(detail)) => assert!(
             detail
                 .message
                 .contains(&format!("this node serves cluster Home NAS ({cluster})")),
@@ -1886,7 +1886,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
     assert!(
         matches!(
             asking.request(Request::Status).await,
-            Err(ClientError::Wire(_))
+            Err(ConnectionError::Wire(_))
         ),
         "the node closes after answering"
     );
@@ -1901,7 +1901,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
         cluster_name: None,
     };
     match Connection::connect(a.addr, asking_node).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert!(
                 detail.message.contains("belongs to cluster"),
                 "{}",

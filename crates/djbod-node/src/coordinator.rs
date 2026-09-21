@@ -37,7 +37,7 @@ use crate::local_ops::{respond, Failure};
 use crate::node::Node;
 use crate::server::{our_hello, ConnectionEnd, Reader, Writer};
 use crate::ulid::VersionGenerator;
-use djbod_client::connection::{ClientError, Connection, StreamItem};
+use djbod_client::connection::{Connection, ConnectionError, StreamItem};
 use djbod_client::wire::{read_message_within, write_message};
 
 pub fn is_client_operation(request: &Request) -> bool {
@@ -171,7 +171,7 @@ async fn connect_to(node: &Node, target: NodeId) -> Result<Connection, Failure> 
             // The peer answered and refused our Hello: it holds a different
             // document version (6.2.7) or is otherwise not our peer. Keep
             // its own account of why.
-            ClientError::Remote(detail) => Failure::Error(ErrorDetail {
+            ConnectionError::Remote(detail) => Failure::Error(ErrorDetail {
                 node: Some(target),
                 ..detail
             }),
@@ -185,13 +185,13 @@ async fn connect_to(node: &Node, target: NodeId) -> Result<Connection, Failure> 
         })
 }
 
-fn remote_failure(target: NodeId, e: ClientError) -> Failure {
+fn remote_failure(target: NodeId, e: ConnectionError) -> Failure {
     match e {
-        ClientError::Remote(detail) => Failure::Error(ErrorDetail {
+        ConnectionError::Remote(detail) => Failure::Error(ErrorDetail {
             node: detail.node.or(Some(target)),
             ..detail
         }),
-        ClientError::StreamFailed(detail) => Failure::Error(ErrorDetail {
+        ConnectionError::StreamFailed(detail) => Failure::Error(ErrorDetail {
             node: detail.node.or(Some(target)),
             ..detail
         }),
@@ -1992,7 +1992,7 @@ async fn open_repair_sources(
                     format!("{owner} answered GetShard with {other:?}"),
                 ))
             }
-            Err(ClientError::Remote(detail)) => (
+            Err(ConnectionError::Remote(detail)) => (
                 None,
                 ShardCondition::Unreadable {
                     reason: detail.message,

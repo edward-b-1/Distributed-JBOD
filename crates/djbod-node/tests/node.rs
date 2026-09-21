@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use djbod_client::connection::{ClientError, Connection, StreamItem};
+use djbod_client::connection::{Connection, ConnectionError, StreamItem};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
@@ -264,7 +264,9 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
 
     let wrong = Connection::connect(test.addr, Connection::client_hello(Uuid::new_v4())).await;
     match wrong {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::ProtocolViolation),
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation)
+        }
         other => panic!("expected refusal, got {other:?}"),
     }
 
@@ -278,7 +280,7 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
         cluster_name: None,
     };
     match Connection::connect(test.addr, stale).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch);
             assert_eq!(detail.node, Some(test.node.id()));
         }
@@ -462,7 +464,7 @@ async fn shards_and_records_round_trip_through_the_protocol() {
         )
         .await;
     match gone {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::NotFound);
             assert_eq!(detail.device, Some(device0));
         }
@@ -571,7 +573,7 @@ async fn an_out_of_order_stripe_is_refused_and_leaves_no_file() {
     .await
     .expect("send data");
     match conn.read_response(id).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::ProtocolViolation);
             assert!(detail
                 .message
@@ -624,7 +626,7 @@ async fn a_shard_whose_blocks_do_not_match_the_object_size_is_refused() {
         )
         .await;
     match result {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::WriteFailed);
             assert_eq!(detail.device, Some(device));
             assert!(
@@ -730,7 +732,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         .request(Request::ApplyClusterConfig { document: same })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -745,7 +747,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -790,7 +792,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         )
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::WriteFailed);
             assert!(detail.message.contains("not active"));
         }
@@ -810,7 +812,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
     };
     assert!(matches!(
         Connection::connect(test.addr, stale).await,
-        Err(ClientError::Remote(_))
+        Err(ConnectionError::Remote(_))
     ));
 }
 
@@ -859,7 +861,7 @@ async fn a_sender_that_abandons_a_shard_leaves_nothing_and_abort_shard_is_idempo
     .await
     .expect("send end");
     match conn.read_response(id).await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::WriteFailed),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::WriteFailed),
         other => panic!("expected WriteFailed, got {other:?}"),
     }
     let dir = test

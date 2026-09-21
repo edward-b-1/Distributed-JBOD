@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use djbod_client::blocking::Client as Inner;
 use djbod_client::transport::Connector;
-use djbod_client::{ClientOptions, Error};
+use djbod_client::{ClientError, ClientOptions};
 use djbod_core::record::MetadataRecord;
 use djbod_proto::message::{ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery};
 
@@ -140,10 +140,10 @@ fn raise<'py>(py: Python<'py>, class: &str, args: impl pyo3::call::PyCallArgs<'p
 }
 
 /// The client's error as the Python exception it corresponds to.
-fn to_py(py: Python<'_>, error: Error) -> PyErr {
+fn to_py(py: Python<'_>, error: ClientError) -> PyErr {
     let message = error.to_string();
     match &error {
-        Error::Unreachable(attempts) => {
+        ClientError::Unreachable(attempts) => {
             let attempts: Vec<(String, String)> = attempts
                 .iter()
                 .map(|(address, reason)| (address.to_string(), reason.clone()))
@@ -163,7 +163,7 @@ fn to_py(py: Python<'_>, error: Error) -> PyErr {
                 };
                 raise(py, class, (message, detail))
             }
-            None => raise(py, "Error", (message,)),
+            None => raise(py, "ClientError", (message,)),
         },
     }
 }
@@ -173,7 +173,7 @@ impl Client {
     fn call<T: Send>(
         &self,
         py: Python<'_>,
-        f: impl FnOnce(&mut Inner) -> Result<T, Error> + Send,
+        f: impl FnOnce(&mut Inner) -> Result<T, ClientError> + Send,
     ) -> PyResult<T> {
         let result = py.detach(|| {
             let mut inner = self

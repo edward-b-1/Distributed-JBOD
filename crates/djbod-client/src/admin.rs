@@ -21,7 +21,7 @@ use djbod_core::version::VersionId;
 use djbod_proto::handshake::Hello;
 use djbod_proto::message::{ErrorCode, ErrorDetail, RecordCursor, Request, Response};
 
-use crate::connection::{ClientError, Connection};
+use crate::connection::{Connection, ConnectionError};
 use crate::transport::Connector;
 
 /// What one node answered when asked for its document.
@@ -175,7 +175,7 @@ async fn fetch_document_and_hello(
         Connection::connect_with(connector, address, Connection::client_hello(cluster_id))
             .await
             .map_err(|e| match e {
-                ClientError::Hello(djbod_proto::handshake::HelloError::ClusterId {
+                ConnectionError::Hello(djbod_proto::handshake::HelloError::ClusterId {
                     peer,
                     ours,
                 }) => AdminError::WrongCluster {
@@ -183,7 +183,7 @@ async fn fetch_document_and_hello(
                     expected: ours,
                     found: peer,
                 },
-                ClientError::Remote(ErrorDetail {
+                ConnectionError::Remote(ErrorDetail {
                     code: ErrorCode::ProtocolViolation,
                     message,
                     ..
@@ -361,7 +361,7 @@ async fn apply_to(
     {
         Ok(Response::ApplyClusterConfig) => Ok(()),
         Ok(other) => Err(format!("unexpected response {other:?}")),
-        Err(ClientError::Remote(detail)) => Err(detail.message),
+        Err(ConnectionError::Remote(detail)) => Err(detail.message),
         Err(e) => Err(e.to_string()),
     }
 }

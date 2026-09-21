@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use djbod_client::admin;
-use djbod_client::connection::{ClientError, Connection};
+use djbod_client::connection::{Connection, ConnectionError};
 use djbod_core::cluster::Transport;
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
@@ -174,7 +174,7 @@ async fn joined_node(peer: &TestNode, tls: Option<TlsPaths>) -> TestNode {
 
 impl TestNode {
     #[allow(clippy::result_large_err)]
-    async fn client(&self, connector: &Connector) -> Result<Connection, ClientError> {
+    async fn client(&self, connector: &Connector) -> Result<Connection, ConnectionError> {
         Connection::connect_with(
             connector,
             self.addr,
@@ -303,7 +303,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
         assert_eq!(n.node.document().version, document.version);
     }
     match a.client(&plain).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::TlsRequired);
             assert_eq!(detail.node, Some(a.node.id()));
         }
@@ -402,7 +402,7 @@ async fn a_server_certificate_for_another_address_is_refused() {
     let a = first_node(1, 0, Some(authority.issue("10.0.0.1"))).await;
     let tls = tls_connector(&authority.issue("admin"));
     match a.client(&tls).await {
-        Err(ClientError::Wire(_)) => {}
+        Err(ConnectionError::Wire(_)) => {}
         Err(other) => panic!("expected a handshake failure, got {other}"),
         Ok(_) => panic!("a certificate for another address must be refused"),
     }
@@ -759,7 +759,7 @@ async fn a_silent_upload_is_abandoned_after_the_idle_timeout() {
             .await
             .expect("the coordinator must give up");
     match outcome {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert!(detail.message.contains("no frame arrived"), "{detail:?}")
         }
         Err(_) => {}
