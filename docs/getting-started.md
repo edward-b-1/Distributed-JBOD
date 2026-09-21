@@ -348,6 +348,18 @@ copy is removed. If the old device was unreachable at the time, its copy
 stays behind; the next `scrub` reports it as a stale copy and `scrub
 --repair` removes it.
 
+**What a disk holds.** Free space cannot tell you whether a disk is
+empty, since the filesystem itself takes room. `contents` counts what
+djbod has on each device from its records, without reading data:
+
+```sh
+target/release/djbod contents                     # every device: versions, keys, blocks, shard bytes
+target/release/djbod contents --node-id nas1      # one machine's disks
+target/release/djbod contents nas1-bay0           # one disk
+```
+
+A device with zero versions holds nothing and can be removed.
+
 **Draining a device.** To empty a disk before pulling it, first stop new
 data arriving on it, then move what it holds; the two are separate
 commands so each can be checked before the next:

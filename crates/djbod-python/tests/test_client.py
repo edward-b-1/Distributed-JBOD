@@ -87,3 +87,18 @@ def test_status_and_document(client):
     assert document["name"] == "pytest"
     assert document["version"] == status.document_version
     assert os.environ.get("DJBOD_NODE_BIN") or True
+
+
+def test_device_contents_are_counted(client):
+    status = client.status()
+    device = status.devices[0]["device"]
+    before = client.device_contents(device)
+    client.put("counted", b"y" * 1000)
+    after = client.device_contents(device)
+    assert after["versions"] == before["versions"] + 1
+    assert after["keys"] == before["keys"] + 1
+    assert after["shard_bytes"] > before["shard_bytes"]
+    assert after["device"] == device
+    with pytest.raises(ValueError):
+        client.device_contents("not a uuid")
+    client.delete("counted")

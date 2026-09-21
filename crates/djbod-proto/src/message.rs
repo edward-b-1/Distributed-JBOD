@@ -153,6 +153,11 @@ pub struct ListQuery {
 pub enum Request {
     // ---- client to coordinator
     Status,
+    /// What one device holds (SPEC 18.2.3): counted from the record
+    /// copies on it, without reading any data.
+    DeviceContents {
+        device: DeviceId,
+    },
     /// Followed by a body stream of exactly `size` bytes.
     PutObject {
         key: String,
@@ -283,6 +288,25 @@ pub enum Request {
 
 // ------------------------------------------------------------- responses
 
+/// What a device holds (SPEC 18.2.3): every version with a shard on it
+/// leaves a record copy there, so the count is of records, with the
+/// shard bytes and blocks computed from them. A device with zero
+/// versions holds no data and may be removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceContents {
+    pub device: DeviceId,
+    pub node: NodeId,
+    pub state: DeviceState,
+    /// Versions with a shard on the device; one shard file each.
+    pub versions: u64,
+    /// Distinct keys among those versions.
+    pub keys: u64,
+    /// Blocks in those shard files, one per stripe.
+    pub blocks: u64,
+    /// Bytes of shard files, from the records' sizes and schemes.
+    pub shard_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceStatus {
     pub device: DeviceId,
@@ -373,6 +397,7 @@ pub enum Response {
         transport: Transport,
         devices: Vec<DeviceStatus>,
     },
+    DeviceContents(DeviceContents),
     PutObject {
         version: VersionId,
     },

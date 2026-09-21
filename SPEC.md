@@ -1326,6 +1326,9 @@ inspected before the next is run:
   lists it, stops accepting connections and its process exits. Both scans
   are `membership::scan_references` (18.5). Removing the last node is
   refused.
+- **`djbod contents [<device>...] [--node-id <node>]`** shows what each
+  device holds (18.2.3), so that the state of a drain, and whether a
+  device is empty, is a count and not an inference from free space.
 - **`djbod cluster remove-device <device>`** and **`remove-node <id>`**
   change membership only. They refuse an `active` device, or a node with
   any `active` device, before looking at any record: only a `draining`
@@ -1339,6 +1342,18 @@ inspected before the next is run:
   `drain`, `remove-node`, each of which can be checked with `status` and
   `scrub` in between. A dead node is the one case that skips the scan:
   6.2.6.3.
+
+18.2.3 [D] **What a device holds.** Free space says nothing about
+whether a device is empty: `statvfs` counts the whole filesystem, and a
+disk with nothing of djbod's on it still has a filesystem. The count that
+matters is of versions with a shard on the device, and every such version
+leaves a record copy there (9.4), so the coordinator fetches the device's
+records from its node, as the drain's estimate does, and reports the
+number of versions, of distinct keys, of blocks, and the shard bytes,
+computed from the records' sizes and schemes; no shard is read. This is
+the `DeviceContents` operation (19.1.3), `djbod contents` at the command
+line, and `Client::device_contents` in the library. Zero versions means
+the device holds nothing and `remove-device` will not find it referenced.
 
 18.2.2 [D] **Running out of room.** Re-placement chooses a target exactly
 as a write does (10.4, 10.5): an `active` device with room for the shard
@@ -1551,6 +1566,12 @@ coordinator, and those nodes send to each other. Every response is either
   document version, coordinator node
   UUID, and for every device in the cluster: UUID, owning node, state,
   total bytes, free bytes. Implemented by broadcasting `LocalStatus`.
+
+`DeviceContents`
+: Request: device UUID. Response: the device, its node and state, and
+  the number of versions with a shard on it, of distinct keys, of blocks,
+  and the shard bytes (18.2.3). Counted from the device's record copies,
+  fetched from its node with `LocalRecords`; no data is read.
 
 `PutObject`
 : Request: key, size, optional content type, optional user metadata.

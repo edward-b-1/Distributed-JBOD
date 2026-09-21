@@ -953,3 +953,41 @@ async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
         "{err}"
     );
 }
+
+/// `contents` counts what each device holds (SPEC 18.2.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contents_show_what_each_device_holds() {
+    let test = start_node(3, 2, 1).await;
+    let (ok, out, err) = djbod(&test, &["contents"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("VERSIONS"), "{out}");
+    assert!(err.contains("3 device(s) hold nothing"), "{err}");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(200_000, 7)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "contents"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|r| r["versions"] == 1 && r["keys"] == 1),
+        "{out}"
+    );
+
+    // By label, and by node.
+    let device = rows[0]["device"].as_str().unwrap().to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "bay0"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["contents", "bay0"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(out.contains("bay0"), "{out}");
+    let node_id = test.node.id().0.to_string();
+    let (ok, out, err) = djbod(&test, &["contents", "--node-id", &node_id]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 4, "{out}");
+}

@@ -236,3 +236,41 @@ async fn the_blocking_client_does_the_same_without_async() {
     assert_eq!(result.1, b"first");
     assert_eq!(result.2, BLOCK + 5 + 2);
 }
+
+/// SPEC 18.2.3: what a device holds is counted from its records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn device_contents_count_versions_keys_blocks_and_bytes() {
+    let (a, b) = two_nodes().await;
+    let mut client = Client::connect(ClientOptions::new(vec![a.addr]).cluster(a.node.cluster_id()))
+        .await
+        .expect("connect");
+    let device_a = a.node.devices()[0].id();
+    let device_b = b.node.devices()[0].id();
+    let empty = client.device_contents(device_a).await.expect("contents");
+    assert_eq!(
+        (empty.versions, empty.keys, empty.blocks, empty.shard_bytes),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(empty.node, a.node.id());
+
+    // Two keys, one written twice: the second write replaces the first
+    // version, so two versions remain, and 1+1 puts a shard of each on
+    // both devices.
+    let body: Vec<u8> = vec![1u8; 2 * BLOCK as usize + 7];
+    client.put("k", &body, None).await.expect("put");
+    client.put("k", &body, None).await.expect("put again");
+    client.put("other", b"x", None).await.expect("put other");
+    for device in [device_a, device_b] {
+        let contents = client.device_contents(device).await.expect("contents");
+        assert_eq!(contents.versions, 2, "{contents:?}");
+        assert_eq!(contents.keys, 2);
+        // k spans three blocks (two full and a short one), `other` one.
+        assert_eq!(contents.blocks, 3 + 1);
+        assert!(contents.shard_bytes > 2 * BLOCK + 7, "{contents:?}");
+    }
+    let unknown = client
+        .device_contents(djbod_core::record::DeviceId(Uuid::new_v4()))
+        .await
+        .expect_err("unknown device");
+    assert!(unknown.is_not_found(), "{unknown}");
+}

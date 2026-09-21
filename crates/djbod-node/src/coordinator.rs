@@ -28,9 +28,9 @@ use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    ClusterFinding, DataFrame, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry,
-    ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, RepairReport, Request, Response,
-    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
+    ClusterFinding, DataFrame, DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail,
+    KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, RepairReport, Request,
+    Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -44,6 +44,7 @@ pub fn is_client_operation(request: &Request) -> bool {
     matches!(
         request,
         Request::Status
+            | Request::DeviceContents { .. }
             | Request::PutObject { .. }
             | Request::GetObject { .. }
             | Request::HeadObject { .. }
@@ -67,6 +68,9 @@ pub async fn handle(
 ) -> Result<(), ConnectionEnd> {
     let outcome: Result<(), Failure> = match request {
         Request::Status => respond(writer, id, status(node).await).await,
+        Request::DeviceContents { device } => {
+            respond(writer, id, device_contents(node, device).await).await
+        }
         Request::HeadObject { key } => respond(writer, id, head_object(node, &key).await).await,
         Request::DeleteObject { key } => respond(writer, id, delete_object(node, &key).await).await,
         Request::ListKeys(query) => respond(writer, id, list_keys(node, query).await).await,
@@ -449,6 +453,44 @@ async fn newest_version(node: &Arc<Node>, key: &str) -> Result<MetadataRecord, F
 }
 
 // ------------------------------------------------------------ handlers
+
+/// What one device holds (SPEC 18.2.3), from the record copies on it,
+/// fetched from its node page by page as the drain's estimate fetches
+/// them; no shard is read.
+async fn device_contents(node: &Arc<Node>, device: DeviceId) -> Result<Response, Failure> {
+    let document = node.document();
+    let Some(entry) = document.device(device) else {
+        return Err(Failure::Error(ErrorDetail {
+            device: Some(device),
+            ..ErrorDetail::new(
+                ErrorCode::NotFound,
+                format!("{device} is not in the cluster document"),
+            )
+        }));
+    };
+    let records = fetch_device_records(node, entry.node, device).await?;
+    let mut keys: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let mut blocks = 0u64;
+    let mut shard_bytes = 0u64;
+    for record in &records {
+        keys.insert(record.key.as_str());
+        if let Ok(scheme) = record.scheme() {
+            if let Some(geometry) = shard_geometry(scheme, record.block_size, record.size) {
+                blocks += geometry.block_count;
+            }
+            shard_bytes += shard_file_length(scheme, record.block_size, record.size).unwrap_or(0);
+        }
+    }
+    Ok(Response::DeviceContents(DeviceContents {
+        device,
+        node: entry.node,
+        state: entry.state,
+        versions: records.len() as u64,
+        keys: keys.len() as u64,
+        blocks,
+        shard_bytes,
+    }))
+}
 
 async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     let document = node.document();
