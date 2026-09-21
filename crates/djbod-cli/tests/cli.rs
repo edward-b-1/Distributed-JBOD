@@ -9,6 +9,7 @@ use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use tokio::net::TcpListener;
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 fn xorshift64_bytes(len: usize, seed: u64) -> Vec<u8> {
@@ -990,4 +991,137 @@ async fn contents_show_what_each_device_holds() {
     let (ok, out, err) = djbod(&test, &["contents", "--node-id", &node_id]);
     assert!(ok, "{err}");
     assert_eq!(out.lines().count(), 4, "{out}");
+}
+
+/// Cell text and its terminal column, keeping single spaces inside values
+/// such as NODE LABEL, human-readable byte counts, and address lists.
+fn table_cells(line: &str) -> Vec<(&str, usize)> {
+    let mut offset = 0;
+    line.split("  ")
+        .filter_map(|cell| {
+            let start = offset + cell.len() - cell.trim_start().len();
+            offset += cell.len() + 2;
+            let text = cell.trim();
+            (!text.is_empty()).then(|| (text, line[..start].width()))
+        })
+        .collect()
+}
+
+fn assert_table_columns(out: &str, columns: &[(&str, bool)], row_count: usize) {
+    let mut lines = out.lines().skip_while(|l| !l.starts_with(columns[0].0));
+    let header = table_cells(lines.next().expect("table header"));
+    assert_eq!(header.len(), columns.len(), "{out}");
+    for (i, (name, _)) in columns.iter().enumerate() {
+        assert_eq!(header[i].0, *name, "{out}");
+    }
+    let rows: Vec<_> = lines.collect();
+    assert_eq!(rows.len(), row_count, "{out}");
+    for line in rows {
+        let cells = table_cells(line);
+        assert_eq!(cells.len(), columns.len(), "{out}");
+        for i in 0..columns.len() {
+            let (name, right) = columns[i];
+            let edge = |cell: (&str, usize)| cell.1 + if right { cell.0.width() } else { 0 };
+            assert_eq!(
+                edge(cells[i]),
+                edge(header[i]),
+                "{name} is misaligned:\n{out}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_tables_align_long_unicode_and_missing_labels() {
+    let test = start_node(5, 3, 1).await;
+    let labels = [
+        Some("bay0".to_string()),
+        Some("d".repeat(128)),
+        Some("界".repeat(9)),
+        Some("e\u{301}".repeat(9)),
+        None,
+    ];
+    let mut document = test.node.document();
+    for i in 0..labels.len() {
+        document.devices[i].label = labels[i].clone();
+    }
+    document.nodes[0]
+        .addresses
+        .push("[2001:db8:abcd:1234:5678:abcd:1234:5678]:5263".to_string());
+    let addresses = document.nodes[0].addresses.join(", ");
+    for node_label in [
+        Some("n".repeat(128)),
+        Some("界".repeat(9)),
+        Some("e\u{301}".repeat(9)),
+        None,
+    ] {
+        document.nodes[0].label = node_label.clone();
+        document.version += 1;
+        test.node.apply_document(document.clone()).expect("labels");
+
+        let (ok, out, err) = djbod(&test, &["status"]);
+        assert!(ok, "{err}");
+        for label in labels.iter().flatten() {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("DEVICE", false),
+                ("LABEL", false),
+                ("NODE", false),
+                ("NODE LABEL", false),
+                ("STATE", false),
+                ("TOTAL", true),
+                ("FREE", true),
+            ],
+            labels.len(),
+        );
+
+        let (ok, out, err) = djbod(&test, &["contents"]);
+        assert!(ok, "{err}");
+        for label in labels.iter().flatten() {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("DEVICE", false),
+                ("LABEL", false),
+                ("NODE LABEL", false),
+                ("STATE", false),
+                ("VERSIONS", true),
+                ("KEYS", true),
+                ("BLOCKS", true),
+                ("SHARD BYTES", true),
+            ],
+            labels.len(),
+        );
+
+        let (ok, out, err) = djbod(&test, &["cluster", "show"]);
+        assert!(ok, "{err}");
+        assert!(out.contains(&addresses), "addresses were truncated: {out}");
+        if let Some(label) = &node_label {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("NODE", false),
+                ("LABEL", false),
+                ("ADDRESS", false),
+                ("BUILD", false),
+                ("VERSION", false),
+            ],
+            1,
+        );
+
+        let (ok, out, err) = djbod(&test, &["--json", "status"]);
+        assert!(ok, "{err}");
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        for (entry, label) in json["devices"].as_array().unwrap().iter().zip(&labels) {
+            assert_eq!(entry["label"].as_str(), label.as_deref());
+            assert_eq!(entry["node_label"].as_str(), node_label.as_deref());
+        }
+    }
 }

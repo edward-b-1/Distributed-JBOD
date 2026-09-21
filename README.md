@@ -287,9 +287,12 @@ discussion live in [docs/proposals](docs/proposals). The crates are
 native protocol), `djbod-client` (the client library every program
 uses: node addresses with failover, one method per operation, async or
 blocking, and the administration procedures), `djbod-node`,
-`djbod-cli`, `djbod-recover`, and `djbod-ui`;
+`djbod-cli`, `djbod-recover`, `djbod-table` (shared text tables), and `djbod-ui`;
 `cargo test --workspace` runs everything, starting nodes on localhost
 ports, and takes a few seconds.
+
+`python3 -m unittest discover -s scripts/tests -v` checks the PKI helper's
+certificate listing using temporary certificates; it requires `openssl`.
 
 ## Status
 

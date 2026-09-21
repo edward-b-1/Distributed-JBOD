@@ -1,6 +1,6 @@
 //! `djbod-recover` (SPEC 20.2): given device directories and no running
 //! cluster, list the versions present and reassemble any version for
-//! which k intact shards can be found. Built on `djbod-core` alone. It
+//! which k intact shards can be found. Disk access uses `djbod-core`. It
 //! reads the objects tree directly, so a device whose identity file is
 //! lost is as good as any other, and it never writes to a device.
 
@@ -24,6 +24,7 @@ use djbod_core::record::MetadataRecord;
 use djbod_core::shardfile::{shard_geometry, ShardFileReader};
 use djbod_core::stripe::{decode_stripe, DecodedStripe};
 use djbod_core::version::VersionId;
+use djbod_table::{Column, Table};
 
 #[derive(Parser)]
 #[command(
@@ -220,10 +221,15 @@ fn sorted_entries(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
 fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let found = scan(device_paths)?;
     let mut unrecoverable = 0usize;
-    println!(
-        "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  STATUS",
-        "KEY", "VERSION", "REV", "SIZE", "SHARDS"
-    );
+    let mut table = Table::new([
+        Column::left(40),
+        Column::left(26),
+        Column::right(3),
+        Column::right(12),
+        Column::left(7),
+        Column::left(0),
+    ]);
+    table.push(["KEY", "VERSION", "REV", "SIZE", "SHARDS", "STATUS"]);
     for ((key, version), record) in &found.records {
         let present = found
             .shards
@@ -237,14 +243,14 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             unrecoverable += 1;
             "NOT recoverable"
         };
-        println!(
-            "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  {status}",
-            key,
+        table.push([
+            key.clone(),
             version.to_text(),
-            record.revision,
-            record.size,
-            format!("{present}/{total}")
-        );
+            record.revision.to_string(),
+            record.size.to_string(),
+            format!("{present}/{total}"),
+            status.to_string(),
+        ]);
     }
     // Shards whose record was not found at all.
     for ((hash, version), shards) in &found.shards {
@@ -253,17 +259,18 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             .values()
             .any(|r| r.key_hash == *hash && r.version == *version)
         {
-            println!(
-                "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  no record found; key unknown",
+            table.push([
                 format!("(key hash {})", &hash.to_hex()[..16]),
                 version.to_text(),
-                "-",
-                "-",
-                format!("{}/?", shards.len())
-            );
+                "-".to_string(),
+                "-".to_string(),
+                format!("{}/?", shards.len()),
+                "no record found; key unknown".to_string(),
+            ]);
             unrecoverable += 1;
         }
     }
+    print!("{table}");
     for problem in &found.problems {
         eprintln!("problem: {problem}");
     }
