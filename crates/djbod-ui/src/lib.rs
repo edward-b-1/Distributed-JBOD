@@ -70,12 +70,12 @@ use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
 use djbod_client::connection::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
+use djbod_client::membership::{self, MembershipError};
 use djbod_client::transport::Connector;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
-use djbod_node::membership::{self, MembershipError};
 use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response as Reply};
 
 /// The page, embedded so the binary is self-contained.
@@ -482,8 +482,6 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
         M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
         M::Superseded { .. } => (StatusCode::CONFLICT, "superseded"),
-        M::AlreadyMember { .. } => (StatusCode::CONFLICT, "already_member"),
-        M::RemovedDevice { .. } => (StatusCode::CONFLICT, "removed_device"),
         M::StillReferenced { .. } => (StatusCode::CONFLICT, "still_referenced"),
         M::DeviceActive(_) => (StatusCode::CONFLICT, "device_active"),
         M::NodeHasActiveDevices { .. } => (StatusCode::CONFLICT, "node_has_active_devices"),
@@ -491,17 +489,10 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::LastNode => (StatusCode::CONFLICT, "last_node"),
         M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
         M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
-        // Only `djbod-node run` proposes its own address; not reachable here.
-        M::AddressChangeFailed { .. } => (StatusCode::BAD_GATEWAY, "address_change_failed"),
         M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
         // A document that fails validation: a bad or duplicate label, a
         // scheme the devices cannot carry, and the like.
-        M::Node(djbod_node::node::NodeError::InvalidDocument(_)) => {
-            (StatusCode::CONFLICT, "invalid_document")
-        }
-        M::Node(_) => (StatusCode::INTERNAL_SERVER_ERROR, "node"),
-        M::Device(_) => (StatusCode::INTERNAL_SERVER_ERROR, "device"),
-        M::Tls(_) => (StatusCode::INTERNAL_SERVER_ERROR, "tls"),
+        M::Document(_) => (StatusCode::CONFLICT, "invalid_document"),
     }
 }
 

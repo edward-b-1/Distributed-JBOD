@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use djbod_client::connection::{ClientError, Connection};
+use djbod_client::membership as admin;
 use djbod_core::cluster::Transport;
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
@@ -254,10 +255,9 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
 
     // tls-optional: nodes speak TLS to each other from now on. A write
     // through a reaches b and c only over TLS.
-    let (document, changed) =
-        membership::set_transport(&plain, a.addr, cluster, Transport::TlsOptional)
-            .await
-            .expect("set transport");
+    let (document, changed) = admin::set_transport(&plain, a.addr, cluster, Transport::TlsOptional)
+        .await
+        .expect("set transport");
     assert!(changed);
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
@@ -295,7 +295,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
     );
 
     // tls: plain is refused with a message saying so; the TLS client works.
-    let (document, changed) = membership::set_transport(&plain, a.addr, cluster, Transport::Tls)
+    let (document, changed) = admin::set_transport(&plain, a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     assert!(changed);
@@ -322,11 +322,11 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
         other => panic!("{other:?}"),
     }
     // Membership operations work over TLS too, and a repeat is a no-op.
-    let (_, changed) = membership::set_transport(&tls, a.addr, cluster, Transport::Tls)
+    let (_, changed) = admin::set_transport(&tls, a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport again");
     assert!(!changed);
-    let (_, changed) = membership::set_device_state(
+    let (_, changed) = admin::set_device_state(
         &tls,
         b.addr,
         cluster,
@@ -338,7 +338,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
     assert!(changed);
 
     // Back to plain, proposed over TLS since plain is refused.
-    let (document, _) = membership::set_transport(&tls, c.addr, cluster, Transport::Plain)
+    let (document, _) = admin::set_transport(&tls, c.addr, cluster, Transport::Plain)
         .await
         .expect("back to plain");
     for n in [&a, &b, &c] {
@@ -358,10 +358,8 @@ async fn moving_off_plain_is_refused_while_a_node_lacks_material() {
     let a = first_node(1, 1, Some(authority.issue("127.0.0.1"))).await;
     let b = joined_node(&a, None).await;
     let cluster = a.node.cluster_id();
-    match membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::TlsOptional)
-        .await
-    {
-        Err(membership::MembershipError::NodeNotTlsReady { node, .. }) => {
+    match admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::TlsOptional).await {
+        Err(admin::MembershipError::NodeNotTlsReady { node, .. }) => {
             assert_eq!(node, b.node.id())
         }
         other => panic!("expected NodeNotTlsReady, got {other:?}"),
@@ -382,7 +380,7 @@ async fn a_node_without_material_refuses_to_start_under_a_tls_transport() {
     let mut authority = Authority::new();
     let a = first_node(1, 0, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     let mut config = a.config.clone();
@@ -418,16 +416,18 @@ async fn a_node_joins_a_tls_cluster_with_its_own_certificate() {
     let a = first_node(1, 1, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
     let tls = tls_connector(&authority.issue("admin"));
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     // Joining without material is refused with a clear reason.
     let (_, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(addr, vec![a.addr.to_string()], None);
     match membership::join(&config, a.addr, cluster, false).await {
-        Err(membership::MembershipError::Unreachable { .. })
-        | Err(membership::MembershipError::PeerUnreachable { .. })
-        | Err(membership::MembershipError::TlsRequired { .. }) => {}
+        Err(membership::LocalMembershipError::Membership(
+            admin::MembershipError::Unreachable { .. }
+            | admin::MembershipError::PeerUnreachable { .. }
+            | admin::MembershipError::TlsRequired { .. },
+        )) => {}
         other => panic!("expected a refusal, got {other:?}"),
     }
     // With its own certificate the node joins and serves over TLS.
@@ -676,7 +676,7 @@ async fn sustained_writes_over_tls_all_complete() {
     let c = joined_node(&b, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
     let tls = tls_connector(&authority.issue("admin"));
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     let mut client = a.client(&tls).await.expect("tls client");
