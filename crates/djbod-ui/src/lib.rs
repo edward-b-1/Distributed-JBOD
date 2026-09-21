@@ -69,8 +69,8 @@ use serde_json::{json, Value};
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
+use djbod_client::admin::{self, AdminError};
 use djbod_client::connection::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
-use djbod_client::membership::{self, MembershipError};
 use djbod_client::transport::Connector;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
@@ -392,7 +392,7 @@ pub enum ApiError {
     /// The node could not be reached or talked to.
     Client(Box<ClientError>),
     /// A document change failed.
-    Membership(Box<MembershipError>),
+    Membership(Box<AdminError>),
     /// The request itself was wrong.
     BadRequest(String),
 }
@@ -408,8 +408,8 @@ impl From<ClientError> for ApiError {
     }
 }
 
-impl From<MembershipError> for ApiError {
-    fn from(e: MembershipError) -> ApiError {
+impl From<AdminError> for ApiError {
+    fn from(e: AdminError) -> ApiError {
         ApiError::Membership(Box::new(e))
     }
 }
@@ -464,8 +464,8 @@ impl IntoResponse for ApiError {
 /// because of its current state, or another change won the race, which
 /// a retry settles; 500 for a fault in this server's own configuration.
 /// The code is the error's name, for scripts.
-fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
-    use MembershipError as M;
+fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
+    use AdminError as M;
     match e {
         M::BadAddress { .. } => (StatusCode::BAD_GATEWAY, "bad_address"),
         M::Unreachable { .. } => (StatusCode::BAD_GATEWAY, "unreachable"),
@@ -513,7 +513,7 @@ async fn connect(target: &Target) -> ApiResult<Connection> {
 async fn device_param(app: &App, name: &str) -> ApiResult<DeviceId> {
     match Uuid::parse_str(name) {
         Ok(uuid) => Ok(DeviceId(uuid)),
-        Err(_) => Ok(membership::resolve_device(
+        Err(_) => Ok(admin::resolve_device(
             &app.target.connector,
             app.target.node,
             app.target.cluster,
@@ -563,9 +563,8 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
 /// in it answers when asked for its own version (`djbod cluster show`).
 async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
-    let document =
-        membership::fetch_document(&target.connector, target.node, target.cluster).await?;
-    let reports = membership::fetch_all(&target.connector, &document).await;
+    let document = admin::fetch_document(&target.connector, target.node, target.cluster).await?;
+    let reports = admin::fetch_all(&target.connector, &document).await;
     let nodes: Vec<Value> = reports
         .iter()
         .map(|r| {
@@ -585,7 +584,7 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
 
 async fn cluster_sync(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
-    let report = membership::sync(&target.connector, target.node, target.cluster).await?;
+    let report = admin::sync(&target.connector, target.node, target.cluster).await?;
     Ok(Json(json!({
         "highest_version": report.highest_version,
         "updated": report.updated,
@@ -603,7 +602,7 @@ struct SchemeBody {
 
 async fn cluster_scheme(State(app): State<Arc<App>>, Json(body): Json<SchemeBody>) -> ApiResult {
     let target = &app.target;
-    let (document, changed) = membership::set_scheme(
+    let (document, changed) = admin::set_scheme(
         &target.connector,
         target.node,
         target.cluster,
@@ -636,7 +635,7 @@ async fn cluster_limits(State(app): State<Arc<App>>, Json(body): Json<LimitsBody
     {
         return Err(ApiError::BadRequest("no limit given".to_string()));
     }
-    let (document, changed) = membership::set_limits(
+    let (document, changed) = admin::set_limits(
         &target.connector,
         target.node,
         target.cluster,
@@ -1217,7 +1216,7 @@ async fn set_device_state(
             "a device is removed with the remove action, after draining".to_string(),
         ));
     }
-    let (document, changed) = membership::set_device_state(
+    let (document, changed) = admin::set_device_state(
         &target.connector,
         target.node,
         target.cluster,
@@ -1253,7 +1252,7 @@ async fn set_device_label(
         .label
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
-    let (document, changed) = membership::set_device_label(
+    let (document, changed) = admin::set_device_label(
         &target.connector,
         target.node,
         target.cluster,
@@ -1273,7 +1272,7 @@ async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> A
     let target = &app.target;
     let device = device_param(&app, &id).await?;
     let (document, changed) =
-        membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
+        admin::remove_device(&target.connector, target.node, target.cluster, device).await?;
     Ok(Json(json!({
         "device": device,
         "document_version": document.version,
@@ -1294,7 +1293,7 @@ async fn set_node_label(
         .label
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
-    let (document, changed) = membership::set_node_label(
+    let (document, changed) = admin::set_node_label(
         &target.connector,
         target.node,
         target.cluster,
@@ -1313,8 +1312,7 @@ async fn set_node_label(
 async fn remove_node(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
     let target = &app.target;
     let node = NodeId(parse_id(&id, "node")?);
-    let document =
-        membership::remove_node(&target.connector, target.node, target.cluster, node).await?;
+    let document = admin::remove_node(&target.connector, target.node, target.cluster, node).await?;
     Ok(Json(json!({
         "node": node,
         "document_version": document.version,

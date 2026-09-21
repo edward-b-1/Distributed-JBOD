@@ -69,7 +69,7 @@ struct Cli {
 /// cluster document.
 async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
     let (node, cluster) = reachable_node(cli).await?;
-    djbod_client::membership::resolve_device(&connector(cli)?, node, cluster, name)
+    djbod_client::admin::resolve_device(&connector(cli)?, node, cluster, name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -78,7 +78,7 @@ async fn resolve_device(cli: &Cli, name: &str) -> anyhow::Result<DeviceId> {
 /// cluster document.
 async fn resolve_node(cli: &Cli, name: &str) -> anyhow::Result<NodeId> {
     let (node, cluster) = reachable_node(cli).await?;
-    djbod_client::membership::resolve_node(&connector(cli)?, node, cluster, name)
+    djbod_client::admin::resolve_node(&connector(cli)?, node, cluster, name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -882,11 +882,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             match command {
                 ClusterCommand::Show => {
                     let document =
-                        djbod_client::membership::fetch_document(&connector(&cli)?, node, cluster)
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let reports =
-                        djbod_client::membership::fetch_all(&connector(&cli)?, &document).await;
+                        djbod_client::admin::fetch_all(&connector(&cli)?, &document).await;
                     if cli.json {
                         let rows: Vec<serde_json::Value> = reports
                             .iter()
@@ -944,7 +944,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         StateArg::Active => DeviceState::Active,
                     };
                     let device_id = resolve_device(&cli, device).await?;
-                    let (document, changed) = djbod_client::membership::set_device_state(
+                    let (document, changed) = djbod_client::admin::set_device_state(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -984,7 +984,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     let devices: Vec<Uuid> = match (device, node_id) {
                         (Some(device), _) => vec![resolve_device(&cli, device).await?.0],
                         (None, Some(node_id)) => {
-                            let document = djbod_client::membership::fetch_document(
+                            let document = djbod_client::admin::fetch_document(
                                 &connector(&cli)?,
                                 node,
                                 cluster,
@@ -1022,7 +1022,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 ClusterCommand::SetScheme { k, m, block_size } => {
-                    let (document, changed) = djbod_client::membership::set_scheme(
+                    let (document, changed) = djbod_client::admin::set_scheme(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1072,7 +1072,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         DeviceTransport::TlsOptional => djbod_core::cluster::Transport::TlsOptional,
                         DeviceTransport::Tls => djbod_core::cluster::Transport::Tls,
                     };
-                    let (document, changed) = djbod_client::membership::set_transport(
+                    let (document, changed) = djbod_client::admin::set_transport(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1106,7 +1106,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     max_object_bytes,
                     max_user_metadata_bytes,
                 } => {
-                    let (document, changed) = djbod_client::membership::set_limits(
+                    let (document, changed) = djbod_client::admin::set_limits(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1140,7 +1140,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 ClusterCommand::Reencode => {
                     let document =
-                        djbod_client::membership::fetch_document(&connector(&cli)?, node, cluster)
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let failures = reencode_all(&cli, &document).await?;
@@ -1154,7 +1154,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     clear: _,
                 } => {
                     let device_id = resolve_device(&cli, device).await?;
-                    let (document, changed) = djbod_client::membership::set_device_label(
+                    let (document, changed) = djbod_client::admin::set_device_label(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1188,7 +1188,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
                 ClusterCommand::SetName { name, clear: _ } => {
-                    let (document, changed) = djbod_client::membership::set_cluster_name(
+                    let (document, changed) = djbod_client::admin::set_cluster_name(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1226,7 +1226,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     clear: _,
                 } => {
                     let id = resolve_node(&cli, node_id).await?;
-                    let (document, changed) = djbod_client::membership::set_node_label(
+                    let (document, changed) = djbod_client::admin::set_node_label(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1261,7 +1261,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 ClusterCommand::SetAddress { node_id, addresses } => {
                     let id = resolve_node(&cli, node_id).await?;
-                    let (document, changed) = djbod_client::membership::set_node_addresses(
+                    let (document, changed) = djbod_client::admin::set_node_addresses(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1293,7 +1293,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 ClusterCommand::RemoveDevice { device } => {
                     let device_id = resolve_device(&cli, device).await?;
-                    let (document, changed) = djbod_client::membership::remove_device(
+                    let (document, changed) = djbod_client::admin::remove_device(
                         &connector(&cli)?,
                         node,
                         cluster,
@@ -1326,7 +1326,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 } => {
                     let id = resolve_node(&cli, node_id).await?;
                     let document =
-                        djbod_client::membership::remove_node(&connector(&cli)?, node, cluster, id)
+                        djbod_client::admin::remove_node(&connector(&cli)?, node, cluster, id)
                             .await
                             .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
@@ -1353,7 +1353,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     force_remove_node(&cli, node, cluster, id, *yes).await?
                 }
                 ClusterCommand::Sync => {
-                    let report = djbod_client::membership::sync(&connector(&cli)?, node, cluster)
+                    let report = djbod_client::admin::sync(&connector(&cli)?, node, cluster)
                         .await
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                     if cli.json {
@@ -1538,8 +1538,8 @@ async fn force_remove_node(
     node_id: NodeId,
     yes: bool,
 ) -> anyhow::Result<()> {
-    use djbod_client::membership;
-    let plan = membership::plan_forced_removal(&connector(cli)?, peer, cluster, node_id)
+    use djbod_client::admin;
+    let plan = admin::plan_forced_removal(&connector(cli)?, peer, cluster, node_id)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let unrecoverable = plan.unrecoverable();
@@ -1586,7 +1586,7 @@ async fn force_remove_node(
             bail!("confirmation did not match; nothing changed");
         }
     }
-    let document = membership::execute_forced_removal(&connector(cli)?, &plan)
+    let document = admin::execute_forced_removal(&connector(cli)?, &plan)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !cli.json {

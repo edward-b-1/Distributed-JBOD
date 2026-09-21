@@ -1,8 +1,8 @@
 //! Membership changes that touch this node's own state directory:
 //! joining a cluster (SPEC 18.1.1), adding devices to a member (18.1.3),
 //! and startup adoption (18.1.2). Each is built on the administration
-//! procedures of `djbod_client::membership`, which every other change
-//! uses directly.
+//! procedures of `djbod_client::admin`, which every other change uses
+//! directly.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,9 +10,9 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
 
-use djbod_client::membership::{
-    fetch_all_except, fetch_document, propose, propose_skipping, with_node_addresses,
-    MembershipError, MAX_PROPOSAL_ATTEMPTS,
+use djbod_client::admin::{
+    fetch_all_except, fetch_document, propose, propose_skipping, with_node_addresses, AdminError,
+    MAX_PROPOSAL_ATTEMPTS,
 };
 use djbod_core::cluster::{ClusterDocument, NodeId};
 use djbod_core::device::{Device, DeviceError};
@@ -22,13 +22,13 @@ use crate::config::NodeConfig;
 use crate::node::{Node, NodeError};
 use crate::transport::{Connector, TlsError, TlsMaterial};
 
-/// What can go wrong when this node joins, adds a device, or adopts at
-/// startup: an administration procedure failing, or this node's own
-/// files and material.
+/// What can go wrong with this node's own membership, joining, adding a
+/// device, or adopting at startup: the administration step failing, or
+/// this node's own files and material.
 #[derive(Debug, Error)]
-pub enum LocalMembershipError {
+pub enum MembershipError {
     #[error(transparent)]
-    Membership(#[from] MembershipError),
+    Admin(#[from] AdminError),
     #[error(transparent)]
     Node(#[from] NodeError),
     #[error(transparent)]
@@ -47,7 +47,7 @@ pub enum LocalMembershipError {
     AddressChangeFailed {
         configured: SocketAddr,
         listed: Vec<String>,
-        reason: Box<MembershipError>,
+        reason: Box<AdminError>,
     },
 }
 
@@ -59,14 +59,14 @@ pub async fn join(
     peer: SocketAddr,
     cluster_id: Uuid,
     wipe_removed_devices: bool,
-) -> Result<ClusterDocument, LocalMembershipError> {
+) -> Result<ClusterDocument, MembershipError> {
     // A joining node does not yet know the cluster's transport; it tries
     // TLS first when it has material (a plain peer accepts nothing else
     // if the transport is tls) and falls back to plain otherwise.
     let connector = connector_for_unknown_transport(config, peer, cluster_id).await?;
     let mut current = fetch_document(&connector, peer, cluster_id).await?;
     if current.transport != djbod_core::cluster::Transport::Plain && config.tls.is_none() {
-        return Err(MembershipError::TlsRequired {
+        return Err(AdminError::TlsRequired {
             transport: current.transport,
         }
         .into());
@@ -95,7 +95,7 @@ async fn connector_for_unknown_transport(
     config: &NodeConfig,
     peer: SocketAddr,
     cluster_id: Uuid,
-) -> Result<Connector, LocalMembershipError> {
+) -> Result<Connector, MembershipError> {
     if let Some(paths) = &config.tls {
         let material = TlsMaterial::load(paths)?;
         let tls = material.connector();
@@ -111,13 +111,13 @@ async fn connector_for_unknown_transport(
 pub fn connector_for(
     config: &NodeConfig,
     document: &ClusterDocument,
-) -> Result<Connector, LocalMembershipError> {
+) -> Result<Connector, MembershipError> {
     if document.transport == djbod_core::cluster::Transport::Plain {
         return Ok(Connector::plain());
     }
     match &config.tls {
         Some(paths) => Ok(TlsMaterial::load(paths)?.connector()),
-        None => Err(MembershipError::TlsRequired {
+        None => Err(AdminError::TlsRequired {
             transport: document.transport,
         }
         .into()),
@@ -133,7 +133,7 @@ fn open_or_initialise(
     path: &Path,
     document: &ClusterDocument,
     wipe_removed: bool,
-) -> Result<Device, LocalMembershipError> {
+) -> Result<Device, MembershipError> {
     match Device::open(path, Some(document.cluster_id)) {
         Ok(existing) if document.device(existing.id()).is_some() => Ok(existing),
         Ok(existing) if wipe_removed => {
@@ -145,7 +145,7 @@ fn open_or_initialise(
             drop(existing);
             Ok(Device::wipe_and_initialise(path, document.cluster_id)?)
         }
-        Ok(existing) => Err(LocalMembershipError::RemovedDevice {
+        Ok(existing) => Err(MembershipError::RemovedDevice {
             path: path.to_path_buf(),
             device: existing.id(),
         }),
@@ -165,14 +165,14 @@ pub async fn add_devices(
     peer: SocketAddr,
     cluster_id: Uuid,
     wipe_removed_devices: bool,
-) -> Result<ClusterDocument, LocalMembershipError> {
+) -> Result<ClusterDocument, MembershipError> {
     let connector = connector_for_unknown_transport(config, peer, cluster_id).await?;
     let mut current = fetch_document(&connector, peer, cluster_id).await?;
     let mut device_ids: Vec<DeviceId> = Vec::new();
     for path in paths {
         if let Ok(existing) = Device::open(path, Some(cluster_id)) {
             if current.device(existing.id()).is_some() {
-                return Err(LocalMembershipError::AlreadyMember { path: path.clone() });
+                return Err(MembershipError::AlreadyMember { path: path.clone() });
             }
         }
         let device = open_or_initialise(path, &current, wipe_removed_devices)?;
@@ -196,7 +196,7 @@ async fn propose_with_retry(
     device_ids: &[DeviceId],
     peer: SocketAddr,
     cluster_id: Uuid,
-) -> Result<ClusterDocument, LocalMembershipError> {
+) -> Result<ClusterDocument, MembershipError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         // A retry after a partial apply may find the change already in
         // the document; then there is nothing to propose.
@@ -212,25 +212,22 @@ async fn propose_with_retry(
                 Node::save_document_for(config, &next)?;
                 return Ok(next);
             }
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. }) => {
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => {
                 *current = fetch_document(connector, peer, cluster_id).await?;
                 Node::save_document_for(config, current)?;
             }
             Err(e) => return Err(e.into()),
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS).into())
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS).into())
 }
 
 /// Startup adoption (18.1.2): compare the saved document with each
 /// bootstrap peer's, adopt a higher version, refuse a different cluster,
 /// ignore unreachable peers. Returns the document to open with.
-pub async fn adopt_from_peers(
-    config: &NodeConfig,
-) -> Result<ClusterDocument, LocalMembershipError> {
+pub async fn adopt_from_peers(config: &NodeConfig) -> Result<ClusterDocument, MembershipError> {
     let mut document = Node::load_document_for(config)?.ok_or_else(|| {
-        LocalMembershipError::Node(NodeError::Io {
+        MembershipError::Node(NodeError::Io {
             path: Node::document_path_for(config),
             source: std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -254,7 +251,7 @@ pub async fn adopt_from_peers(
                 document = theirs;
             }
             Ok(_) => {}
-            Err(e @ MembershipError::WrongCluster { .. }) => return Err(e.into()),
+            Err(e @ AdminError::WrongCluster { .. }) => return Err(e.into()),
             Err(e) => {
                 tracing::warn!(%peer, error = %e, "bootstrap peer not consulted");
             }
@@ -272,7 +269,7 @@ pub async fn adopt_from_peers(
 async fn adopt_configured_address(
     config: &NodeConfig,
     mut document: ClusterDocument,
-) -> Result<ClusterDocument, LocalMembershipError> {
+) -> Result<ClusterDocument, MembershipError> {
     let node = NodeId(config.node_id);
     let configured = config.advertised_address();
     let connector = connector_for(config, &document)?;
@@ -297,9 +294,9 @@ async fn adopt_configured_address(
                 );
                 return Ok(next);
             }
-            Err(MembershipError::Superseded { .. })
-            | Err(MembershipError::StaleProposal { .. })
-            | Err(MembershipError::VersionsDiffer(_)) => {
+            Err(AdminError::Superseded { .. })
+            | Err(AdminError::StaleProposal { .. })
+            | Err(AdminError::VersionsDiffer(_)) => {
                 // Another change won; take the newest document any other
                 // node holds and try again from there.
                 for report in fetch_all_except(&connector, &document, Some(node)).await {
@@ -312,7 +309,7 @@ async fn adopt_configured_address(
                 }
             }
             Err(reason) => {
-                return Err(LocalMembershipError::AddressChangeFailed {
+                return Err(MembershipError::AddressChangeFailed {
                     configured,
                     listed,
                     reason: Box::new(reason),
@@ -320,5 +317,5 @@ async fn adopt_configured_address(
             }
         }
     }
-    Err(MembershipError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS).into())
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS).into())
 }

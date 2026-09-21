@@ -10,7 +10,7 @@
 //! - [`client`]: what a program uses (SPEC 20.8): several node addresses
 //!   with failover, the cluster id learned when not given, and one method
 //!   per operation. [`blocking`] is the same without `async`.
-//! - [`membership`]: administration, every change to the cluster document
+//! - [`admin`]: administration, every change to the cluster document
 //!   (6.2.6) and the procedures built on it, as a client makes them.
 //!
 //! The node, the command-line tool, and the web UI are all built on this
@@ -20,10 +20,10 @@
 /// `Hello` and printed by `--version`. The commit comes from `build.rs`.
 pub const BUILD: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("DJBOD_GIT_COMMIT"));
 
+pub mod admin;
 pub mod blocking;
 pub mod client;
 pub mod connection;
-pub mod membership;
 pub mod transport;
 pub mod wire;
 
