@@ -15,9 +15,24 @@ use uuid::Uuid;
 use djbod_core::cluster::ClusterDocument;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_proto::message::{DeviceContents, KeyEntry, ListQuery, RepairReport};
+use djbod_proto::message::{
+    DeviceContents, DrainEvent, KeyEntry, ListQuery, RepairReport, ScrubEvent, StreamEnd,
+};
 
-pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, Status};
+pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, MoveShardReport, Status};
+
+/// A scrub or drain in progress, read without `async`. It borrows the
+/// client's runtime, so the client must outlive it.
+pub struct EventRun<E> {
+    handle: tokio::runtime::Handle,
+    inner: crate::client::EventRun<E>,
+}
+
+impl<E: serde::de::DeserializeOwned> EventRun<E> {
+    pub fn next_event(&mut self) -> Result<Result<E, StreamEnd>, ClientError> {
+        self.handle.block_on(self.inner.next_event())
+    }
+}
 
 pub struct Client {
     runtime: Runtime,
@@ -101,6 +116,44 @@ impl Client {
 
     pub fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
         self.runtime.block_on(self.inner.list_all(prefix))
+    }
+
+    pub fn move_shard(
+        &mut self,
+        key: &str,
+        shard_index: u8,
+        target: Option<DeviceId>,
+    ) -> Result<MoveShardReport, ClientError> {
+        self.runtime
+            .block_on(self.inner.move_shard(key, shard_index, target))
+    }
+
+    /// Start a scrub; the run's `next_event` blocks for each event.
+    pub fn scrub(
+        &mut self,
+        max_bytes_per_second: Option<u64>,
+        repair: bool,
+    ) -> Result<EventRun<ScrubEvent>, ClientError> {
+        let run = self
+            .runtime
+            .block_on(self.inner.scrub(max_bytes_per_second, repair))?;
+        Ok(EventRun {
+            handle: self.runtime.handle().clone(),
+            inner: run,
+        })
+    }
+
+    /// Start a drain; the run's `next_event` blocks for each event.
+    pub fn drain(
+        &mut self,
+        device: DeviceId,
+        partial: bool,
+    ) -> Result<EventRun<DrainEvent>, ClientError> {
+        let run = self.runtime.block_on(self.inner.drain(device, partial))?;
+        Ok(EventRun {
+            handle: self.runtime.handle().clone(),
+            inner: run,
+        })
     }
 
     pub fn device_contents(&mut self, device: DeviceId) -> Result<DeviceContents, ClientError> {

@@ -274,3 +274,119 @@ async fn device_contents_count_versions_keys_blocks_and_bytes() {
         .expect_err("unknown device");
     assert!(unknown.is_not_found(), "{unknown}");
 }
+
+/// One node with `count` devices, for operations that need spare devices.
+async fn one_node(count: usize, k: u8, m: u8) -> TestNode {
+    let (listener, addr) = reserve_port().await;
+    let dirs: Vec<tempfile::TempDir> = (0..count)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let state = tempfile::tempdir().expect("temp dir");
+    let config = NodeConfig {
+        node_id: Uuid::new_v4(),
+        listen: addr,
+        advertise: None,
+        state_dir: state.path().to_path_buf(),
+        devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
+        bootstrap_peers: vec![],
+        temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
+        allow_shared_filesystem: true,
+        tls: None,
+    };
+    let node = Arc::new(
+        Node::init_cluster(
+            config,
+            ClusterParameters {
+                k,
+                m,
+                block_size: BLOCK,
+                headroom: 0.0,
+                ..ClusterParameters::default()
+            },
+        )
+        .expect("init cluster"),
+    );
+    TestNode {
+        _server: tokio::spawn(server::serve(node.clone(), listener)),
+        node,
+        addr,
+        _dirs: dirs,
+        _state: state,
+    }
+}
+
+/// The client's move-shard, scrub and drain: the last conversations that
+/// used to need a bare connection.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn move_shard_scrub_and_drain_are_client_methods() {
+    use djbod_proto::message::{DrainEvent, ScrubEvent};
+    let a = one_node(3, 1, 1).await;
+    let cluster = a.node.cluster_id();
+    let mut client = Client::connect(ClientOptions::new(vec![a.addr]).cluster(cluster))
+        .await
+        .expect("connect");
+    let body: Vec<u8> = vec![3u8; BLOCK as usize + 1];
+    client.put("k", &body, None).await.expect("put");
+    let record = client.head("k").await.expect("head");
+    let holders: Vec<_> = record.shards.iter().map(|s| s.device).collect();
+    let spare = a
+        .node
+        .devices()
+        .iter()
+        .map(|d| d.id())
+        .find(|d| !holders.contains(d))
+        .expect("a device without a shard");
+
+    // Move shard 0 to the spare device.
+    let moved = client
+        .move_shard("k", 0, Some(spare))
+        .await
+        .expect("move shard");
+    assert_eq!(moved.source, holders[0]);
+    assert_eq!(moved.record.shards[0].device, spare);
+    assert_eq!(moved.record.revision, record.revision + 1);
+    assert!(moved.source_cleaned && !moved.rebuilt);
+
+    // A scrub: one summary per device, then a clean end.
+    let mut run = client.scrub(None, false).await.expect("start scrub");
+    let mut summaries = 0;
+    let end = loop {
+        match run.next_event().await.expect("scrub event") {
+            Ok(ScrubEvent::NodeSummary { .. }) => summaries += 1,
+            Ok(other) => panic!("unexpected scrub event {other:?}"),
+            Err(end) => break end,
+        }
+    };
+    assert_eq!(summaries, 3);
+    assert!(end.error.is_none(), "{end:?}");
+
+    // Drain the device shard 0 now sits on: an estimate, one move, an end.
+    djbod_client::admin::set_device_state(
+        &djbod_client::transport::Connector::plain(),
+        a.addr,
+        cluster,
+        spare,
+        djbod_core::cluster::DeviceState::Draining,
+    )
+    .await
+    .expect("set draining");
+    let mut run = client.drain(spare, false).await.expect("start drain");
+    let mut events = Vec::new();
+    let end = loop {
+        match run.next_event().await.expect("drain event") {
+            Ok(event) => events.push(event),
+            Err(end) => break end,
+        }
+    };
+    assert!(
+        matches!(events[0], DrainEvent::Estimate { versions: 1, .. }),
+        "{events:?}"
+    );
+    assert!(matches!(events[1], DrainEvent::Moved { .. }), "{events:?}");
+    assert!(end.error.is_none(), "{end:?}");
+    let contents = client.device_contents(spare).await.expect("contents");
+    assert_eq!(contents.versions, 0, "drained empty");
+    // The client is usable again after the runs took its connection.
+    assert_eq!(client.get("k").await.expect("get").1, body);
+}

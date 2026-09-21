@@ -2101,9 +2101,11 @@ connection to the next address; only requests that are safe to repeat,
 the reads, the listing, and `Status`, are retried, and a write, a delete,
 a repair, or a refusal by the node is never repeated on the client's own
 initiative. The cluster id is given when known and otherwise learned
-from the first node that answers (19.1.5.1). Every object operation is
-one method; the streaming operations take a reader or a writer and hold
-one body chunk at a time (3.6); errors carry the node's detail of 16.2.
+from the first node that answers (19.1.5.1). Every operation is one
+method, the scrub and the drain returning a run that yields their events
+as the node sends them; the streaming operations take a reader or a
+writer and hold one body chunk at a time (3.6); errors carry the node's
+detail of 16.2.
 A blocking facade runs the same client on a runtime of its own, for
 programs and language bindings that call from ordinary threads. The
 `djbod` command is itself built on the client: `--node` (or

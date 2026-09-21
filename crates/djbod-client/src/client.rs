@@ -1,8 +1,8 @@
 //! The client a program uses (SPEC 20.8): several node addresses tried in
 //! order, the cluster id learned from the first node that answers when it
 //! is not given, one connection kept open, and a reconnection to the next
-//! node when that connection fails. Every object operation is one method;
-//! the scrub and drain event streams are reached through [`Client::connection`].
+//! node when that connection fails. Every operation is one method; the
+//! scrub and drain return an [`EventRun`] that yields their events.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -15,8 +15,8 @@ use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DeviceContents, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, RepairReport,
-    Request, Response,
+    DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    RepairReport, Request, Response, ScrubEvent, StreamEnd,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -132,6 +132,36 @@ pub struct Identity {
     pub document_version: u64,
 }
 
+/// What `MoveShard` reports (19.1.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoveShardReport {
+    /// The record at its new revision.
+    pub record: MetadataRecord,
+    /// The device the shard came from.
+    pub source: DeviceId,
+    /// Whether the source's copy was removed; if not, the scrub reports
+    /// it as stale and repair removes it.
+    pub source_cleaned: bool,
+    /// Whether the shard was rebuilt from the others rather than copied.
+    pub rebuilt: bool,
+}
+
+/// A scrub or drain in progress: the events as the node sends them, then
+/// the end. Reading past the end is an error.
+pub struct EventRun<E> {
+    connection: Connection,
+    id: u32,
+    event: std::marker::PhantomData<E>,
+}
+
+impl<E: serde::de::DeserializeOwned> EventRun<E> {
+    /// The next event, or the stream's end: `Ok(Ok(event))`, or
+    /// `Ok(Err(end))` once, where `end.error` says whether the run failed.
+    pub async fn next_event(&mut self) -> Result<Result<E, StreamEnd>, ClientError> {
+        Ok(self.connection.next_event(self.id).await?)
+    }
+}
+
 /// One page of a listing (15.2.1): keys in order, and whether more
 /// follow after the last one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,18 +238,9 @@ impl Client {
         self.connection.as_ref().map(|(address, _)| *address)
     }
 
-    /// Give up the client for its connection, reconnecting first if
-    /// needed: for a conversation that must own the connection, such as a
-    /// stream driven from another task.
-    pub async fn into_connection(mut self) -> Result<Connection, ClientError> {
-        self.connection().await?;
-        Ok(self.connection.take().expect("connected").1)
-    }
-
     /// The open connection, reconnecting to the next node if the last one
-    /// failed. For operations this client has no method for, such as the
-    /// scrub and drain event streams.
-    pub async fn connection(&mut self) -> Result<&mut Connection, ClientError> {
+    /// failed.
+    async fn connection(&mut self) -> Result<&mut Connection, ClientError> {
         if self.connection.is_none() {
             self.reconnect().await?;
         }
@@ -428,6 +449,74 @@ impl Client {
             Response::DeviceContents(contents) => Ok(contents),
             other => Err(Self::unexpected("DeviceContents", other)),
         }
+    }
+
+    /// Move one shard of an object to another device (18.8.2): `target`
+    /// names the device, or `None` chooses as a write would (10.4).
+    pub async fn move_shard(
+        &mut self,
+        key: &str,
+        shard_index: u8,
+        target: Option<DeviceId>,
+    ) -> Result<MoveShardReport, ClientError> {
+        match self
+            .request(
+                Request::MoveShard {
+                    key: key.to_string(),
+                    shard_index,
+                    target,
+                },
+                false,
+            )
+            .await?
+        {
+            Response::MoveShard {
+                record,
+                source,
+                source_cleaned,
+                rebuilt,
+            } => Ok(MoveShardReport {
+                record,
+                source,
+                source_cleaned,
+                rebuilt,
+            }),
+            other => Err(Self::unexpected("MoveShard", other)),
+        }
+    }
+
+    /// Start a cluster-wide scrub (20.1.2). The run owns the connection
+    /// until its last event; the client reconnects for whatever follows.
+    pub async fn scrub(
+        &mut self,
+        max_bytes_per_second: Option<u64>,
+        repair: bool,
+    ) -> Result<EventRun<ScrubEvent>, ClientError> {
+        self.connection().await?;
+        let (_, mut connection) = self.connection.take().expect("connected");
+        let id = connection.start_scrub(max_bytes_per_second, repair).await?;
+        Ok(EventRun {
+            connection,
+            id,
+            event: std::marker::PhantomData,
+        })
+    }
+
+    /// Start a drain of one draining device (18.2.1); events as for
+    /// [`Client::scrub`].
+    pub async fn drain(
+        &mut self,
+        device: DeviceId,
+        partial: bool,
+    ) -> Result<EventRun<DrainEvent>, ClientError> {
+        self.connection().await?;
+        let (_, mut connection) = self.connection.take().expect("connected");
+        let id = connection.start_drain(device, partial).await?;
+        Ok(EventRun {
+            connection,
+            id,
+            event: std::marker::PhantomData,
+        })
     }
 
     /// Rebuild what is damaged or missing of one object (18.3, 18.4).

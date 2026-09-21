@@ -560,7 +560,8 @@ impl Connection {
 
     /// The next CBOR event of a streaming administrative operation, or
     /// the stream's end.
-    async fn next_event<E: serde::de::DeserializeOwned>(
+    /// The next event of a scrub or drain stream, or its end.
+    pub async fn next_event<E: serde::de::DeserializeOwned>(
         &mut self,
         id: u32,
     ) -> Result<Result<E, StreamEnd>, ConnectionError> {

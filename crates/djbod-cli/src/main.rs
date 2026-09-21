@@ -26,12 +26,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use djbod_client::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
+use djbod_client::connection::ConnectionError;
 use djbod_client::transport::Connector;
 use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
-use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Request, Response};
+use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery};
 
 #[derive(Parser)]
 #[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_client::BUILD)]
@@ -340,17 +340,6 @@ async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Resul
     let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
     options.cluster = cluster;
     Client::connect(options).await.map_err(client_err)
-}
-
-/// A connection of its own, for conversations the client has no method
-/// for or that another task must drive: the event streams and the
-/// re-encode pipe.
-async fn raw_connection(cli: &Cli) -> anyhow::Result<Connection> {
-    connect(cli)
-        .await?
-        .into_connection()
-        .await
-        .map_err(client_err)
 }
 
 /// A node that answers, and the cluster id, for the membership
@@ -777,15 +766,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Scrub { rate_mib, repair } => {
             use djbod_proto::message::ScrubEvent;
-            let mut conn = raw_connection(&cli).await?;
-            let id = conn
-                .start_scrub(rate_mib.map(|m| m * 1024 * 1024), *repair)
+            let mut client = connect(&cli).await?;
+            let mut run = client
+                .scrub(rate_mib.map(|m| m * 1024 * 1024), *repair)
                 .await
-                .map_err(remote)?;
+                .map_err(client_err)?;
             let mut findings = 0usize;
             let mut repairs = 0usize;
             let end = loop {
-                match conn.next_scrub_event(id).await.map_err(remote)? {
+                match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
                         if cli.json {
                             println!("{}", serde_json::to_string(&event)?);
@@ -866,22 +855,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 Some(name) => Some(resolve_device(&cli, name).await?),
                 None => None,
             };
-            let mut conn = raw_connection(&cli).await?;
-            match conn
-                .request(Request::MoveShard {
-                    key: key.clone(),
-                    shard_index: *shard_index,
-                    target,
-                })
+            let mut client = connect(&cli).await?;
+            let djbod_client::MoveShardReport {
+                record,
+                source,
+                source_cleaned,
+                rebuilt,
+            } = client
+                .move_shard(key, *shard_index, target)
                 .await
-                .map_err(remote)?
+                .map_err(client_err)?;
             {
-                Response::MoveShard {
-                    record,
-                    source,
-                    source_cleaned,
-                    rebuilt,
-                } => {
+                {
                     if cli.json {
                         println!(
                             "{}",
@@ -906,7 +891,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     }
                 }
-                other => bail!("unexpected response {other:?}"),
             }
         }
         Command::Repair { key } => {
@@ -1566,21 +1550,17 @@ async fn reencode_one(
     cli: &Cli,
     record: &djbod_core::record::MetadataRecord,
 ) -> anyhow::Result<djbod_core::version::VersionId> {
-    let mut reader_connection = raw_connection(cli).await?;
-    let mut writer_connection = raw_connection(cli).await?;
+    // Two clients, since the read and the write run at once.
+    let mut reader = connect(cli).await?;
+    let mut writer = connect(cli).await?;
     let (mut pipe_in, mut pipe_out) = tokio::io::duplex(4 * 1024 * 1024);
     let key = record.key.clone();
-    let get = tokio::spawn(async move {
-        reader_connection
-            .get_object_to_writer(&key, &mut pipe_in)
-            .await
-    });
-    let put = writer_connection
-        .put_object_with_metadata(
+    let get = tokio::spawn(async move { reader.get_to_writer(&key, &mut pipe_in).await });
+    let put = writer
+        .put_from_reader(
             &record.key,
             record.size,
             &mut pipe_out,
-            DEFAULT_BODY_CHUNK,
             record.content_type.clone(),
             record.user_metadata.clone(),
         )
@@ -1597,8 +1577,8 @@ async fn reencode_one(
             }
             Ok(version)
         }
-        (Err(e), _) => Err(anyhow::anyhow!("read failed: {}", describe_error(&e))),
-        (Ok(_), Err(e)) => Err(anyhow::anyhow!("write failed: {}", describe_error(&e))),
+        (Err(e), _) => Err(anyhow::anyhow!("read failed: {}", client_err(e))),
+        (Ok(_), Err(e)) => Err(anyhow::anyhow!("write failed: {}", client_err(e))),
     }
 }
 
@@ -1708,13 +1688,13 @@ async fn force_remove_node(
 /// Run one drain and print its progress. Returns whether every version
 /// was moved.
 async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
-    let mut conn = raw_connection(cli).await?;
-    let id = conn.start_drain(device, partial).await.map_err(remote)?;
+    let mut client = connect(cli).await?;
+    let mut run = client.drain(device, partial).await.map_err(client_err)?;
     let mut moved = 0usize;
     let mut deleted = 0usize;
     let mut skipped: Vec<(String, String)> = Vec::new();
     let end = loop {
-        match conn.next_drain_event(id).await.map_err(remote)? {
+        match run.next_event().await.map_err(client_err)? {
             Ok(event) => {
                 if cli.json {
                     println!("{}", serde_json::to_string(&event)?);

@@ -28,5 +28,6 @@ pub mod transport;
 pub mod wire;
 
 pub use client::{
-    ask, ask_cluster_id, Client, ClientError, ClientOptions, Identity, ListPage, Status,
+    ask, ask_cluster_id, Client, ClientError, ClientOptions, EventRun, Identity, ListPage,
+    MoveShardReport, Status,
 };
