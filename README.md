@@ -69,6 +69,9 @@ breaking things on purpose and repairing them, naming, draining, and
 removing disks, adding a second machine, changing the scheme, recovering
 objects with no cluster running, and turning on TLS.
 
+The [detailed user guide](docs/user-guide.md) covers deployment,
+configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
+
 ## What you get
 
 - **Any disks, any machines.** Devices are plain directories on ordinary
