@@ -2087,6 +2087,11 @@ A blocking facade runs the same client on a runtime of its own, for
 programs and language bindings that call from ordinary threads. The
 `djbod` command is itself built on the client: `--node` (or
 `DJBOD_NODE`) takes several addresses, comma-separated, tried in order.
+Administration is part of the library too: the document-change
+procedures of 6.2.6 and everything built on them live beside the object
+operations, so the command-line tool and the web UI depend on the client
+crate alone; only joining, adding devices, and startup adoption, which
+touch a node's own state directory, stay with the node.
 
 20.8.1 [D] **Bindings.** Other languages wrap the Rust client rather than
 implementing the protocol again, so the awkward parts, paging, error
@@ -2307,8 +2312,8 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 |-------|----------|
 | `djbod-core` | On-disk format (device identity, shard file, metadata record), key hash, block checksums, Reed-Solomon wrapper, stripe encode and decode. No networking. Fully unit-tested, including round-trips through the code with every erasure pattern up to `m`. |
 | `djbod-proto` | Native protocol: frame header, handshake, CBOR message types for every operation in 19.1.3, data frames, stream ends. Runtime-agnostic (bytes in, messages out). Shared by node, client, and tools. |
-| `djbod-client` | The client library: frames over tokio streams, the client side of TLS, and one connection to a node with the `Hello` exchange, requests, and the streaming operations. What the node, the CLI, the web UI, and any other client are built on; the node-to-node shard transfers are here too, since they are the same conversation. |
-| `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), cluster document. Depends on `djbod-client` for reaching other nodes. |
+| `djbod-client` | The client library: frames over tokio streams, the client side of TLS, one connection to a node with the `Hello` exchange, requests, and the streaming operations, the `Client` of 20.8, and administration, every change to the cluster document (6.2.6) and the procedures built on it, as a client makes them. What the node, the CLI, the web UI, and any other client are built on; the node-to-node shard transfers are here too, since they are the same conversation. |
+| `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), the server side of the protocol, and the membership changes that touch a node's own state: joining, adding devices, startup adoption. Depends on `djbod-client` for everything it says to another node. |
 | `djbod-python` | The `djbod` Python package (20.8.1): the blocking client wrapped with PyO3, built with maturin. In the workspace so it compiles with everything else; its tests are Python, run by `scripts/python-tests.sh`. |
 | `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
 | `djbod-recover` | The offline recovery tool of 20.2, built on `djbod-core` only. |

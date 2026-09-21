@@ -18,7 +18,7 @@ use anyhow::Context;
 use clap::Parser;
 use uuid::Uuid;
 
-use djbod_node::transport::Connector;
+use djbod_client::transport::Connector;
 use djbod_ui::{router_for_hosts, Target};
 
 #[derive(Parser)]

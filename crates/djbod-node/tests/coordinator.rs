@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use djbod_client::connection::{ClientError, Connection};
+use djbod_client::membership as admin;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
 use djbod_core::erasure::ShardIndex;
@@ -14,7 +15,6 @@ use djbod_core::layout::shard_file_name;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_node::config::NodeConfig;
-use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_node::transport::Connector;
@@ -1036,7 +1036,7 @@ async fn move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged() 
 }
 
 async fn set_state(test: &TestNode, device: DeviceId, state: DeviceState) -> bool {
-    let (_, changed) = membership::set_device_state(
+    let (_, changed) = admin::set_device_state(
         &Connector::plain(),
         test.addr,
         test.node.cluster_id(),
@@ -1130,7 +1130,7 @@ async fn set_state_changes_placement_and_nothing_else() {
         device_state(&status_devices(&mut client).await, device),
         DeviceState::Active
     );
-    match membership::set_device_state(
+    match admin::set_device_state(
         &Connector::plain(),
         test.addr,
         test.node.cluster_id(),
@@ -1139,7 +1139,7 @@ async fn set_state_changes_placement_and_nothing_else() {
     )
     .await
     {
-        Err(membership::MembershipError::UnknownDevice(_)) => {}
+        Err(admin::MembershipError::UnknownDevice(_)) => {}
         other => panic!("expected UnknownDevice, got {other:?}"),
     }
 }
