@@ -19,7 +19,7 @@ use uuid::Uuid;
 use djbod_client::blocking::Client as Inner;
 use djbod_client::transport::Connector;
 use djbod_client::{ClientError, ClientOptions};
-use djbod_core::record::MetadataRecord;
+use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_proto::message::{ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery};
 
 /// An object's record without its body.
@@ -342,6 +342,15 @@ impl Client {
     fn list_all(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<Vec<KeyEntry>> {
         let keys = self.call(py, |inner| inner.list_all(prefix.as_deref()))?;
         Ok(keys.into_iter().map(KeyEntry::from_proto).collect())
+    }
+
+    /// What one device holds, by UUID: versions, keys, blocks and shard
+    /// bytes, as a dict; zero versions means it is empty.
+    fn device_contents<'py>(&self, py: Python<'py>, device: &str) -> PyResult<Bound<'py, PyAny>> {
+        let id = Uuid::parse_str(device)
+            .map_err(|e| PyValueError::new_err(format!("device id {device:?}: {e}")))?;
+        let contents = self.call(py, |inner| inner.device_contents(DeviceId(id)))?;
+        Ok(pythonize(py, &contents)?)
     }
 
     /// Rebuild what is damaged or missing of one object; the report as

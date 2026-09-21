@@ -98,6 +98,16 @@ fn connector(cli: &Cli) -> anyhow::Result<Connector> {
 enum Command {
     /// Show every device's state and free space.
     Status,
+    /// What each device holds: versions, keys, blocks and shard bytes,
+    /// counted from its records without reading data. A device with zero
+    /// versions is empty and may be removed.
+    Contents {
+        /// Devices to show, by UUID or label; every device when none.
+        devices: Vec<String>,
+        /// Only devices of this node, by UUID or label.
+        #[arg(long)]
+        node_id: Option<String>,
+    },
     /// Ask a node which cluster it serves. Needs --node only; prints the
     /// cluster id alone, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
     /// --json adds the name and the node's build.
@@ -499,6 +509,67 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 );
                 println!("document  version {}", document.version);
                 println!("transport {}", document.transport);
+            }
+        }
+        Command::Contents { devices, node_id } => {
+            let mut client = connect(&cli).await?;
+            let document = client.cluster_document().await.map_err(client_err)?;
+            let only_node = match node_id {
+                Some(name) => Some(resolve_node(&cli, name).await?),
+                None => None,
+            };
+            let mut chosen: Vec<DeviceId> = Vec::new();
+            for name in devices {
+                chosen.push(resolve_device(&cli, name).await?);
+            }
+            if chosen.is_empty() {
+                chosen = document
+                    .devices
+                    .iter()
+                    .filter(|d| only_node.is_none_or(|n| d.node == n))
+                    .filter(|d| d.state != DeviceState::Removed)
+                    .map(|d| d.id)
+                    .collect();
+            }
+            let mut rows = Vec::with_capacity(chosen.len());
+            for device in chosen {
+                rows.push(client.device_contents(device).await.map_err(client_err)?);
+            }
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+            } else {
+                println!(
+                    "{:<36}  {:<16}  {:<16}  {:<9}  {:>9}  {:>9}  {:>9}  {:>12}",
+                    "DEVICE",
+                    "LABEL",
+                    "NODE LABEL",
+                    "STATE",
+                    "VERSIONS",
+                    "KEYS",
+                    "BLOCKS",
+                    "SHARD BYTES"
+                );
+                for c in &rows {
+                    let entry = document.device(c.device);
+                    println!(
+                        "{:<36}  {:<16}  {:<16}  {:<9}  {:>9}  {:>9}  {:>9}  {:>12}",
+                        c.device.0,
+                        entry.and_then(|d| d.label.as_deref()).unwrap_or("-"),
+                        document
+                            .node(c.node)
+                            .and_then(|n| n.label.as_deref())
+                            .unwrap_or("-"),
+                        format!("{:?}", c.state).to_lowercase(),
+                        c.versions,
+                        c.keys,
+                        c.blocks,
+                        human_bytes(c.shard_bytes)
+                    );
+                }
+                let empty = rows.iter().filter(|c| c.versions == 0).count();
+                if empty > 0 {
+                    eprintln!("{empty} device(s) hold nothing and may be removed");
+                }
             }
         }
         Command::Status => {

@@ -255,6 +255,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
     use djbod_proto::message::Request::*;
     match request {
         Status => "Status",
+        DeviceContents { .. } => "DeviceContents",
         PutObject { .. } => "PutObject",
         GetObject { .. } => "GetObject",
         HeadObject { .. } => "HeadObject",

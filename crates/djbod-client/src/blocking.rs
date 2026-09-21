@@ -13,9 +13,9 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use djbod_core::cluster::ClusterDocument;
-use djbod_core::record::MetadataRecord;
+use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_proto::message::{KeyEntry, ListQuery, RepairReport};
+use djbod_proto::message::{DeviceContents, KeyEntry, ListQuery, RepairReport};
 
 pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, Status};
 
@@ -101,6 +101,10 @@ impl Client {
 
     pub fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
         self.runtime.block_on(self.inner.list_all(prefix))
+    }
+
+    pub fn device_contents(&mut self, device: DeviceId) -> Result<DeviceContents, ClientError> {
+        self.runtime.block_on(self.inner.device_contents(device))
     }
 
     pub fn repair(&mut self, key: &str) -> Result<RepairReport, ClientError> {

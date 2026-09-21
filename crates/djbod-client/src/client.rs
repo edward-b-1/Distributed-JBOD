@@ -12,10 +12,11 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use uuid::Uuid;
 
 use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
-use djbod_core::record::MetadataRecord;
+use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, RepairReport, Request, Response,
+    DeviceContents, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, RepairReport,
+    Request, Response,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -411,6 +412,21 @@ impl Client {
             if start_after.is_none() {
                 return Ok(keys);
             }
+        }
+    }
+
+    /// What one device holds (18.2.3), counted from its records without
+    /// reading data. Zero versions means the device is empty.
+    pub async fn device_contents(
+        &mut self,
+        device: DeviceId,
+    ) -> Result<DeviceContents, ClientError> {
+        match self
+            .request(Request::DeviceContents { device }, true)
+            .await?
+        {
+            Response::DeviceContents(contents) => Ok(contents),
+            other => Err(Self::unexpected("DeviceContents", other)),
         }
     }
 
