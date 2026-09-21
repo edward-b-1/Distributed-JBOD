@@ -70,7 +70,7 @@ use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
 use djbod_client::admin::{self, AdminError};
-use djbod_client::connection::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
+use djbod_client::connection::{Connection, ConnectionError, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_client::transport::Connector;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
@@ -390,17 +390,17 @@ pub enum ApiError {
     /// The node answered with an error; reported with every field.
     Remote(ErrorDetail),
     /// The node could not be reached or talked to.
-    Client(Box<ClientError>),
+    Client(Box<ConnectionError>),
     /// A document change failed.
     Membership(Box<AdminError>),
     /// The request itself was wrong.
     BadRequest(String),
 }
 
-impl From<ClientError> for ApiError {
-    fn from(e: ClientError) -> ApiError {
+impl From<ConnectionError> for ApiError {
+    fn from(e: ConnectionError) -> ApiError {
         match e {
-            ClientError::Remote(detail) | ClientError::StreamFailed(detail) => {
+            ConnectionError::Remote(detail) | ConnectionError::StreamFailed(detail) => {
                 ApiError::Remote(detail)
             }
             other => ApiError::Client(Box::new(other)),
@@ -416,7 +416,7 @@ impl From<AdminError> for ApiError {
 
 impl ApiError {
     fn unexpected(reply: Reply) -> ApiError {
-        ApiError::Client(Box::new(ClientError::UnexpectedMessage {
+        ApiError::Client(Box::new(ConnectionError::UnexpectedMessage {
             expected: "the operation's response",
             got: format!("{reply:?}"),
         }))
@@ -845,7 +845,7 @@ async fn download_object(
                     Ok(item) => item,
                     Err(e) => {
                         let detail = match e {
-                            ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                            ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                             other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                         };
                         app.record_failure(&key, "download", delivered, detail.clone());
@@ -1030,7 +1030,7 @@ async fn verify_object(
                 Err(e) => {
                     st.finished = true;
                     let detail = match e {
-                        ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                        ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
                     break done(&st.app, &st.key, false, Some(detail), st.bytes);
@@ -1118,7 +1118,7 @@ where
     Fut: std::future::Future<
             Output = (
                 Connection,
-                Result<Result<E, djbod_proto::message::StreamEnd>, ClientError>,
+                Result<Result<E, djbod_proto::message::StreamEnd>, ConnectionError>,
             ),
         > + Send
         + 'static,
@@ -1135,7 +1135,7 @@ where
                 Ok(Err(end)) => (json!({ "event": "end", "error": end.error }), true),
                 Err(e) => {
                     let detail = match e {
-                        ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                        ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
                     (json!({ "event": "end", "error": detail }), true)

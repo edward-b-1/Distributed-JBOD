@@ -20,7 +20,7 @@ use crate::transport::{Connector, Stream};
 use crate::wire::{read_message, write_message, WireError};
 
 #[derive(Debug, Error)]
-pub enum ClientError {
+pub enum ConnectionError {
     #[error(transparent)]
     Wire(#[from] WireError),
     #[error("peer refused the connection: {0}")]
@@ -53,7 +53,10 @@ pub struct Connection {
 impl Connection {
     /// Connect over plain TCP, send our `Hello`, and read the peer's. See
     /// `connect_with` for TLS.
-    pub async fn connect(addr: SocketAddr, our_hello: Hello) -> Result<Connection, ClientError> {
+    pub async fn connect(
+        addr: SocketAddr,
+        our_hello: Hello,
+    ) -> Result<Connection, ConnectionError> {
         Connection::connect_with(&Connector::plain(), addr, our_hello).await
     }
 
@@ -65,7 +68,7 @@ impl Connection {
         connector: &Connector,
         addr: SocketAddr,
         our_hello: Hello,
-    ) -> Result<Connection, ClientError> {
+    ) -> Result<Connection, ConnectionError> {
         let stream = connector.connect(addr).await.map_err(WireError::Io)?;
         let tls = stream.is_tls();
         let (read_half, write_half) = tokio::io::split(stream);
@@ -80,7 +83,7 @@ impl Connection {
         match read_message(&mut connection.reader).await? {
             Message::Hello(hello) => {
                 if hello.cluster_id != our_hello.cluster_id && !our_hello.asks_cluster_id() {
-                    return Err(ClientError::Hello(HelloError::ClusterId {
+                    return Err(ConnectionError::Hello(HelloError::ClusterId {
                         peer: hello.cluster_id,
                         ours: our_hello.cluster_id,
                     }));
@@ -90,9 +93,9 @@ impl Connection {
             Message::Response {
                 response: Response::Error(detail),
                 ..
-            } => return Err(ClientError::Remote(detail)),
+            } => return Err(ConnectionError::Remote(detail)),
             other => {
-                return Err(ClientError::UnexpectedMessage {
+                return Err(ConnectionError::UnexpectedMessage {
                     expected: "Hello",
                     got: describe(&other),
                 })
@@ -130,26 +133,26 @@ impl Connection {
     }
 
     /// Send a request and return its id, for operations that stream.
-    pub async fn send_request(&mut self, request: Request) -> Result<u32, ClientError> {
+    pub async fn send_request(&mut self, request: Request) -> Result<u32, ConnectionError> {
         let id = self.allocate_request_id();
         write_message(&mut self.writer, &Message::Request { id, request }).await?;
         Ok(id)
     }
 
     /// Read the response to request `id`. A `Response::Error` becomes
-    /// `ClientError::Remote`.
-    pub async fn read_response(&mut self, id: u32) -> Result<Response, ClientError> {
+    /// `ConnectionError::Remote`.
+    pub async fn read_response(&mut self, id: u32) -> Result<Response, ConnectionError> {
         match read_message(&mut self.reader).await? {
             Message::Response { id: got, response } => {
                 if got != id {
-                    return Err(ClientError::WrongRequestId { expected: id, got });
+                    return Err(ConnectionError::WrongRequestId { expected: id, got });
                 }
                 match response {
-                    Response::Error(detail) => Err(ClientError::Remote(detail)),
+                    Response::Error(detail) => Err(ConnectionError::Remote(detail)),
                     other => Ok(other),
                 }
             }
-            other => Err(ClientError::UnexpectedMessage {
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "Response",
                 got: describe(&other),
             }),
@@ -157,37 +160,37 @@ impl Connection {
     }
 
     /// Send a request and read its single response.
-    pub async fn request(&mut self, request: Request) -> Result<Response, ClientError> {
+    pub async fn request(&mut self, request: Request) -> Result<Response, ConnectionError> {
         let id = self.send_request(request).await?;
         self.read_response(id).await
     }
 
-    pub async fn send_data(&mut self, id: u32, data: DataFrame) -> Result<(), ClientError> {
+    pub async fn send_data(&mut self, id: u32, data: DataFrame) -> Result<(), ConnectionError> {
         write_message(&mut self.writer, &Message::Data { id, data }).await?;
         Ok(())
     }
 
-    pub async fn send_end(&mut self, id: u32, end: StreamEnd) -> Result<(), ClientError> {
+    pub async fn send_end(&mut self, id: u32, end: StreamEnd) -> Result<(), ConnectionError> {
         write_message(&mut self.writer, &Message::EndOfStream { id, end }).await?;
         Ok(())
     }
 
     /// Read the next item of the stream for request `id`.
-    pub async fn read_stream_item(&mut self, id: u32) -> Result<StreamItem, ClientError> {
+    pub async fn read_stream_item(&mut self, id: u32) -> Result<StreamItem, ConnectionError> {
         match read_message(&mut self.reader).await? {
             Message::Data { id: got, data } => {
                 if got != id {
-                    return Err(ClientError::WrongRequestId { expected: id, got });
+                    return Err(ConnectionError::WrongRequestId { expected: id, got });
                 }
                 Ok(StreamItem::Data(data))
             }
             Message::EndOfStream { id: got, end } => {
                 if got != id {
-                    return Err(ClientError::WrongRequestId { expected: id, got });
+                    return Err(ConnectionError::WrongRequestId { expected: id, got });
                 }
                 Ok(StreamItem::End(end))
             }
-            other => Err(ClientError::UnexpectedMessage {
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "Data or EndOfStream",
                 got: describe(&other),
             }),
@@ -203,12 +206,12 @@ impl Connection {
         blocks: &[ShardBlock],
         object_size: u64,
         object_checksum: djbod_core::checksum::BlockChecksum,
-    ) -> Result<(), ClientError> {
+    ) -> Result<(), ConnectionError> {
         let id = self.send_request(request).await?;
         match self.read_response(id).await? {
             Response::PutShardReady => {}
             other => {
-                return Err(ClientError::UnexpectedMessage {
+                return Err(ConnectionError::UnexpectedMessage {
                     expected: "PutShardReady",
                     got: format!("{other:?}"),
                 })
@@ -236,7 +239,7 @@ impl Connection {
         .await?;
         match self.read_response(id).await? {
             Response::PutShardDone => Ok(()),
-            other => Err(ClientError::UnexpectedMessage {
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "PutShardDone",
                 got: format!("{other:?}"),
             }),
@@ -250,12 +253,12 @@ impl Connection {
         &mut self,
         request: Request,
         shard_index: ShardIndex,
-    ) -> Result<Vec<ShardBlock>, ClientError> {
+    ) -> Result<Vec<ShardBlock>, ConnectionError> {
         let id = self.send_request(request).await?;
         let block_count = match self.read_response(id).await? {
             Response::GetShard { block_count } => block_count,
             other => {
-                return Err(ClientError::UnexpectedMessage {
+                return Err(ConnectionError::UnexpectedMessage {
                     expected: "GetShard",
                     got: format!("{other:?}"),
                 })
@@ -271,7 +274,7 @@ impl Connection {
                 }),
                 StreamItem::End(end) => {
                     if let Some(error) = end.error {
-                        return Err(ClientError::StreamFailed(error));
+                        return Err(ConnectionError::StreamFailed(error));
                     }
                     return Ok(blocks);
                 }
@@ -292,7 +295,7 @@ impl Connection {
         body: &[u8],
         chunk: usize,
         content_type: Option<String>,
-    ) -> Result<djbod_core::version::VersionId, ClientError> {
+    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
         let mut cursor = body;
         self.put_object_from_reader(key, body.len() as u64, &mut cursor, chunk, content_type)
             .await
@@ -309,7 +312,7 @@ impl Connection {
         source: &mut R,
         chunk: usize,
         content_type: Option<String>,
-    ) -> Result<djbod_core::version::VersionId, ClientError> {
+    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
         self.put_object_with_metadata(
             key,
             size,
@@ -331,7 +334,7 @@ impl Connection {
         chunk: usize,
         content_type: Option<String>,
         user_metadata: std::collections::BTreeMap<String, String>,
-    ) -> Result<djbod_core::version::VersionId, ClientError> {
+    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
         let id = self
             .send_request(Request::PutObject {
                 key: key.to_string(),
@@ -391,16 +394,16 @@ impl Connection {
             Message::Response {
                 response: Response::Error(detail),
                 ..
-            } => Err(ClientError::Remote(detail)),
-            Message::EndOfStream { end, .. } => {
-                Err(ClientError::StreamFailed(end.error.unwrap_or_else(|| {
+            } => Err(ConnectionError::Remote(detail)),
+            Message::EndOfStream { end, .. } => Err(ConnectionError::StreamFailed(
+                end.error.unwrap_or_else(|| {
                     ErrorDetail::new(
                         djbod_proto::message::ErrorCode::ProtocolViolation,
                         "upload ended without a version",
                     )
-                })))
-            }
-            other => Err(ClientError::UnexpectedMessage {
+                }),
+            )),
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "PutObject",
                 got: describe(&other),
             }),
@@ -411,7 +414,7 @@ impl Connection {
     pub async fn get_object(
         &mut self,
         key: &str,
-    ) -> Result<(djbod_core::record::MetadataRecord, Vec<u8>), ClientError> {
+    ) -> Result<(djbod_core::record::MetadataRecord, Vec<u8>), ConnectionError> {
         let mut body = Vec::new();
         let record = self.get_object_to_writer(key, &mut body).await?;
         Ok((record, body))
@@ -426,7 +429,7 @@ impl Connection {
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<djbod_core::record::MetadataRecord, ClientError> {
+    ) -> Result<djbod_core::record::MetadataRecord, ConnectionError> {
         let id = self
             .send_request(Request::GetObject {
                 key: key.to_string(),
@@ -435,7 +438,7 @@ impl Connection {
         let record = match self.read_response(id).await? {
             Response::GetObject { record } => record,
             other => {
-                return Err(ClientError::UnexpectedMessage {
+                return Err(ConnectionError::UnexpectedMessage {
                     expected: "GetObject",
                     got: format!("{other:?}"),
                 })
@@ -448,7 +451,7 @@ impl Connection {
                     if data.sequence != expected_sequence
                         || checksum_block(&data.bytes) != data.checksum
                     {
-                        return Err(ClientError::StreamFailed(ErrorDetail::new(
+                        return Err(ConnectionError::StreamFailed(ErrorDetail::new(
                             djbod_proto::message::ErrorCode::ProtocolViolation,
                             format!(
                                 "body chunk {} out of order or corrupt in transit",
@@ -461,7 +464,7 @@ impl Connection {
                 }
                 StreamItem::End(end) => {
                     if let Some(error) = end.error {
-                        return Err(ClientError::StreamFailed(error));
+                        return Err(ConnectionError::StreamFailed(error));
                     }
                     sink.flush().await.map_err(WireError::Io)?;
                     return Ok(record);
@@ -475,10 +478,13 @@ impl Connection {
     /// After a write failed mid-upload, read what the coordinator sent
     /// before closing, if anything, so the caller sees the refusal rather
     /// than a broken pipe.
-    async fn refusal_behind_write_error(&mut self, write_error: ClientError) -> ClientError {
+    async fn refusal_behind_write_error(
+        &mut self,
+        write_error: ConnectionError,
+    ) -> ConnectionError {
         match read_message(&mut self.reader).await {
             Ok(Message::EndOfStream { end, .. }) => {
-                ClientError::StreamFailed(end.error.unwrap_or_else(|| {
+                ConnectionError::StreamFailed(end.error.unwrap_or_else(|| {
                     ErrorDetail::new(
                         djbod_proto::message::ErrorCode::ProtocolViolation,
                         "upload ended without a version",
@@ -488,7 +494,7 @@ impl Connection {
             Ok(Message::Response {
                 response: Response::Error(detail),
                 ..
-            }) => ClientError::Remote(detail),
+            }) => ConnectionError::Remote(detail),
             _ => write_error,
         }
     }
@@ -501,7 +507,7 @@ impl Connection {
         &mut self,
         max_bytes_per_second: Option<u64>,
         repair: bool,
-    ) -> Result<u32, ClientError> {
+    ) -> Result<u32, ConnectionError> {
         let id = self
             .send_request(Request::Scrub {
                 max_bytes_per_second,
@@ -510,7 +516,7 @@ impl Connection {
             .await?;
         match self.read_response(id).await? {
             Response::ScrubStarted => Ok(id),
-            other => Err(ClientError::UnexpectedMessage {
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "ScrubStarted",
                 got: format!("{other:?}"),
             }),
@@ -521,7 +527,7 @@ impl Connection {
     pub async fn next_scrub_event(
         &mut self,
         id: u32,
-    ) -> Result<Result<djbod_proto::message::ScrubEvent, StreamEnd>, ClientError> {
+    ) -> Result<Result<djbod_proto::message::ScrubEvent, StreamEnd>, ConnectionError> {
         self.next_event(id).await
     }
 
@@ -531,13 +537,13 @@ impl Connection {
         &mut self,
         device: DeviceId,
         partial: bool,
-    ) -> Result<u32, ClientError> {
+    ) -> Result<u32, ConnectionError> {
         let id = self
             .send_request(Request::Drain { device, partial })
             .await?;
         match self.read_response(id).await? {
             Response::DrainStarted => Ok(id),
-            other => Err(ClientError::UnexpectedMessage {
+            other => Err(ConnectionError::UnexpectedMessage {
                 expected: "DrainStarted",
                 got: format!("{other:?}"),
             }),
@@ -548,7 +554,7 @@ impl Connection {
     pub async fn next_drain_event(
         &mut self,
         id: u32,
-    ) -> Result<Result<djbod_proto::message::DrainEvent, StreamEnd>, ClientError> {
+    ) -> Result<Result<djbod_proto::message::DrainEvent, StreamEnd>, ConnectionError> {
         self.next_event(id).await
     }
 
@@ -557,17 +563,17 @@ impl Connection {
     async fn next_event<E: serde::de::DeserializeOwned>(
         &mut self,
         id: u32,
-    ) -> Result<Result<E, StreamEnd>, ClientError> {
+    ) -> Result<Result<E, StreamEnd>, ConnectionError> {
         match self.read_stream_item(id).await? {
             StreamItem::Data(data) => {
                 if checksum_block(&data.bytes) != data.checksum {
-                    return Err(ClientError::StreamFailed(ErrorDetail::new(
+                    return Err(ConnectionError::StreamFailed(ErrorDetail::new(
                         djbod_proto::message::ErrorCode::ProtocolViolation,
                         "event corrupt in transit",
                     )));
                 }
                 let event = djbod_proto::codec::decode_cbor(&data.bytes).map_err(|e| {
-                    ClientError::StreamFailed(ErrorDetail::new(
+                    ConnectionError::StreamFailed(ErrorDetail::new(
                         djbod_proto::message::ErrorCode::ProtocolViolation,
                         e.to_string(),
                     ))

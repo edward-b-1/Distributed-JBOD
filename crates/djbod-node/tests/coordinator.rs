@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use djbod_client::admin;
-use djbod_client::connection::{ClientError, Connection};
+use djbod_client::connection::{Connection, ConnectionError};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
 use djbod_core::erasure::ShardIndex;
@@ -233,12 +233,12 @@ async fn put_head_get_list_delete_round_trip() {
         },
     ] {
         match client.request(request).await {
-            Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+            Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
             other => panic!("expected NotFound, got {other:?}"),
         }
     }
     match client.get_object("data/object-1").await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
         other => panic!("expected NotFound, got {other:?}"),
     }
     match client
@@ -350,7 +350,7 @@ async fn a_corrupt_block_fails_the_read_and_names_the_device() {
     // and stripe, and no reconstruction is served (11.4). The bytes for
     // stripes 0 and 1 may have been delivered before the failure.
     match client.get_object("k").await {
-        Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch);
             assert_eq!(detail.device, Some(device));
             assert_eq!(detail.shard_index, Some(1));
@@ -400,7 +400,7 @@ async fn a_corrupt_record_copy_fails_lookups_as_inconsistent() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
             assert_eq!(detail.device, Some(device.id()));
         }
@@ -415,7 +415,7 @@ async fn insufficient_devices_refuses_the_write_before_any_body_is_stored() {
     let mut client = test.client().await;
     let body = xorshift64_bytes(BLOCK as usize, 4);
     match client.put_object("k", &body, CHUNK, None).await {
-        Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices);
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -475,14 +475,16 @@ async fn oversized_keys_and_empty_keys_are_refused() {
     let mut client = test.client().await;
     let long = "x".repeat(16 * 1024 + 1);
     match client.request(Request::HeadObject { key: long }).await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
         other => panic!("expected KeyTooLong, got {other:?}"),
     }
     match client
         .request(Request::HeadObject { key: String::new() })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::ProtocolViolation),
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation)
+        }
         other => panic!("expected ProtocolViolation, got {other:?}"),
     }
 }
@@ -558,7 +560,7 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
     std::fs::write(&path, &bytes).expect("write");
     assert!(matches!(
         client.get_object("k").await,
-        Err(ClientError::StreamFailed(_))
+        Err(ConnectionError::StreamFailed(_))
     ));
     // A failed stream closes the connection; open another.
     let mut client = test.client().await;
@@ -629,7 +631,7 @@ async fn repair_recreates_a_missing_or_structurally_broken_shard() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -680,7 +682,7 @@ async fn repair_of_a_missing_key_and_an_empty_object() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
         other => panic!("expected NotFound, got {other:?}"),
     }
     client
@@ -729,7 +731,7 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent)
         }
         other => panic!("expected RecordsInconsistent, got {other:?}"),
@@ -757,7 +759,7 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
             assert!(
                 detail.message.contains("fewer than k"),
@@ -810,7 +812,7 @@ fn spare_device(test: &TestNode, record: &MetadataRecord) -> DeviceId {
 }
 
 #[allow(clippy::result_large_err)]
-async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ClientError> {
+async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ConnectionError> {
     match client
         .request(Request::HeadObject {
             key: key.to_string(),
@@ -848,7 +850,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices)
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -912,7 +914,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     )
     .expect("write");
     match head(&mut client, "k").await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
             assert!(
                 detail.message.contains("3 record copies found, 4 expected"),
@@ -1118,7 +1120,7 @@ async fn set_state_changes_placement_and_nothing_else() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices)
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -1179,7 +1181,7 @@ async fn drain_moves_every_version_off_the_device_and_reports_stale_copies() {
     // An active device cannot be drained: the state change is a separate,
     // explicit step.
     match client.start_drain(device, false).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::ProtocolViolation);
             assert!(detail.message.contains("set-state"), "{}", detail.message);
         }
@@ -1343,7 +1345,7 @@ async fn repair_rebuilds_the_shards_of_a_device_that_left_the_document() {
     next.devices.retain(|d| d.id != lost);
     test.node.apply_document(next).expect("apply");
     match client.get_object("k").await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
         }
         other => panic!("expected DeviceUnavailable, got {other:?}"),
@@ -1395,7 +1397,7 @@ async fn size_limits_come_from_the_cluster_document() {
         other => panic!("1000 bytes is within the limit: {other:?}"),
     }
     match client.put_object("short", &[7u8; 1001], CHUNK, None).await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::ObjectTooLarge);
             assert!(detail.message.contains("1000"), "{}", detail.message);
         }
@@ -1407,7 +1409,7 @@ async fn size_limits_come_from_the_cluster_document() {
         .put_object("nine-long", &[7u8; 10], CHUNK, None)
         .await
     {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::KeyTooLong);
             assert!(detail.message.contains("limit is 8"), "{}", detail.message);
         }
@@ -1420,7 +1422,7 @@ async fn size_limits_come_from_the_cluster_document() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
         other => panic!("expected KeyTooLong, got {other:?}"),
     }
     // The object stored under the old limits is untouched.
@@ -1442,7 +1444,7 @@ async fn oversized_metadata_is_refused_before_any_body_is_stored() {
     let body = [1u8; 10];
     let long_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES + 1));
     match client.put_object("k", &body, CHUNK, long_type).await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
         }
         other => panic!("expected MetadataTooLarge, got {other:?}"),
@@ -1455,7 +1457,7 @@ async fn oversized_metadata_is_refused_before_any_body_is_stored() {
         .put_object_with_metadata("k", 10, &mut cursor, CHUNK, None, big)
         .await
     {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
         }
         other => panic!("expected MetadataTooLarge, got {other:?}"),

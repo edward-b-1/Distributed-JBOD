@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
-use djbod_client::connection::{ClientError, Connection, DEFAULT_BODY_CHUNK};
+use djbod_client::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
 use djbod_client::transport::Connector;
 use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
@@ -398,9 +398,9 @@ fn cluster_id_from_refusal(message: &str) -> Option<Uuid> {
 }
 
 /// The library's error as an administrator wants to read it (SPEC 16.2).
-fn client_err(e: djbod_client::Error) -> anyhow::Error {
+fn client_err(e: djbod_client::ClientError) -> anyhow::Error {
     match e {
-        djbod_client::Error::Client(inner) => remote(*inner),
+        djbod_client::ClientError::Connection(inner) => remote(*inner),
         other => anyhow::anyhow!("{other}"),
     }
 }
@@ -408,9 +408,11 @@ fn client_err(e: djbod_client::Error) -> anyhow::Error {
 /// Render a client error the way an administrator wants to read it: the
 /// code, the message, then every identifying field the node supplied
 /// (SPEC 16.2).
-fn describe_error(e: &ClientError) -> String {
+fn describe_error(e: &ConnectionError) -> String {
     match e {
-        ClientError::Remote(detail) | ClientError::StreamFailed(detail) => describe_detail(detail),
+        ConnectionError::Remote(detail) | ConnectionError::StreamFailed(detail) => {
+            describe_detail(detail)
+        }
         other => other.to_string(),
     }
 }
@@ -438,7 +440,7 @@ fn describe_detail(detail: &ErrorDetail) -> String {
     out
 }
 
-fn remote(e: ClientError) -> anyhow::Error {
+fn remote(e: ConnectionError) -> anyhow::Error {
     anyhow::anyhow!("{}", describe_error(&e))
 }
 
