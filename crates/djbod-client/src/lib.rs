@@ -24,4 +24,4 @@ pub mod connection;
 pub mod transport;
 pub mod wire;
 
-pub use client::{Client, ClientOptions, Error, Identity, ListPage, Status};
+pub use client::{ask, ask_cluster_id, Client, ClientOptions, Error, Identity, ListPage, Status};

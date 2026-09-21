@@ -205,6 +205,14 @@ impl Client {
         self.connection.as_ref().map(|(address, _)| *address)
     }
 
+    /// Give up the client for its connection, reconnecting first if
+    /// needed: for a conversation that must own the connection, such as a
+    /// stream driven from another task.
+    pub async fn into_connection(mut self) -> Result<Connection, Error> {
+        self.connection().await?;
+        Ok(self.connection.take().expect("connected").1)
+    }
+
     /// The open connection, reconnecting to the next node if the last one
     /// failed. For operations this client has no method for, such as the
     /// scrub and drain event streams.
@@ -473,9 +481,23 @@ impl Client {
     }
 }
 
-/// Ask `address` which cluster it serves (19.1.5.1).
-pub async fn ask_cluster_id(connector: &Connector, address: SocketAddr) -> Result<Uuid, Error> {
+/// Ask `address` who it is without naming a cluster (19.1.5.1): the
+/// node answers with its `Hello` and closes.
+pub async fn ask(connector: &Connector, address: SocketAddr) -> Result<Identity, Error> {
     let connection =
         Connection::connect_with(connector, address, Connection::client_hello(Uuid::nil())).await?;
-    Ok(connection.peer_hello().cluster_id)
+    let hello = connection.peer_hello();
+    Ok(Identity {
+        address,
+        cluster_id: hello.cluster_id,
+        cluster_name: hello.cluster_name.clone(),
+        node: hello.node_id,
+        build: hello.build.clone(),
+        document_version: hello.document_version,
+    })
+}
+
+/// Ask `address` which cluster it serves (19.1.5.1).
+pub async fn ask_cluster_id(connector: &Connector, address: SocketAddr) -> Result<Uuid, Error> {
+    Ok(ask(connector, address).await?.cluster_id)
 }

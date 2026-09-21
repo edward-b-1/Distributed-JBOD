@@ -249,7 +249,7 @@ was off while the cluster changed catches up on its own.
 request, so point the client at whichever is nearest:
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263
+export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
 export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you
 djbod identity              # who is at DJBOD_NODE: cluster, node, build, document version
 djbod cluster show          # three nodes, one document version, each node's build

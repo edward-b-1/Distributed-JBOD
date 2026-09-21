@@ -1745,7 +1745,9 @@ there: the cluster's name and id, the node's label, id, and addresses,
 its build, the document version it holds, and the transport. A node from
 before this item refuses the nil id as a
 mismatch, and its refusal names the cluster it serves, so the id is
-learned either way. The nil UUID is therefore never a cluster id (6.2.1).
+learned either way; `djbod` reads it from that refusal, prints it as
+usual, and notes on standard error that the node wants upgrading. The
+nil UUID is therefore never a cluster id (6.2.1).
 
 19.1.6 [D] **TLS.** Optional; when enabled it authenticates nodes to each
 other, authenticates clients, and encrypts every connection. TLS wraps
@@ -2082,7 +2084,9 @@ from the first node that answers (19.1.5.1). Every object operation is
 one method; the streaming operations take a reader or a writer and hold
 one body chunk at a time (3.6); errors carry the node's detail of 16.2.
 A blocking facade runs the same client on a runtime of its own, for
-programs and language bindings that call from ordinary threads.
+programs and language bindings that call from ordinary threads. The
+`djbod` command is itself built on the client: `--node` (or
+`DJBOD_NODE`) takes several addresses, comma-separated, tried in order.
 
 20.8.1 [D] **Bindings.** Other languages wrap the Rust client rather than
 implementing the protocol again, so the awkward parts, paging, error
