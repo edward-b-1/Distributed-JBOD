@@ -1,24 +1,36 @@
 //! Human-readable tables. JSON output is serialized by the command handlers.
 
+use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_client::admin::NodeDocument;
 use djbod_core::cluster::ClusterDocument;
 use djbod_proto::message::{DeviceContents, DeviceStatus, KeyEntry};
-use djbod_table::{Column, Table};
 
 use super::human_bytes;
 
-pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> Table<8> {
-    let mut table = Table::new([
-        Column::left(36),
-        Column::left(16),
-        Column::left(16),
-        Column::left(9),
-        Column::right(9),
-        Column::right(9),
-        Column::right(9),
-        Column::right(12),
-    ]);
-    table.push([
+/// Columns two spaces apart with no border, each as wide as its widest
+/// cell, measured in terminal columns so wide characters line up.
+/// `right_aligned` names the numeric columns, which align on their right
+/// edge. Lines carry no trailing spaces.
+fn render(mut table: Table, right_aligned: &[usize]) -> String {
+    table.load_style(NOTHING);
+    let last = table.column_count().saturating_sub(1);
+    for (i, column) in table.column_iter_mut().enumerate() {
+        column.set_padding((0, if i == last { 0 } else { 2 }));
+        if right_aligned.contains(&i) {
+            column.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    let mut out = String::new();
+    for line in table.lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> String {
+    let mut table = Table::new();
+    table.set_header([
         "DEVICE",
         "LABEL",
         "NODE LABEL",
@@ -29,7 +41,7 @@ pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> T
         "SHARD BYTES",
     ]);
     for c in rows {
-        table.push([
+        table.add_row([
             c.device.0.to_string(),
             document
                 .device(c.device)
@@ -48,20 +60,12 @@ pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> T
             human_bytes(c.shard_bytes),
         ]);
     }
-    table
+    render(table, &[4, 5, 6, 7])
 }
 
-pub(super) fn status(devices: &[DeviceStatus]) -> Table<7> {
-    let mut table = Table::new([
-        Column::left(36),
-        Column::left(16),
-        Column::left(36),
-        Column::left(16),
-        Column::left(9),
-        Column::right(12),
-        Column::right(12),
-    ]);
-    table.push([
+pub(super) fn status(devices: &[DeviceStatus]) -> String {
+    let mut table = Table::new();
+    table.set_header([
         "DEVICE",
         "LABEL",
         "NODE",
@@ -71,7 +75,7 @@ pub(super) fn status(devices: &[DeviceStatus]) -> Table<7> {
         "FREE",
     ]);
     for d in devices {
-        table.push([
+        table.add_row([
             d.device.0.to_string(),
             d.label.as_deref().unwrap_or("-").to_string(),
             d.node.0.to_string(),
@@ -81,18 +85,12 @@ pub(super) fn status(devices: &[DeviceStatus]) -> Table<7> {
             human_bytes(d.free_bytes),
         ]);
     }
-    table
+    render(table, &[5, 6])
 }
 
-pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument]) -> Table<5> {
-    let mut table = Table::new([
-        Column::left(36),
-        Column::left(16),
-        Column::left(21),
-        Column::left(18),
-        Column::left(0),
-    ]);
-    table.push(["NODE", "LABEL", "ADDRESS", "BUILD", "VERSION"]);
+pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument]) -> String {
+    let mut table = Table::new();
+    table.set_header(["NODE", "LABEL", "ADDRESS", "BUILD", "VERSION"]);
     for r in reports {
         let version = match &r.result {
             Ok(d) => d.version.to_string(),
@@ -110,7 +108,7 @@ pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument])
             (None, Ok(_)) => "older, unreported",
             (None, Err(_)) => "-",
         };
-        table.push([
+        table.add_row([
             r.node.0.to_string(),
             r.label.as_deref().unwrap_or("-").to_string(),
             addresses,
@@ -118,19 +116,19 @@ pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument])
             version,
         ]);
     }
-    table
+    render(table, &[])
 }
 
-pub(super) fn list(keys: &[KeyEntry]) -> Table<3> {
-    let mut table = Table::new([Column::right(14), Column::left(26), Column::left(0)]);
+pub(super) fn list(keys: &[KeyEntry]) -> String {
+    let mut table = Table::new();
     for entry in keys {
-        table.push([
+        table.add_row([
             entry.size.to_string(),
             entry.version.to_string(),
             entry.key.clone(),
         ]);
     }
-    table
+    render(table, &[0])
 }
 
 #[cfg(test)]
@@ -165,7 +163,7 @@ mod tests {
                 version,
             },
         ];
-        let out = list(&keys).to_string();
+        let out = list(&keys);
         for (line, entry) in out.lines().zip(&keys) {
             assert_eq!(
                 line,
@@ -173,7 +171,7 @@ mod tests {
             );
         }
         assert_eq!(out.lines().count(), 2);
-        assert_eq!(list(&[]).to_string(), "");
+        assert_eq!(list(&[]), "");
     }
 
     #[test]
@@ -191,7 +189,7 @@ mod tests {
                 shard_bytes: 0,
             })
             .collect();
-        let out = contents(&document, &rows).to_string();
+        let out = contents(&document, &rows);
         let mut lines = out.lines();
         let header = lines.next().unwrap();
         for (line, row) in lines.zip(&rows) {
@@ -244,7 +242,7 @@ mod tests {
                 },
             });
         }
-        let out = cluster_show(&document, &reports).to_string();
+        let out = cluster_show(&document, &reports);
         let mut lines = out.lines();
         let header = lines.next().unwrap();
         let address_start = header.find("ADDRESS").unwrap();

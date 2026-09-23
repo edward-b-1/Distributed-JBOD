@@ -14,6 +14,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use xxhash_rust::xxh3::Xxh3;
 
+use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_core::checksum::BlockChecksum;
 use djbod_core::erasure::{ReedSolomonCode, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
@@ -24,7 +25,6 @@ use djbod_core::record::MetadataRecord;
 use djbod_core::shardfile::{shard_geometry, ShardFileReader};
 use djbod_core::stripe::{decode_stripe, DecodedStripe};
 use djbod_core::version::VersionId;
-use djbod_table::{Column, Table};
 
 #[derive(Parser)]
 #[command(
@@ -218,18 +218,32 @@ fn sorted_entries(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+/// Columns two spaces apart with no border, each as wide as its widest
+/// cell, measured in terminal columns so wide characters line up.
+/// `right_aligned` names the numeric columns, which align on their right
+/// edge. Lines carry no trailing spaces.
+fn render(mut table: Table, right_aligned: &[usize]) -> String {
+    table.load_style(NOTHING);
+    let last = table.column_count().saturating_sub(1);
+    for (i, column) in table.column_iter_mut().enumerate() {
+        column.set_padding((0, if i == last { 0 } else { 2 }));
+        if right_aligned.contains(&i) {
+            column.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    let mut out = String::new();
+    for line in table.lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let found = scan(device_paths)?;
     let mut unrecoverable = 0usize;
-    let mut table = Table::new([
-        Column::left(40),
-        Column::left(26),
-        Column::right(3),
-        Column::right(12),
-        Column::left(7),
-        Column::left(0),
-    ]);
-    table.push(["KEY", "VERSION", "REV", "SIZE", "SHARDS", "STATUS"]);
+    let mut table = Table::new();
+    table.set_header(["KEY", "VERSION", "REV", "SIZE", "SHARDS", "STATUS"]);
     for ((key, version), record) in &found.records {
         let present = found
             .shards
@@ -243,7 +257,7 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             unrecoverable += 1;
             "NOT recoverable"
         };
-        table.push([
+        table.add_row([
             key.clone(),
             version.to_text(),
             record.revision.to_string(),
@@ -259,7 +273,7 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             .values()
             .any(|r| r.key_hash == *hash && r.version == *version)
         {
-            table.push([
+            table.add_row([
                 format!("(key hash {})", &hash.to_hex()[..16]),
                 version.to_text(),
                 "-".to_string(),
@@ -270,7 +284,7 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             unrecoverable += 1;
         }
     }
-    print!("{table}");
+    print!("{}", render(table, &[2, 3]));
     for problem in &found.problems {
         eprintln!("problem: {problem}");
     }

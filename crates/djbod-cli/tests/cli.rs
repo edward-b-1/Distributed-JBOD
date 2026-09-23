@@ -151,8 +151,12 @@ async fn put_get_head_list_delete_from_the_command_line() {
 
     let (ok, out, err) = djbod(&test, &["list", "--prefix", "docs/"]);
     assert!(ok, "list failed: {err}");
-    assert!(out.contains("docs/report.pdf"), "{out}");
-    assert!(out.contains(&format!("{:>14}", body.len())), "{out}");
+    // Size, version, key; the size column is as wide as its widest value.
+    let line = out
+        .lines()
+        .find(|l| l.ends_with("docs/report.pdf"))
+        .expect(&out);
+    assert!(line.starts_with(&format!("{}  ", body.len())), "{out}");
 
     let (ok, out, err) = djbod(&test, &["delete", "docs/report.pdf"]);
     assert!(ok, "delete failed: {err}");

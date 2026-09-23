@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 djbod-core = { workspace = true }
-djbod-table = { workspace = true }
+comfy-table = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 xxhash-rust = { workspace = true }

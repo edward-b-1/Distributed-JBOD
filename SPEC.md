@@ -2485,8 +2485,7 @@ C.2 [P] **Crate layout.** One Cargo workspace:
 | `djbod-node` | The node process. Device management, local operations, coordinator logic (placement, broadcast, streaming PUT and GET), the server side of the protocol, and the membership changes that touch a node's own state: joining, adding devices, startup adoption. Depends on `djbod-client` for everything it says to another node. |
 | `djbod-python` | The `djbod` Python package (20.8.1): the blocking client wrapped with PyO3, built with maturin. In the workspace so it compiles with everything else; its tests are Python, run by `scripts/python-tests.sh`. |
 | `djbod-cli` | The `djbod` command-line client: `status`, `put`, `get`, `head`, `delete`, `list`, `repair`, `cluster-config`, with `--json` output. Bodies stream in both directions. Administrative commands (drain, repair, apply-config) join it in milestone 4. |
-| `djbod-recover` | The offline recovery tool of 20.2, using `djbod-core` for disk access and `djbod-table` for its listing. |
-| `djbod-table` | Plain-text tables shared by the command-line client and recovery tool. Columns grow to fit all rows and headers, measured in Unicode display columns, with numeric fields right-aligned. |
+| `djbod-recover` | The offline recovery tool of 20.2, using `djbod-core` for disk access. |
 | `djbod-ui` | The administration web UI of 20.3: an HTTP server serving one embedded page and a JSON API under `/api`, each call of which is one native-protocol operation or one membership procedure sent to a node as the `djbod` client would send it. |
 
 C.3 [P] **Candidate dependencies**, to be confirmed at each milestone.

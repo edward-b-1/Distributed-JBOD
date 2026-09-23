@@ -36,6 +36,7 @@ clap_builder 4.6.7  (MIT OR Apache-2.0)  https://github.com/clap-rs/clap
 clap_derive 4.6.7  (MIT OR Apache-2.0)  https://github.com/clap-rs/clap
 clap_lex 1.1.1  (MIT OR Apache-2.0)  https://github.com/clap-rs/clap
 colorchoice 1.0.5  (MIT OR Apache-2.0)  https://github.com/rust-cli/anstyle.git
+comfy-table 8.0.0  (MIT)  https://github.com/nukesor/comfy-table
 cpufeatures 0.2.17  (MIT OR Apache-2.0)  https://github.com/RustCrypto/utils
 cpufeatures 0.3.1  (MIT OR Apache-2.0)  https://github.com/RustCrypto/utils
 crunchy 0.2.4  (MIT)  https://github.com/eira-fransham/crunchy
@@ -167,6 +168,7 @@ tracing-serde 0.2.0  (MIT)  https://github.com/tokio-rs/tracing
 tracing-subscriber 0.3.23  (MIT)  https://github.com/tokio-rs/tracing
 typenum 1.20.1  (MIT OR Apache-2.0)  https://github.com/paholg/typenum
 unicode-ident 1.0.26  ((MIT OR Apache-2.0) AND Unicode-3.0)  https://github.com/dtolnay/unicode-ident
+unicode-segmentation 1.13.3  (MIT OR Apache-2.0)  https://github.com/unicode-rs/unicode-segmentation
 unicode-width 0.2.2  (MIT OR Apache-2.0)  https://github.com/unicode-rs/unicode-width
 untrusted 0.9.0  (ISC)  https://github.com/briansmith/untrusted
 utf8parse 0.2.2  (Apache-2.0 OR MIT)  https://github.com/alacritty/vte
@@ -253,6 +255,7 @@ Applies to:
   socket2 0.6.5 (LICENSE-APACHE)
   tempfile 3.27.0 (LICENSE-APACHE)
   thread_local 1.1.10 (LICENSE-APACHE)
+  unicode-segmentation 1.13.3 (LICENSE-APACHE)
   unicode-width 0.2.2 (LICENSE-APACHE)
   uuid 1.26.1 (LICENSE-APACHE)
   version_check 0.9.5 (LICENSE-APACHE)
@@ -2003,6 +2006,32 @@ Apache License
 
 ========================================================================
 Applies to:
+  comfy-table 8.0.0 (LICENSE)
+------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2019 Arne Beer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+========================================================================
+Applies to:
   cpufeatures 0.2.17 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2020-2025 The RustCrypto Project Developers
@@ -3225,6 +3254,7 @@ SOFTWARE.
 ========================================================================
 Applies to:
   heck 0.5.0 (LICENSE-MIT)
+  unicode-segmentation 1.13.3 (LICENSE-MIT)
   unicode-width 0.2.2 (LICENSE-MIT)
 ------------------------------------------------------------------------
 Copyright (c) 2015 The Rust Project Developers
