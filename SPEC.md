@@ -79,6 +79,7 @@ small clusters, with an administrator in the loop when something breaks.
 | **Shard block** | One device's piece of one stripe. The unit that carries a checksum. |
 | **Shard file** | All of one device's shard blocks for one version, concatenated, plus a header. See 9.3 for the open alternative. |
 | **Shard index** | The position 0 .. k+m-1 of a shard within its stripe. Indices 0 .. k-1 are data, k .. k+m-1 are parity. |
+| **Holder** | A device listed in a version's metadata record as holding one of its shards, and, by extension, the node that device belongs to. Every holder also keeps a copy of the record (9.4.4). |
 | **Metadata record** | The small document describing one version: where its shards are and how it was encoded. |
 | **Failure domain** | A grouping of devices that are expected to fail together. Deferred; v1 knows only devices. |
 
@@ -1933,7 +1934,7 @@ not damage was also found, so the caller can tell "there is confirmed
 damage" from "the check did not finish" (the exit codes of #156). There
 is no retry: a failure to reach a node is reported the first time (16.1).
 The one holder case that is damage is a record naming a device no longer
-in the cluster document, `HolderNotInDocument`, which repair fixes by
+in the cluster document, `DeviceForShardNotInClusterDocument`, which repair fixes by
 rebuilding that shard elsewhere (18.3). Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 

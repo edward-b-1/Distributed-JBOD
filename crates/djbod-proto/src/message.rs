@@ -527,9 +527,10 @@ pub enum ClusterFinding {
         revision: u64,
         current_revision: u64,
     },
-    /// The record names a device that is no longer in the cluster
-    /// document; repair rebuilds that shard elsewhere (18.3).
-    HolderNotInDocument {
+    /// The record lists a shard on a device that is not in the cluster
+    /// document at all (it was removed with its node, 6.2.6.3); repair
+    /// rebuilds that shard on a device that is (18.3).
+    DeviceForShardNotInClusterDocument {
         key: String,
         version: VersionId,
         device: DeviceId,

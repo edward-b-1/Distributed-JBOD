@@ -3311,7 +3311,7 @@ async fn cross_check_key(
         }
         for shard in &record.shards {
             let Some(owner) = document.device(shard.device).map(|d| d.node) else {
-                findings.push(ClusterFinding::HolderNotInDocument {
+                findings.push(ClusterFinding::DeviceForShardNotInClusterDocument {
                     key: key.to_string(),
                     version: record.version,
                     device: shard.device,
