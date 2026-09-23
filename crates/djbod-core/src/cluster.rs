@@ -27,18 +27,6 @@ pub const DEFAULT_MAX_USER_METADATA_BYTES: u64 = 10 * 1024 * 1024;
 /// (SPEC 6.2.4, 9.4.2.1.1).
 pub const LIMIT_MAX_USER_METADATA_BYTES: u64 = 48 * 1024 * 1024;
 
-fn default_max_user_metadata_bytes() -> u64 {
-    DEFAULT_MAX_USER_METADATA_BYTES
-}
-
-fn default_max_key_bytes() -> u64 {
-    DEFAULT_MAX_KEY_BYTES
-}
-
-fn default_max_object_bytes() -> u64 {
-    DEFAULT_MAX_OBJECT_BYTES
-}
-
 /// A node's identity in the cluster document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -197,19 +185,14 @@ pub struct ClusterDocument {
     pub independence_level: IndependenceLevel,
     /// Fraction of each device's capacity kept free (5.5).
     pub headroom: f64,
-    /// Sanity limit on key length in bytes (9.1.5). Absent in documents
-    /// written before it existed, which means the default.
-    #[serde(default = "default_max_key_bytes")]
+    /// Sanity limit on key length in bytes (9.1.5).
     pub max_key_bytes: u64,
-    /// Maximum object size in bytes (9.3.1). Absent means the default.
-    #[serde(default = "default_max_object_bytes")]
+    /// Maximum object size in bytes (9.3.1).
     pub max_object_bytes: u64,
     /// Limit on a record's user metadata, keys and values together, in
-    /// bytes (9.4.2). Absent means the default.
-    #[serde(default = "default_max_user_metadata_bytes")]
+    /// bytes (9.4.2).
     pub max_user_metadata_bytes: u64,
-    /// Plain or TLS (19.1.6.4). Absent means `plain`.
-    #[serde(default)]
+    /// Plain or TLS (19.1.6.4).
     pub transport: Transport,
     pub nodes: Vec<NodeEntry>,
     pub devices: Vec<DeviceEntry>,
@@ -585,24 +568,25 @@ mod tests {
     }
 
     #[test]
-    fn size_limits_default_when_absent_and_are_bounded() {
-        // A document written before the limits existed still parses, at
-        // the defaults (9.1.5, 9.3.1).
-        let mut value: serde_json::Value =
-            serde_json::to_value(sample()).expect("document serializes");
-        let fields = value.as_object_mut().expect("object");
-        fields.remove("max_key_bytes");
-        fields.remove("max_object_bytes");
-        fields.remove("max_user_metadata_bytes");
-        let parsed: ClusterDocument = serde_json::from_value(value).expect("parses without them");
-        assert_eq!(parsed.max_key_bytes, DEFAULT_MAX_KEY_BYTES);
-        assert_eq!(parsed.max_object_bytes, DEFAULT_MAX_OBJECT_BYTES);
-        assert_eq!(
-            parsed.max_user_metadata_bytes,
-            DEFAULT_MAX_USER_METADATA_BYTES
-        );
-        parsed.validate().expect("valid");
+    fn size_limits_and_transport_are_required_fields() {
+        // Every field is required (SPEC 19.1.5.2): a document without
+        // one is refused, not read at a default.
+        for field in [
+            "max_key_bytes",
+            "max_object_bytes",
+            "max_user_metadata_bytes",
+            "transport",
+        ] {
+            let mut value: serde_json::Value =
+                serde_json::to_value(sample()).expect("document serializes");
+            value.as_object_mut().expect("object").remove(field);
+            let parsed: Result<ClusterDocument, _> = serde_json::from_value(value);
+            assert!(parsed.is_err(), "parsed without {field}");
+        }
+    }
 
+    #[test]
+    fn size_limits_are_bounded() {
         let mut doc = sample();
         doc.max_key_bytes = 0;
         assert!(matches!(
@@ -629,12 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_defaults_to_plain_and_uses_kebab_case_names() {
-        let mut value: serde_json::Value =
-            serde_json::to_value(sample()).expect("document serializes");
-        value.as_object_mut().expect("object").remove("transport");
-        let parsed: ClusterDocument = serde_json::from_value(value).expect("parses without it");
-        assert_eq!(parsed.transport, Transport::Plain);
+    fn transport_uses_kebab_case_names() {
         let mut doc = sample();
         doc.transport = Transport::TlsOptional;
         let json = serde_json::to_string(&doc).expect("serializes");
