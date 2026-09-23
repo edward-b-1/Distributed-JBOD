@@ -31,8 +31,8 @@ pub struct NodeDocument {
     /// The node's label in the document that was asked, if any.
     pub label: Option<String>,
     pub address: String,
-    /// The node's software build from its `Hello`; `None` when it was
-    /// unreachable or built before builds were sent (19.1.5).
+    /// The node's software build from its `Hello` (19.1.5); `None` when
+    /// it was unreachable, so there was no `Hello`.
     pub build: Option<String>,
     pub result: Result<ClusterDocument, String>,
 }
@@ -228,7 +228,7 @@ pub async fn fetch_all_except(
         let (build, result) = match first_address(document, entry.id) {
             Ok(address) => {
                 match fetch_document_and_hello(connector, address, document.cluster_id).await {
-                    Ok((theirs, hello)) => (hello.build, Ok(theirs)),
+                    Ok((theirs, hello)) => (Some(hello.build), Ok(theirs)),
                     Err(e) => (None, Err(e.to_string())),
                 }
             }

@@ -107,7 +107,7 @@ pub fn our_hello(node: &Node) -> Hello {
         node_id: Some(node.id()),
         cluster_id: node.cluster_id(),
         document_version: node.document_version(),
-        build: Some(djbod_client::BUILD.to_string()),
+        build: djbod_client::BUILD.to_string(),
         cluster_name: node.document().name.clone(),
     }
 }
