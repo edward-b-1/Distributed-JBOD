@@ -566,7 +566,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
     std::fs::write(&path1, &bytes).expect("write");
 
     // Damage 2: obj-1's shard 2 file deleted (local finding: record
-    // without shard; cross-node: shard missing on holder).
+    // without shard; cross-node: shard missing on its device).
     let (_node2, device2, path2) = shard_path(&records[1], 2);
     std::fs::remove_file(&path2).expect("remove");
 
@@ -619,7 +619,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
         })
         .collect();
     assert!(
-        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnHolder { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
+        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnDevice { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
         "{cluster:?}"
     );
     assert!(
@@ -812,7 +812,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         .find(|dev| before.shard_on(*dev).is_none())
         .expect("one device holds nothing");
 
-    // Move shard 0 from its holder to the spare device on another node.
+    // Move shard 0 from its device to the spare device on another node.
     let source = before.shards[0].device;
     let after = match client
         .request(Request::MoveShard {
@@ -844,7 +844,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
     let (_, got) = client.get_object("k").await.expect("get");
     assert_eq!(got, body);
 
-    // While a holder's node is down, the lookup itself is fail-stop (16.1).
+    // While a device's node is down, the lookup itself is fail-stop (16.1).
     let victim = after
         .shards
         .iter()

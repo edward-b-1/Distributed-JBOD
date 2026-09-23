@@ -61,10 +61,10 @@ until the next periodic refresh.
 
 ### 3.1 In the metadata record
 
-The record (9.4) is copied to every holder and carries its own checksum.
+The record (9.4) is copied to every device that has a shard and carries its own checksum.
 Adding a `damaged` list to it means rewriting k+m copies on every
-detection, on every holder, through the record-writing path, while the
-very failure being recorded may be that one holder cannot be written or
+detection, on every such device, through the record-writing path, while the
+very failure being recorded may be that one device cannot be written or
 reached. Records that disagree are `RecordsInconsistent` (9.4.5, 16.1),
 so a partial update turns a damaged shard into an unreadable object. The
 placement revision (18.8.1) exists precisely to manage the one kind of
@@ -140,19 +140,19 @@ configurable limit (say 100 000 entries) and logs instead.
 
 ### 4.2 Who writes a mark
 
-The holder of the shard writes marks about its own devices, and nobody
+The node with the shard writes marks about its own devices, and nobody
 else. Two paths lead there:
 
 - **The node found it itself.** The local scrub (20.1.2) runs on the
-  holder and reads its own disks; every shard finding becomes a mark,
+  node and reads its own disks; every shard finding becomes a mark,
   and every shard it checks clean clears any mark on it.
 - **The coordinator found it.** Blocks are verified by the coordinator
-  (11.4), not by the holder that streams them, so the read path, repair,
+  (11.4), not by the node that streams them, so the read path, repair,
   move-shard, and drain all learn about damage on another node's device.
-  They tell the holder with a new node-to-node message, `MarkDamage`,
+  They tell that node with a new node-to-node message, `MarkDamage`,
   carrying the fields above. It is fire-and-forget: sent after the
   operation's own outcome is decided, its failure logged and otherwise
-  ignored (requirement 4). A holder that is unreachable is not damaged
+  ignored (requirement 4). A node that is unreachable is not damaged
   and gets no mark; `NodeUnreachable` stays what it is (16.1).
 
 The node writes the file at most once per detection, after the
@@ -162,10 +162,10 @@ on one node.
 ### 4.3 Who clears a mark
 
 - Repair rewrites the shard file (18.4) or relocates it (18.3): the
-  coordinator sends `ClearDamage` to the old holder for that shard, and
+  coordinator sends `ClearDamage` to the old device's node for that shard, and
   the new file starts unmarked.
-- The local scrub verifies the shard file clean: cleared by the holder.
-- The version is deleted (14): `DeleteVersion` clears the holder's marks
+- The local scrub verifies the shard file clean: cleared by that node.
+- The version is deleted (14): `DeleteVersion` clears the device's marks
   for it.
 - A read completes and the whole-object check passes (11.7): the
   coordinator clears marks on every shard it read, since it has just
@@ -207,7 +207,7 @@ Neither is proposed here.
 ### 4.6 What this does not cover
 
 - Damage to record copies (`RecordCorrupt`, `RecordsInconsistent`) and
-  cluster-level findings (`StaleCopy`, `HolderUnavailable`) are about
+  cluster-level findings (`StaleCopy`, `ShardMissingOnDevice`) are about
   the object, not a shard file on a device. They belong in the same
   ledger under their own kinds, but the first version can leave them to
   the scrub report as today.

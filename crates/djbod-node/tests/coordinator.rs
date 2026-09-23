@@ -841,7 +841,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     let old_record =
         std::fs::read(record_path(&test, source, "k", &before.version)).expect("read record");
 
-    // A holder is not an eligible destination.
+    // A device already carrying a shard is not an eligible destination.
     match client
         .request(Request::MoveShard {
             key: "k".to_string(),
@@ -905,7 +905,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     let events = run_scrub(&mut client, false).await;
     assert!(no_findings(&events), "{events:?}");
 
-    // An interrupted re-placement: one holder still has the revision 0
+    // An interrupted re-placement: one device still has the revision 0
     // copy. Reads fail until repair finishes the move forwards (18.8.1).
     let lagging = after.shards[0].device;
     std::fs::write(

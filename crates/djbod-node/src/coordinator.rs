@@ -570,7 +570,7 @@ async fn delete_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
     Ok(Response::DeleteObject)
 }
 
-/// Remove one version from every holder (14.1). Any unreachable holder
+/// Remove one version from every device (14.1). Any unreachable node
 /// fails the delete; a repeat succeeds because deletion is idempotent.
 async fn delete_version_everywhere(
     node: &Arc<Node>,
@@ -749,7 +749,7 @@ async fn get_object(
     let document = node.document();
 
     // Open one connection per data shard and start every block streaming
-    // before answering the client, so a missing holder fails the request
+    // before answering the client, so a missing device fails the request
     // cleanly rather than mid-body (11.4).
     let mut sources: Vec<ShardSource> = Vec::with_capacity(scheme.data_shards());
     if record.size > 0 {
@@ -866,7 +866,7 @@ async fn get_object(
                             ..ErrorDetail::new(
                                 ErrorCode::ProtocolViolation,
                                 format!(
-                                    "holder sent block {} when {stripe} was expected",
+                                    "node sent block {} when {stripe} was expected",
                                     data.sequence
                                 ),
                             )
@@ -890,7 +890,7 @@ async fn get_object(
                         ..end.error.unwrap_or_else(|| {
                             ErrorDetail::new(
                                 ErrorCode::ProtocolViolation,
-                                "holder ended its stream early".to_string(),
+                                "node ended its stream early".to_string(),
                             )
                         })
                     };
@@ -963,7 +963,7 @@ async fn get_object(
         }
     }
 
-    // Holders end their streams; a holder reporting an error here means
+    // Every node ends its stream; a node reporting an error here means
     // the data above was served from a stream that then failed, which
     // cannot happen after all blocks arrived, but check anyway.
     for source in sources.iter_mut() {
@@ -978,7 +978,7 @@ async fn get_object(
                     shard_index: Some(source.index.0),
                     ..ErrorDetail::new(
                         ErrorCode::ProtocolViolation,
-                        format!("holder did not end its stream cleanly: {other:?}"),
+                        format!("node did not end its stream cleanly: {other:?}"),
                     )
                 };
                 return Err(fail_and_close(writer, id, detail).await);
@@ -1022,7 +1022,7 @@ struct PutParams {
     user_metadata: BTreeMap<String, String>,
 }
 
-struct Holder {
+struct ShardWriter {
     index: ShardIndex,
     device: DeviceId,
     owner: NodeId,
@@ -1062,17 +1062,17 @@ fn place(
         .collect())
 }
 
-async fn abort_holders(holders: &mut [Holder], key_hash: KeyHash, version: VersionId) {
-    for holder in holders.iter_mut() {
+async fn abort_shard_writers(writers: &mut [ShardWriter], key_hash: KeyHash, version: VersionId) {
+    for writer in writers.iter_mut() {
         // Best effort. Dropping the connection also drops any temporary on
-        // the holder's side.
-        let _ = holder
+        // the node's side.
+        let _ = writer
             .connection
             .request(Request::AbortShard {
-                device: holder.device,
+                device: writer.device,
                 key_hash,
                 version,
-                shard_index: holder.index.0,
+                shard_index: writer.index.0,
             })
             .await;
     }
@@ -1089,7 +1089,7 @@ async fn put_object(
     // The client streams the body right behind the request, so from here
     // on any refusal must also close the connection (fail_and_close).
     let prepared = prepare_put(node, versions, &params).await;
-    let (scheme, record_template, mut holders) = match prepared {
+    let (scheme, record_template, mut writers) = match prepared {
         Ok(p) => p,
         Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
         Err(other) => return Err(other),
@@ -1097,9 +1097,9 @@ async fn put_object(
     let key_hash = record_template.key_hash;
     let version = record_template.version;
 
-    let outcome = stream_body_to_holders(
+    let outcome = stream_body_to_writers(
         reader,
-        &mut holders,
+        &mut writers,
         scheme,
         &record_template,
         node.stream_idle_timeout(),
@@ -1108,11 +1108,11 @@ async fn put_object(
     let object_checksum = match outcome {
         Ok(checksum) => checksum,
         Err(Failure::Error(detail)) => {
-            abort_holders(&mut holders, key_hash, version).await;
+            abort_shard_writers(&mut writers, key_hash, version).await;
             return Err(fail_and_close(writer, id, detail).await);
         }
         Err(other) => {
-            abort_holders(&mut holders, key_hash, version).await;
+            abort_shard_writers(&mut writers, key_hash, version).await;
             return Err(other);
         }
     };
@@ -1121,14 +1121,14 @@ async fn put_object(
         object_checksum,
         ..record_template
     };
-    if let Err(f) = write_records(&mut holders, &record).await {
-        abort_holders(&mut holders, key_hash, version).await;
+    if let Err(f) = write_records(&mut writers, &record).await {
+        abort_shard_writers(&mut writers, key_hash, version).await;
         return match f {
             Failure::Error(detail) => Err(fail_and_close(writer, id, detail).await),
             other => Err(other),
         };
     }
-    drop(holders);
+    drop(writers);
 
     // Replace (9.2.4): the new version is durable everywhere; remove any
     // older versions of the key.
@@ -1152,12 +1152,12 @@ async fn put_object(
 }
 
 /// Everything before the first body byte is consumed: checks, placement,
-/// and holders ready to receive.
+/// and a writer to each device ready to receive.
 async fn prepare_put(
     node: &Arc<Node>,
     versions: &VersionGenerator,
     params: &PutParams,
-) -> Result<(Scheme, MetadataRecord, Vec<Holder>), Failure> {
+) -> Result<(Scheme, MetadataRecord, Vec<ShardWriter>), Failure> {
     check_key(node, &params.key)?;
     if let Some(content_type) = &params.content_type {
         if content_type.len() > MAX_CONTENT_TYPE_BYTES {
@@ -1226,7 +1226,7 @@ async fn prepare_put(
     let chosen = place(&statuses, scheme, shard_bytes)?;
     let version = versions.next();
 
-    let mut holders = Vec::with_capacity(chosen.len());
+    let mut writers = Vec::with_capacity(chosen.len());
     let mut shards = Vec::with_capacity(chosen.len());
     for (i, status) in chosen.iter().enumerate() {
         let index = ShardIndex(i as u8);
@@ -1261,7 +1261,7 @@ async fn prepare_put(
                 Err(e) => return Err(remote_failure(status.node, e)),
             }
         }
-        holders.push(Holder {
+        writers.push(ShardWriter {
             index,
             device: status.device,
             owner: status.node,
@@ -1288,15 +1288,15 @@ async fn prepare_put(
         user_metadata: params.user_metadata.clone(),
         revision: 0,
     };
-    Ok((scheme, record, holders))
+    Ok((scheme, record, writers))
 }
 
 /// Read the client's body stream, encode it stripe by stripe, fan the
-/// blocks out to the holders, and finish every shard. Returns the
+/// blocks out to the devices, and finish every shard. Returns the
 /// whole-object checksum.
-async fn stream_body_to_holders(
+async fn stream_body_to_writers(
     reader: &mut Reader,
-    holders: &mut [Holder],
+    writers: &mut [ShardWriter],
     scheme: Scheme,
     record: &MetadataRecord,
     idle: std::time::Duration,
@@ -1311,7 +1311,7 @@ async fn stream_body_to_holders(
 
     loop {
         // A client that stops sending must not hold k+m shard writes open
-        // forever; the caller aborts the holders on this error (10.12).
+        // forever; the caller aborts the shard writes on this error (10.12).
         let message = read_message_within(reader, idle).await?;
         match message {
             Message::Data { data, .. } => {
@@ -1349,7 +1349,7 @@ async fn stream_body_to_holders(
                     stripe_buffer.extend_from_slice(&bytes[..take]);
                     bytes = &bytes[take..];
                     if stripe_buffer.len() == stripe_size {
-                        send_stripe(holders, &code, &stripe_buffer, record, stripe_number).await?;
+                        send_stripe(writers, &code, &stripe_buffer, record, stripe_number).await?;
                         stripe_number += 1;
                         stripe_buffer.clear();
                     }
@@ -1372,7 +1372,7 @@ async fn stream_body_to_holders(
                     ));
                 }
                 if !stripe_buffer.is_empty() {
-                    send_stripe(holders, &code, &stripe_buffer, record, stripe_number).await?;
+                    send_stripe(writers, &code, &stripe_buffer, record, stripe_number).await?;
                 }
                 break;
             }
@@ -1387,11 +1387,11 @@ async fn stream_body_to_holders(
 
     let object_checksum = BlockChecksum(hasher.digest());
     if record.size > 0 {
-        for holder in holders.iter_mut() {
-            holder
+        for writer in writers.iter_mut() {
+            writer
                 .connection
                 .send_end(
-                    holder.request_id,
+                    writer.request_id,
                     StreamEnd {
                         error: None,
                         object_size: Some(record.size),
@@ -1399,18 +1399,18 @@ async fn stream_body_to_holders(
                     },
                 )
                 .await
-                .map_err(|e| remote_failure(holder.owner, e))?;
+                .map_err(|e| remote_failure(writer.owner, e))?;
         }
-        for holder in holders.iter_mut() {
-            match holder.connection.read_response(holder.request_id).await {
+        for writer in writers.iter_mut() {
+            match writer.connection.read_response(writer.request_id).await {
                 Ok(Response::PutShardDone) => {}
                 Ok(other) => {
                     return Err(error(
                         ErrorCode::ProtocolViolation,
-                        format!("{} ended PutShard with {other:?}", holder.owner),
+                        format!("{} ended PutShard with {other:?}", writer.owner),
                     ))
                 }
-                Err(e) => return Err(remote_failure(holder.owner, e)),
+                Err(e) => return Err(remote_failure(writer.owner, e)),
             }
         }
     }
@@ -1418,7 +1418,7 @@ async fn stream_body_to_holders(
 }
 
 async fn send_stripe(
-    holders: &mut [Holder],
+    writers: &mut [ShardWriter],
     code: &ReedSolomonCode,
     stripe: &[u8],
     record: &MetadataRecord,
@@ -1426,12 +1426,12 @@ async fn send_stripe(
 ) -> Result<(), Failure> {
     let blocks = encode_stripe(code, stripe, record.block_size as usize)
         .map_err(|e| error(ErrorCode::Internal, format!("encode failed: {e}")))?;
-    for (holder, block) in holders.iter_mut().zip(blocks) {
-        debug_assert_eq!(holder.index, block.index);
-        holder
+    for (writer, block) in writers.iter_mut().zip(blocks) {
+        debug_assert_eq!(writer.index, block.index);
+        writer
             .connection
             .send_data(
-                holder.request_id,
+                writer.request_id,
                 DataFrame {
                     sequence: stripe_number,
                     checksum: block.checksum,
@@ -1439,17 +1439,20 @@ async fn send_stripe(
                 },
             )
             .await
-            .map_err(|e| remote_failure(holder.owner, e))?;
+            .map_err(|e| remote_failure(writer.owner, e))?;
     }
     Ok(())
 }
 
-async fn write_records(holders: &mut [Holder], record: &MetadataRecord) -> Result<(), Failure> {
-    for holder in holders.iter_mut() {
-        match holder
+async fn write_records(
+    writers: &mut [ShardWriter],
+    record: &MetadataRecord,
+) -> Result<(), Failure> {
+    for writer in writers.iter_mut() {
+        match writer
             .connection
             .request(Request::PutMeta {
-                device: holder.device,
+                device: writer.device,
                 record: record.clone(),
             })
             .await
@@ -1458,10 +1461,10 @@ async fn write_records(holders: &mut [Holder], record: &MetadataRecord) -> Resul
             Ok(other) => {
                 return Err(error(
                     ErrorCode::ProtocolViolation,
-                    format!("{} answered PutMeta with {other:?}", holder.owner),
+                    format!("{} answered PutMeta with {other:?}", writer.owner),
                 ))
             }
-            Err(e) => return Err(remote_failure(holder.owner, e)),
+            Err(e) => return Err(remote_failure(writer.owner, e)),
         }
     }
     Ok(())
@@ -1469,7 +1472,7 @@ async fn write_records(holders: &mut [Holder], record: &MetadataRecord) -> Resul
 
 // --------------------------------------------------------------- REPAIR
 
-/// One shard as the repair sees it: a stream of blocks from its holder,
+/// One shard as the repair sees it: a stream of blocks from its device,
 /// or nothing if the file could not be opened.
 struct RepairSource {
     index: ShardIndex,
@@ -1485,7 +1488,7 @@ struct RepairSource {
 /// every stripe is decoded, checked, and re-encoded; each damaged shard
 /// is written afresh through `PutShard` to the device the record names,
 /// replacing the old file only once the whole object has verified against
-/// the record's checksum. Fail-stop: an unreachable holder or more than m
+/// the record's checksum. Fail-stop: an unreachable node or more than m
 /// damaged shards is an error and nothing is changed.
 /// The newest version of `key` as repair needs it: the record copies
 /// that exist must agree and there must be at least k of them, but they
@@ -1705,9 +1708,9 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
             rewrite_record_copies(node, &record, &missing_record_copies).await?;
             missing_record_copies
         } else {
-            let holders = holders_new_first(&next, &relocations);
-            rewrite_record_copies(node, &next, &holders).await?;
-            holders
+            let devices = devices_new_first(&next, &relocations);
+            rewrite_record_copies(node, &next, &devices).await?;
+            devices
         };
         let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
         let shards = record
@@ -1868,14 +1871,14 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
     // Shards first, record copies second: a crash between the two leaves a
     // shard without a record, which the scrub reports and a later repair
     // completes. A relocation moves the record on by one revision, written
-    // to the new holders first like a re-placement (18.8.2).
+    // to the new devices first like a re-placement (18.8.2).
     let rewritten_copies = if relocations.is_empty() {
         rewrite_record_copies(node, &record, &missing_record_copies).await?;
         missing_record_copies
     } else {
-        let holders = holders_new_first(&next, &relocations);
-        rewrite_record_copies(node, &next, &holders).await?;
-        holders
+        let devices = devices_new_first(&next, &relocations);
+        rewrite_record_copies(node, &next, &devices).await?;
+        devices
     };
     let stale_copies_removed = remove_stale_copies(node, &record, &stale).await?;
 
@@ -1923,14 +1926,14 @@ async fn relocate_lost_shards(
         shard_file_length(scheme, record.block_size, record.size)
             .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
     };
-    let holders: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
+    let devices: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
     let statuses = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
     let mut ranked: Vec<DeviceStatus> = statuses
         .into_iter()
         .filter(|d| {
             d.state == DeviceState::Active
                 && d.free_bytes >= shard_bytes
-                && !holders.contains(&d.device)
+                && !devices.contains(&d.device)
         })
         .collect();
     ranked.sort_by(|a, b| {
@@ -1966,8 +1969,8 @@ async fn relocate_lost_shards(
     Ok((next, relocations))
 }
 
-/// Every holder of `record`, the newly chosen devices first.
-fn holders_new_first(
+/// Every device of `record`, the newly chosen ones first.
+fn devices_new_first(
     record: &MetadataRecord,
     relocations: &[(ShardIndex, DeviceId)],
 ) -> Vec<DeviceId> {
@@ -1983,9 +1986,9 @@ fn holders_new_first(
     order
 }
 
-/// Open a block stream from every holder of `record`. A holder that
+/// Open a block stream from every device of `record`. A device that
 /// cannot open the file is a damaged shard, not a failure; an unreachable
-/// holder is a failure.
+/// device is a failure.
 async fn open_repair_sources(
     node: &Arc<Node>,
     record: &MetadataRecord,
@@ -2079,7 +2082,7 @@ async fn rebuild_shards(
     let all_indices = scheme.shard_indices();
     let stripe_size = scheme.data_shards() as u64 * record.block_size;
 
-    let mut writers: Vec<Holder> = Vec::with_capacity(targets.len());
+    let mut writers: Vec<ShardWriter> = Vec::with_capacity(targets.len());
     for (index, device) in targets {
         let owner = document.device(*device).map(|d| d.node).ok_or_else(|| {
             Failure::Error(ErrorDetail {
@@ -2117,7 +2120,7 @@ async fn rebuild_shards(
             }
             Err(e) => return Err(remote_failure(owner, e)),
         }
-        writers.push(Holder {
+        writers.push(ShardWriter {
             index: *index,
             device: *device,
             owner,
@@ -2194,7 +2197,7 @@ async fn rebuild_shards(
 /// newest version of `key` to `target`, or to a device chosen as a write
 /// would choose. Copies from the source when it is reachable and intact,
 /// otherwise rebuilds from the other shards; then writes the record at the
-/// next revision to the new holder and every other holder; then removes
+/// next revision to the new device and every other one; then removes
 /// the source's copy if it can be reached.
 async fn move_shard(
     node: &Arc<Node>,
@@ -2258,11 +2261,11 @@ async fn move_shard_of_record(
         shard_file_length(scheme, record.block_size, record.size)
             .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
     };
-    let holders: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
+    let devices: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
     let eligible = |d: &DeviceStatus| {
         d.state == DeviceState::Active
             && d.free_bytes >= shard_bytes
-            && !holders.contains(&d.device)
+            && !devices.contains(&d.device)
     };
     let destination = match target {
         Some(device) => {
@@ -2881,14 +2884,14 @@ async fn read_repair_stripe(
                     ..ErrorDetail::new(
                         ErrorCode::ProtocolViolation,
                         format!(
-                            "holder sent block {} when {stripe} was expected",
+                            "node sent block {} when {stripe} was expected",
                             data.sequence
                         ),
                     )
                 }))
             }
             Ok(StreamItem::End(end)) => {
-                // A holder whose file fails part way (a read error) ends
+                // A device whose file fails part way (a read error) ends
                 // its stream early. Treat the shard as unreadable from
                 // here on and let the decoder work without it.
                 source.condition = ShardCondition::Unreadable {
@@ -2926,7 +2929,7 @@ async fn finish_repair_streams(
                     shard_index: Some(source.index.0),
                     ..ErrorDetail::new(
                         ErrorCode::ProtocolViolation,
-                        format!("holder did not end its stream cleanly: {other:?}"),
+                        format!("node did not end its stream cleanly: {other:?}"),
                     )
                 }))
             }
@@ -3242,7 +3245,7 @@ async fn relay_local_scrub(
 }
 
 /// The checks only the coordinator can make for one key: record copies
-/// complete and agreeing, and every listed holder actually holding its
+/// complete and agreeing, and every listed device actually holding its
 /// shard file.
 /// A node the cross-node check could not use: unreachable, or refusing
 /// or answering out of protocol. The key it was checking is unchecked,
@@ -3270,7 +3273,7 @@ impl Unreachable {
 
 /// The checks no single node can make for one key (20.1.2): that the
 /// record copies exist and agree, that no stale copy remains, and that
-/// every listed holder has its shard. Damage is returned as findings; a
+/// every listed device has its shard. Damage is returned as findings; a
 /// node that cannot be asked is not damage and ends the check instead.
 async fn cross_check_key(
     node: &Arc<Node>,
@@ -3337,7 +3340,7 @@ async fn cross_check_key(
                     ..
                 }) => {
                     if !present {
-                        findings.push(ClusterFinding::ShardMissingOnHolder {
+                        findings.push(ClusterFinding::ShardMissingOnDevice {
                             key: key.to_string(),
                             version: record.version,
                             device: shard.device,
