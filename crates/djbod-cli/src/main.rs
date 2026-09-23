@@ -821,6 +821,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 findings += 1;
                                 println!("cluster check: {finding:?}");
                             }
+                            ScrubEvent::CrossCheckStopped {
+                                node,
+                                detail,
+                                keys_checked,
+                                keys_unchecked,
+                            } => {
+                                let unchecked = match keys_unchecked {
+                                    Some(count) => format!("{count} not checked"),
+                                    None => "the keys could not be listed".to_string(),
+                                };
+                                println!(
+                                    "cross-node checks stopped at node {}: {}; {keys_checked} key(s) checked, {unchecked}",
+                                    short(&node.0),
+                                    detail.message
+                                );
+                            }
                             ScrubEvent::Repaired { key, report } => {
                                 repairs += 1;
                                 let rewritten =

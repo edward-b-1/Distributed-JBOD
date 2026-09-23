@@ -679,7 +679,7 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
         .await
         .expect("put");
     b.stop();
-    let (events, end) = run_scrub(&mut client, false).await;
+    let (events, end) = run_scrub(&mut client, true).await;
     assert!(events
         .iter()
         .any(|e| matches!(e, ScrubEvent::NodeFailed { node, .. } if *node == b.node.id())));
@@ -690,8 +690,31 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
             .count(),
         1
     );
+    // The cross-node checks cannot run without b: listing the keys needs
+    // it, so they stop before the first key; nothing is damaged and
+    // nothing is repaired.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            ScrubEvent::CrossCheckStopped { node, keys_checked: 0, keys_unchecked: None, .. }
+            if *node == b.node.id())),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::ClusterFinding(_)
+                | ScrubEvent::Repaired { .. }
+                | ScrubEvent::RepairFailed { .. }
+        )),
+        "an unreachable node is not damage: {events:?}"
+    );
     let error = end.error.expect("incomplete scrub is reported");
     assert_eq!(error.code, ErrorCode::NodeUnreachable);
+    assert!(
+        error.message.contains("could not be listed"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
