@@ -1,6 +1,6 @@
 //! `djbod-recover` (SPEC 20.2): given device directories and no running
 //! cluster, list the versions present and reassemble any version for
-//! which k intact shards can be found. Built on `djbod-core` alone. It
+//! which k intact shards can be found. Disk access uses `djbod-core`. It
 //! reads the objects tree directly, so a device whose identity file is
 //! lost is as good as any other, and it never writes to a device.
 
@@ -14,6 +14,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use xxhash_rust::xxh3::Xxh3;
 
+use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_core::checksum::BlockChecksum;
 use djbod_core::erasure::{ReedSolomonCode, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
@@ -217,13 +218,32 @@ fn sorted_entries(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+/// Columns two spaces apart with no border, each as wide as its widest
+/// cell, measured in terminal columns so wide characters line up.
+/// `right_aligned` names the numeric columns, which align on their right
+/// edge. Lines carry no trailing spaces.
+fn render(mut table: Table, right_aligned: &[usize]) -> String {
+    table.load_style(NOTHING);
+    let last = table.column_count().saturating_sub(1);
+    for (i, column) in table.column_iter_mut().enumerate() {
+        column.set_padding((0, if i == last { 0 } else { 2 }));
+        if right_aligned.contains(&i) {
+            column.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    let mut out = String::new();
+    for line in table.lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let found = scan(device_paths)?;
     let mut unrecoverable = 0usize;
-    println!(
-        "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  STATUS",
-        "KEY", "VERSION", "REV", "SIZE", "SHARDS"
-    );
+    let mut table = Table::new();
+    table.set_header(["KEY", "VERSION", "REV", "SIZE", "SHARDS", "STATUS"]);
     for ((key, version), record) in &found.records {
         let present = found
             .shards
@@ -237,14 +257,14 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             unrecoverable += 1;
             "NOT recoverable"
         };
-        println!(
-            "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  {status}",
-            key,
+        table.add_row([
+            key.clone(),
             version.to_text(),
-            record.revision,
-            record.size,
-            format!("{present}/{total}")
-        );
+            record.revision.to_string(),
+            record.size.to_string(),
+            format!("{present}/{total}"),
+            status.to_string(),
+        ]);
     }
     // Shards whose record was not found at all.
     for ((hash, version), shards) in &found.shards {
@@ -253,17 +273,18 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             .values()
             .any(|r| r.key_hash == *hash && r.version == *version)
         {
-            println!(
-                "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  no record found; key unknown",
+            table.add_row([
                 format!("(key hash {})", &hash.to_hex()[..16]),
                 version.to_text(),
-                "-",
-                "-",
-                format!("{}/?", shards.len())
-            );
+                "-".to_string(),
+                "-".to_string(),
+                format!("{}/?", shards.len()),
+                "no record found; key unknown".to_string(),
+            ]);
             unrecoverable += 1;
         }
     }
+    print!("{}", render(table, &[2, 3]));
     for problem in &found.problems {
         eprintln!("problem: {problem}");
     }

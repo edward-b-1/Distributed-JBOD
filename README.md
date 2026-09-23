@@ -291,6 +291,9 @@ blocking, and the administration procedures), `djbod-node`,
 `cargo test --workspace` runs everything, starting nodes on localhost
 ports, and takes a few seconds.
 
+`python3 -m unittest discover -s scripts/tests -v` checks the PKI helper's
+certificate listing using temporary certificates; it requires `openssl`.
+
 ## Status
 
 Milestones 1 to 6 of the plan are built: the core format, a single node

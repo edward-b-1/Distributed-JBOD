@@ -33,6 +33,8 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery};
 
+mod tables;
+
 #[derive(Parser)]
 #[command(name = "djbod", about = "Distributed-JBOD client", version = djbod_client::BUILD)]
 struct Cli {
@@ -564,34 +566,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
             } else {
-                println!(
-                    "{:<36}  {:<16}  {:<16}  {:<9}  {:>9}  {:>9}  {:>9}  {:>12}",
-                    "DEVICE",
-                    "LABEL",
-                    "NODE LABEL",
-                    "STATE",
-                    "VERSIONS",
-                    "KEYS",
-                    "BLOCKS",
-                    "SHARD BYTES"
-                );
-                for c in &rows {
-                    let entry = document.device(c.device);
-                    println!(
-                        "{:<36}  {:<16}  {:<16}  {:<9}  {:>9}  {:>9}  {:>9}  {:>12}",
-                        c.device.0,
-                        entry.and_then(|d| d.label.as_deref()).unwrap_or("-"),
-                        document
-                            .node(c.node)
-                            .and_then(|n| n.label.as_deref())
-                            .unwrap_or("-"),
-                        format!("{:?}", c.state).to_lowercase(),
-                        c.versions,
-                        c.keys,
-                        c.blocks,
-                        human_bytes(c.shard_bytes)
-                    );
-                }
+                print!("{}", tables::contents(&document, &rows));
                 let empty = rows.iter().filter(|c| c.versions == 0).count();
                 if empty > 0 {
                     eprintln!("{empty} device(s) hold nothing and may be removed");
@@ -631,22 +606,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("answered  by node {}", coordinator.0);
                         println!("transport {transport}");
                         println!();
-                        println!(
-                            "{:<36}  {:<16}  {:<36}  {:<16}  {:<9}  {:>12}  {:>12}",
-                            "DEVICE", "LABEL", "NODE", "NODE LABEL", "STATE", "TOTAL", "FREE"
-                        );
-                        for d in devices {
-                            println!(
-                                "{:<36}  {:<16}  {:<36}  {:<16}  {:<9}  {:>12}  {:>12}",
-                                d.device.0,
-                                d.label.as_deref().unwrap_or("-"),
-                                d.node.0,
-                                d.node_label.as_deref().unwrap_or("-"),
-                                format!("{:?}", d.state).to_lowercase(),
-                                human_bytes(d.total_bytes),
-                                human_bytes(d.free_bytes)
-                            );
-                        }
+                        print!("{}", tables::status(&devices));
                     }
                 }
             }
@@ -788,9 +748,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             }))?
                         );
                     } else {
-                        for entry in &keys {
-                            println!("{:>14}  {}  {}", entry.size, entry.version, entry.key);
-                        }
+                        print!("{}", tables::list(&keys));
                         if truncated {
                             eprintln!(
                                 "(more keys follow; use --start-after {:?})",
@@ -1042,35 +1000,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("cluster   {}", document.title());
                         println!("document  version {} as held by {node}", document.version);
                         println!();
-                        println!(
-                            "{:<36}  {:<16}  {:<21}  {:<18}  VERSION",
-                            "NODE", "LABEL", "ADDRESS", "BUILD"
-                        );
-                        for r in &reports {
-                            let version = match &r.result {
-                                Ok(d) => d.version.to_string(),
-                                Err(e) => format!("unreachable: {e}"),
-                            };
-                            // Every listed address; the first is the one used.
-                            let addresses = document
-                                .node(r.node)
-                                .map(|n| n.addresses.join(", "))
-                                .unwrap_or_else(|| r.address.clone());
-                            // A reachable node that sent no build predates
-                            // builds in Hello: an older build (SPEC 6.2.6.4).
-                            let build = match (&r.build, &r.result) {
-                                (Some(build), _) => build.as_str(),
-                                (None, Ok(_)) => "older, unreported",
-                                (None, Err(_)) => "-",
-                            };
-                            println!(
-                                "{:<36}  {:<16}  {:<21}  {:<18}  {version}",
-                                r.node.0,
-                                r.label.as_deref().unwrap_or("-"),
-                                addresses,
-                                build
-                            );
-                        }
+                        print!("{}", tables::cluster_show(&document, &reports));
                     }
                 }
                 ClusterCommand::SetState { device, state } => {
