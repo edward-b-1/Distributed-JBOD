@@ -991,3 +991,83 @@ async fn contents_show_what_each_device_holds() {
     assert!(ok, "{err}");
     assert_eq!(out.lines().count(), 4, "{out}");
 }
+
+/// SPEC 20.1.2.3: the exit code says what the scrub concluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scrub_exit_codes_say_what_was_concluded() {
+    let test = start_node(3, 2, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(300_000, 11)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+            .args([
+                "--node",
+                &test.addr.to_string(),
+                "--cluster",
+                &test.node.cluster_id().to_string(),
+            ])
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    // Clean: 0.
+    let (code, _, err) = run(&["scrub"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("complete, no damage found"), "{err}");
+
+    // Damage a block of one shard: 2 without repair, and the same in JSON
+    // mode, where the events alone are printed and the code carries the
+    // verdict.
+    let shard = test
+        .node
+        .devices()
+        .iter()
+        .flat_map(|d| walk(d.root()))
+        .find(|p| p.to_string_lossy().ends_with(".0.shard"))
+        .expect("a shard file");
+    let mut bytes = std::fs::read(&shard).expect("read shard");
+    bytes[4096 + 10] ^= 0xff;
+    std::fs::write(&shard, &bytes).expect("write shard");
+    let (code, out, err) = run(&["scrub"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("complete, damage found"), "{err}");
+    let (code, out, err) = run(&["--json", "scrub"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(out.contains("\"event\":\"node_finding\""), "{out}");
+    assert!(
+        !err.contains("complete"),
+        "json mode prints events alone: {err}"
+    );
+
+    // With repair the damage is fixed and the run is complete: 0.
+    let (code, out, err) = run(&["scrub", "--repair"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("everything found was repaired"), "{err}");
+    let (code, _, err) = run(&["scrub"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
