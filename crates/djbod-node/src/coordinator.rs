@@ -3066,23 +3066,54 @@ async fn scrub(
     while tasks.join_next().await.is_some() {}
 
     // Phase 2: cross-node checks over every key (20.1.2, 18.5).
+    // Listing the keys needs every node too; failing that, nothing can
+    // be checked and the count of unchecked keys is unknown.
+    let mut check_stopped: Option<(u64, Option<u64>)> = None;
     let keys: Vec<String> = match all_keys(node).await {
         Ok(keys) => keys,
-        Err(Failure::Error(detail)) => {
-            let end = StreamEnd::failed(ErrorDetail {
-                message: format!(
-                    "listing keys for the cross-node checks failed: {}",
-                    detail.message
-                ),
-                ..detail
-            });
-            write_message(writer, &Message::EndOfStream { id, end }).await?;
-            return Ok(());
+        Err(failure) => {
+            let unreachable = Unreachable::from_failure(node.id(), failure);
+            check_stopped = Some((0, None));
+            send_event(
+                writer,
+                id,
+                &mut sequence,
+                &ScrubEvent::CrossCheckStopped {
+                    node: unreachable.node,
+                    detail: unreachable.detail,
+                    keys_checked: 0,
+                    keys_unchecked: None,
+                },
+            )
+            .await?;
+            Vec::new()
         }
-        Err(other) => return Err(other),
     };
-    for key in &keys {
-        for finding in cross_check_key(node, key).await {
+    for (position, key) in keys.iter().enumerate() {
+        let findings = match cross_check_key(node, key).await {
+            Ok(findings) => findings,
+            Err(unreachable) => {
+                // Every key needs every node, so nothing after this point
+                // can be checked; say so once and stop (20.1.2). What was
+                // found before it stands.
+                let unchecked = (keys.len() - position) as u64;
+                check_stopped = Some((position as u64, Some(unchecked)));
+                send_event(
+                    writer,
+                    id,
+                    &mut sequence,
+                    &ScrubEvent::CrossCheckStopped {
+                        node: unreachable.node,
+                        detail: unreachable.detail,
+                        keys_checked: position as u64,
+                        keys_unchecked: Some(unchecked),
+                    },
+                )
+                .await?;
+                break;
+            }
+        };
+        for finding in findings {
             finding_count += 1;
             damaged_keys.insert(key.clone());
             send_event(
@@ -3121,11 +3152,16 @@ async fn scrub(
         }
     }
 
-    let end = if failed_nodes > 0 {
+    let end = if failed_nodes > 0 || check_stopped.is_some() {
+        let unchecked = match check_stopped {
+            Some((_, Some(count))) => format!("{count} key(s) could not be checked"),
+            Some((_, None)) => "the keys could not be listed, so none was checked".to_string(),
+            None => "every key was checked".to_string(),
+        };
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::NodeUnreachable,
             format!(
-                "{failed_nodes} node(s) could not be scrubbed; {finding_count} finding(s) elsewhere"
+                "{failed_nodes} node(s) could not be scrubbed; {unchecked}; {finding_count} finding(s) where checks ran"
             ),
         ))
     } else if repair_failures > 0 {
@@ -3208,20 +3244,43 @@ async fn relay_local_scrub(
 /// The checks only the coordinator can make for one key: record copies
 /// complete and agreeing, and every listed holder actually holding its
 /// shard file.
-async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
-    let mut findings = Vec::new();
-    let located = match lookup(node, hash_key(key.as_bytes())).await {
-        Ok(located) => located,
-        Err(Failure::Error(detail)) => {
-            findings.push(ClusterFinding::RecordsInconsistent {
-                key: key.to_string(),
-                version: detail.version,
-                detail: detail.message,
-            });
-            return findings;
+/// A node the cross-node check could not use: unreachable, or refusing
+/// or answering out of protocol. The key it was checking is unchecked,
+/// and so is every key after it.
+struct Unreachable {
+    node: NodeId,
+    detail: ErrorDetail,
+}
+
+impl Unreachable {
+    fn from_failure(node: NodeId, failure: Failure) -> Unreachable {
+        let detail = match failure {
+            Failure::Error(detail) => detail,
+            Failure::Close(end) => ErrorDetail::new(
+                ErrorCode::NodeUnreachable,
+                format!("the connection ended: {end:?}"),
+            ),
+        };
+        Unreachable {
+            node: detail.node.unwrap_or(node),
+            detail,
         }
-        Err(_) => return findings,
-    };
+    }
+}
+
+/// The checks no single node can make for one key (20.1.2): that the
+/// record copies exist and agree, that no stale copy remains, and that
+/// every listed holder has its shard. Damage is returned as findings; a
+/// node that cannot be asked is not damage and ends the check instead.
+async fn cross_check_key(
+    node: &Arc<Node>,
+    key: &str,
+) -> Result<Vec<ClusterFinding>, Box<Unreachable>> {
+    let mut findings = Vec::new();
+    let located = lookup(node, hash_key(key.as_bytes()))
+        .await
+        .map_err(|f| Box::new(Unreachable::from_failure(node.id(), f)))?;
+    // The copies are in hand; what follows is judged from them alone.
     let versions = match versions_of(key, located.clone()) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
@@ -3230,9 +3289,9 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
                 version: detail.version,
                 detail: detail.message,
             });
-            return findings;
+            return Ok(findings);
         }
-        Err(_) => return findings,
+        Err(other) => return Err(Box::new(Unreachable::from_failure(node.id(), other))),
     };
     let document = node.document();
     for record in &versions {
@@ -3252,11 +3311,11 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
         }
         for shard in &record.shards {
             let Some(owner) = document.device(shard.device).map(|d| d.node) else {
-                findings.push(ClusterFinding::HolderUnavailable {
+                findings.push(ClusterFinding::HolderNotInDocument {
                     key: key.to_string(),
                     version: record.version,
                     device: shard.device,
-                    detail: "device is not in the cluster document".to_string(),
+                    shard_index: shard.index,
                 });
                 continue;
             };
@@ -3274,34 +3333,33 @@ async fn cross_check_key(node: &Arc<Node>, key: &str) -> Vec<ClusterFinding> {
             };
             match probe.await {
                 Ok(Response::GetMeta {
-                    shard_present: Some(true),
+                    shard_present: Some(present),
                     ..
-                }) => {}
-                Ok(Response::GetMeta { .. }) => {
-                    findings.push(ClusterFinding::ShardMissingOnHolder {
-                        key: key.to_string(),
-                        version: record.version,
-                        device: shard.device,
-                        shard_index: shard.index,
-                    })
+                }) => {
+                    if !present {
+                        findings.push(ClusterFinding::ShardMissingOnHolder {
+                            key: key.to_string(),
+                            version: record.version,
+                            device: shard.device,
+                            shard_index: shard.index,
+                        })
+                    }
                 }
-                Ok(other) => findings.push(ClusterFinding::HolderUnavailable {
-                    key: key.to_string(),
-                    version: record.version,
-                    device: shard.device,
-                    detail: format!("unexpected response {other:?}"),
-                }),
-                Err(Failure::Error(detail)) => findings.push(ClusterFinding::HolderUnavailable {
-                    key: key.to_string(),
-                    version: record.version,
-                    device: shard.device,
-                    detail: detail.message,
-                }),
-                Err(_) => {}
+                // Not answered as asked: the shard is unchecked, not missing.
+                Ok(other) => {
+                    return Err(Box::new(Unreachable::from_failure(
+                        owner,
+                        error(
+                            ErrorCode::ProtocolViolation,
+                            format!("{owner} answered GetMeta with {other:?}"),
+                        ),
+                    )))
+                }
+                Err(failure) => return Err(Box::new(Unreachable::from_failure(owner, failure))),
             }
         }
     }
-    findings
+    Ok(findings)
 }
 
 #[cfg(test)]

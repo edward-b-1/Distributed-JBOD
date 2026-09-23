@@ -1917,7 +1917,24 @@ and agree and that every listed holder has its shard file (the scan of
 version). With `--repair` it runs `RepairObject` once for each damaged
 key from the merged set, so repairs are never issued concurrently for one
 object. Detection therefore moves no data over the network; only repair
-does, and only for damaged objects. Scheduling is left to cron or a
+does, and only for damaged objects.
+
+A node that cannot be reached, or that refuses or answers out of
+protocol, is not damage and is never reported as damage. In the first
+phase such a node is reported once and the others are scrubbed. In the
+cross-node phase every key needs every node, and so does listing the
+keys, so the first node that cannot be used ends the phase: the scrub
+reports the node, how many keys were checked and how many were not (or
+that the keys could not be listed at all), and stops checking; findings made
+before that point stand, and with `--repair` those keys, and only those,
+are repaired. A key that could not be checked is never queued for
+repair. The run then ends as incomplete (`NodeUnreachable`) whether or
+not damage was also found, so the caller can tell "there is confirmed
+damage" from "the check did not finish" (the exit codes of #156). There
+is no retry: a failure to reach a node is reported the first time (16.1).
+The one holder case that is damage is a record naming a device no longer
+in the cluster document, `HolderNotInDocument`, which repair fixes by
+rebuilding that shard elsewhere (18.3). Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 
 20.1.2.1 [D] A holder refuses a second `PutShard` for a version and shard

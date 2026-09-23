@@ -527,12 +527,13 @@ pub enum ClusterFinding {
         revision: u64,
         current_revision: u64,
     },
-    /// A holder listed in the record could not be asked.
-    HolderUnavailable {
+    /// The record names a device that is no longer in the cluster
+    /// document; repair rebuilds that shard elsewhere (18.3).
+    HolderNotInDocument {
         key: String,
         version: VersionId,
         device: DeviceId,
-        detail: String,
+        shard_index: u8,
     },
 }
 
@@ -559,6 +560,17 @@ pub enum ScrubEvent {
         detail: ErrorDetail,
     },
     ClusterFinding(ClusterFinding),
+    /// The cross-node checks stopped because `node` could not be reached
+    /// or did not answer as a node (SPEC 20.1.2): the keys before this
+    /// point were checked, the rest were not. Not damage, and the
+    /// unchecked keys are never repaired; the run ends as incomplete.
+    /// `keys_unchecked` is `None` when the keys could not even be listed.
+    CrossCheckStopped {
+        node: NodeId,
+        detail: ErrorDetail,
+        keys_checked: u64,
+        keys_unchecked: Option<u64>,
+    },
     Repaired {
         key: String,
         report: RepairReport,
