@@ -1813,9 +1813,8 @@ addresses by design.
 19.1.5 [D] Every connection begins with each side sending one `Hello`
 carrying the protocol version, its peer kind (node or client), its node id
 if a node, the cluster id, its cluster document version (0 for a
-client), its software build (crate version and git commit; absent
-from builds before it was added, which `cluster show` reports as older),
-and, from a node, the cluster's name if it has one (6.2.5.3),
+client), its software build (crate version and git commit), and, from
+a node, the cluster's name if it has one (6.2.5.3),
 informational. A node closes the connection if the protocol version is
 unsupported, the cluster id differs, or a node peer's document version
 differs (6.2.7), with an error naming which. This catches a node or client
@@ -1841,6 +1840,12 @@ mismatch, and its refusal names the cluster it serves, so the id is
 learned either way; `djbod` reads it from that refusal, prints it as
 usual, and notes on standard error that the node wants upgrading. The
 nil UUID is therefore never a cluster id (6.2.1).
+
+19.1.5.2 [D] **Every field of a message is required.** Before 1.0
+there is no installed base to stay compatible with, so no field is
+optional for the sake of a build that predates it: an optional field
+whose absence means "an older build" hides which of the two it is. A
+field is optional only when its absence is a legitimate value.
 
 19.1.6 [D] **TLS.** Optional; when enabled it authenticates nodes to each
 other, authenticates clients, and encrypts every connection. TLS wraps
