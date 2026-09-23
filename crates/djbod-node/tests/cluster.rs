@@ -739,7 +739,7 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: a.node.cluster_id(),
         document_version: a.node.document_version(),
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     let mut first = Connection::connect(a.addr, hello()).await.expect("connect");
@@ -1726,7 +1726,7 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
         .await
         .expect("hello");
     match wire::read_message(&mut stream).await.expect("peer hello") {
-        Message::Hello(peer) => assert_eq!(peer.build.as_deref(), Some(djbod_client::BUILD)),
+        Message::Hello(peer) => assert_eq!(peer.build, djbod_client::BUILD),
         other => panic!("expected Hello, got {other:?}"),
     }
     stream
@@ -1900,10 +1900,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
         asking.peer_hello().cluster_name.as_deref(),
         Some("Home NAS")
     );
-    assert_eq!(
-        asking.peer_hello().build.as_deref(),
-        Some(djbod_client::BUILD)
-    );
+    assert_eq!(asking.peer_hello().build, djbod_client::BUILD);
     assert_eq!(asking.peer_hello().node_id, Some(a.node.id()));
     // Nothing else is served on that connection.
     assert!(
@@ -1920,7 +1917,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: Uuid::nil(),
         document_version: a.node.document_version(),
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     match Connection::connect(a.addr, asking_node).await {

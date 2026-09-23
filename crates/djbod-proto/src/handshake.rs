@@ -16,7 +16,9 @@ use uuid::Uuid;
 
 use djbod_core::cluster::NodeId;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Bumped for every incompatible change to a message (SPEC 19.1.5):
+/// 2 made `build` a required field of `Hello` and of `LocalStatus`.
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -34,10 +36,8 @@ pub struct Hello {
     pub cluster_id: Uuid,
     /// The cluster document version this peer holds; 0 for clients.
     pub document_version: u64,
-    /// The peer's software build, version and commit (19.1.5). Absent
-    /// from builds before it, so `cluster show` can name an older node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build: Option<String>,
+    /// The peer's software build, version and commit (19.1.5).
+    pub build: String,
     /// The cluster's name from the document, if it has one (6.2.5.3).
     /// Informational: the id is what is checked. Clients send none.
     #[serde(default, skip_serializing_if = "Option::is_none")]

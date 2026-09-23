@@ -170,7 +170,7 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
     assert_eq!(status.devices.len(), 2);
     let identity = client.identity().await.expect("identity");
     assert_eq!(identity.node, Some(a.node.id()));
-    assert_eq!(identity.build.as_deref(), Some(djbod_client::BUILD));
+    assert_eq!(identity.build, djbod_client::BUILD);
     let document = client.cluster_document().await.expect("document");
     assert_eq!(document.version, a.node.document_version());
     let report = client.repair("k").await.expect("repair");

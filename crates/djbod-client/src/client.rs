@@ -117,8 +117,7 @@ pub struct Status {
     pub cluster_name: Option<String>,
     pub document_version: u64,
     pub coordinator: NodeId,
-    /// Every node asked, with its build; empty from a coordinator that
-    /// predates builds in `Status`.
+    /// Every node asked, with its build.
     pub nodes: Vec<NodeStatus>,
     pub transport: Transport,
     pub devices: Vec<DeviceStatus>,
@@ -131,7 +130,7 @@ pub struct Identity {
     pub cluster_id: Uuid,
     pub cluster_name: Option<String>,
     pub node: Option<NodeId>,
-    pub build: Option<String>,
+    pub build: String,
     pub document_version: u64,
 }
 

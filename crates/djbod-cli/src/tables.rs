@@ -76,16 +76,12 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
         "FREE",
     ]);
     for d in devices {
-        // The owning node's build: unreported by a node that predates
-        // builds in LocalStatus, unknown under a coordinator that
-        // predates them in Status (SPEC 6.2.6.4).
-        let build = match nodes.iter().find(|n| n.node == d.node) {
-            Some(NodeStatus {
-                build: Some(build), ..
-            }) => build.as_str(),
-            Some(_) => "older, unreported",
-            None => "-",
-        };
+        // The owning node's build (SPEC 6.2.6.4).
+        let build = nodes
+            .iter()
+            .find(|n| n.node == d.node)
+            .map(|n| n.build.as_str())
+            .unwrap_or("-");
         table.add_row([
             d.device.0.to_string(),
             d.label.as_deref().unwrap_or("-").to_string(),
@@ -113,13 +109,8 @@ pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument])
             .node(r.node)
             .map(|n| n.addresses.join(", "))
             .unwrap_or_else(|| r.address.clone());
-        // A reachable node that sent no build predates builds in Hello
-        // (SPEC 6.2.6.4).
-        let build = match (&r.build, &r.result) {
-            (Some(build), _) => build.as_str(),
-            (None, Ok(_)) => "older, unreported",
-            (None, Err(_)) => "-",
-        };
+        // No build from a node that could not be reached.
+        let build = r.build.as_deref().unwrap_or("-");
         table.add_row([
             r.node.0.to_string(),
             r.label.as_deref().unwrap_or("-").to_string(),
@@ -242,10 +233,10 @@ mod tests {
                 node: id,
                 label,
                 address: addresses[0].clone(),
-                build: if i == 1 {
-                    Some(long_build.to_string())
-                } else {
-                    None
+                build: match i {
+                    1 => Some(long_build.to_string()),
+                    2 => None,
+                    _ => Some("0.1.0+abc".to_string()),
                 },
                 result: if i == 2 {
                     Err("connection refused".to_string())
@@ -260,7 +251,7 @@ mod tests {
         let address_start = header.find("ADDRESS").unwrap();
         let build_start = header.find("BUILD").unwrap();
         let version_start = header.find("VERSION").unwrap();
-        let builds = ["older, unreported", long_build, "-"];
+        let builds = ["0.1.0+abc", long_build, "-"];
         let versions = ["1", "1", "unreachable: connection refused"];
         for (i, line) in lines.enumerate() {
             assert_eq!(
