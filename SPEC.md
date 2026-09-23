@@ -611,7 +611,7 @@ on block checksums alone.
 
 ```
 <device path>/
-    device.json               identity file (section 5.2)
+    DISTRIBUTED-JBOD-DEVICE.json  identity file (section 5.2)
     objects/
         default/              one directory per bucket; v1 has only this one
             ab/               first two hex characters of the key hash
@@ -2404,9 +2404,10 @@ Unrecoverable}`), `keyhash` (SHA-256), `version` (ULID value and text),
 `record` (`MetadataRecord` with validation), and `layout` (directory and
 file names). 77 tests. Settled in code: 21.3 (hash), 9.3.1 (file per
 shard), 8.1.5 (library parity rows are prefix-stable), 8.3.2 and 8.3.6
-(checksums). Left to milestone 2's device layer: the `device.json`
-identity file (5.2) and the temporary-name, fsync, rename procedure
-(9.3.3, 9.4.3), because both are driven by the node process.
+(checksums). Left to milestone 2's device layer: the
+`DISTRIBUTED-JBOD-DEVICE.json` identity file (5.2) and the temporary-name,
+fsync, rename procedure (9.3.3, 9.4.3), because both are driven by the
+node process.
 
 C.6 [D] **Async runtime: `tokio`.** Alternatives considered:
 `async-std` (discontinued in 2025 in favour of `smol`), `smol` (small and
