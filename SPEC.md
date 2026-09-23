@@ -214,12 +214,47 @@ redundancy guarantee wherever it is set.
 5.4 [P] At startup the node also refuses to start if a device identity file
 has a `system` field other than `distributed-jbod`, names a different
 cluster id, has an unsupported format version, or if the same device UUID
-is claimed by two paths.
+is claimed by two paths. A configured path whose directory is missing,
+or exists but holds neither identity file nor objects tree (a mount
+point with nothing mounted), is not a refusal: the node starts without
+it and the device it should have held is unavailable (5.6). A directory
+with an objects tree but no identity file is still refused, since it is
+either someone else's or a device whose identity was destroyed by hand.
 
 5.5 [D] A device reports free space as the filesystem's free bytes as
 returned by `statvfs`, minus a configured headroom, minus the sum of
 reservations currently in flight on that device (if reservation is used,
 10.6).
+
+5.6 [D] **An unavailable device.** A device the node cannot read is
+*unavailable*: the disk failed, was never mounted, or its directory was
+destroyed. Two ways a device becomes so. At startup, a device the
+cluster document lists for this node that no configured path opened
+(5.4). At run time, a device whose identity file (5.2) can no longer be
+read; the node checks for it, one `stat`, before every write, listing,
+scrub, and space report, so that a directory which vanished is never
+recreated by a write that would otherwise create its parents on
+whatever filesystem is at that path. The consequences:
+
+- `LocalStatus` and `Status` (19.1.3) report the device with `available`
+  false and no space; the document's state (`active`, `draining`) is
+  unchanged, because availability is what the node observes and state is
+  what the administrator decided. `djbod status` prints
+  `active, unavailable`. Placement (10.4), re-placement (18.8.2), and
+  repair (18.3) choose only available devices.
+- A write to it is refused with `DeviceUnavailable`; so is a listing of
+  its records (`LocalRecords`, and through it `contents`, `drain`, and
+  the removal scan of 18.5). `djbod contents` says so for that device
+  and goes on with the others.
+- The scrub (20.1.2) reports it as one finding, `DeviceUnavailable`,
+  reads nothing more from it, and, in the cross-node checks, does not
+  expect a record copy from it, so the versions that name it are not
+  each reported inconsistent for the copy they lost there.
+- The node logs the loss once when first seen and once when the device
+  is readable again.
+
+Retiring an unavailable device is the forced removal of 6.2.6.3 at
+node level today; the device-level equivalent is proposed.
 
 ## 6. Configuration
 
@@ -1632,8 +1667,9 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: none. Response: cluster id, cluster name if set (6.2.5.3),
   document version, coordinator node
   UUID, every node asked with the build it reported (6.2.6.4), and for
-  every device in the cluster: UUID, owning node, state, total bytes,
-  free bytes. Implemented by broadcasting `LocalStatus`.
+  every device in the cluster: UUID, owning node, state, whether its
+  node can read it (5.6), total bytes, free bytes. Implemented by
+  broadcasting `LocalStatus`.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
@@ -1717,8 +1753,8 @@ coordinator, and those nodes send to each other. Every response is either
 
 `LocalStatus`
 : Request: none. Response: node UUID, document version, the node's
-  build (6.2.6.4), and for each local device: UUID, state, total bytes,
-  free bytes (5.5).
+  build (6.2.6.4), and for each local device: UUID, state, whether the
+  node can read it (5.6), total bytes, free bytes (5.5).
 
 `LocalLookup`
 : Request: key hash, optional cursor (the last version and device of the
@@ -1976,7 +2012,9 @@ every shard file, opens it (header, footer, trailer, geometry), checks the
 header against the file name, the directory, and the record, and reads
 every block against its checksum. It also reports a record whose shard is
 not on the device, a shard with no record, a record that does not list
-the device, and temporaries older than the configured age. Every finding
+the device, and temporaries older than the configured age. A device it
+cannot read at all is one finding, `DeviceUnavailable`, and nothing
+more is read from it (5.6). Every finding
 names the path and, where a record was readable, the key. A rate limit
 caps bytes read per second. It never contacts another node. Because files
 are immutable once renamed and temporaries carry a suffix it is safe
@@ -1994,7 +2032,9 @@ coordinator merges the streams into one report. It then performs the
 checks no single node can: for every version, that k+m record copies
 exist and agree, that no stale copy remains, and that every listed
 device has its shard file (the scan of 18.5, which catches a device that
-lost both record and shard for a version). With `--repair` it runs
+lost both record and shard for a version). A copy on an unavailable
+device (5.6) is not expected: that device was reported once, and is not
+reported again for every version that names it. With `--repair` it runs
 `RepairObject` once for each damaged key from the merged set, so repairs
 are never issued concurrently for one object. Detection therefore moves
 no data over the network; only repair does, and only for damaged objects.

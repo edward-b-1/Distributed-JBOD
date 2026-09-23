@@ -8,7 +8,7 @@
 //! be reached, any checksum that does not match, fails the request with
 //! an error carrying the fields of 16.2.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -325,6 +325,17 @@ async fn lookup_on(
 /// which are the leftovers of a re-placement. Every copy must name the
 /// requested key (9.1.6).
 fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRecord>, Failure> {
+    versions_of_excluding(key, located, &BTreeSet::new())
+}
+
+/// `versions_of` for the cross-node scrub (20.1.2.2), where a copy on a
+/// device the cluster cannot read (5.6) is not expected: that device is
+/// reported once, not once per version.
+fn versions_of_excluding(
+    key: &str,
+    located: Vec<LocatedRecord>,
+    unavailable: &BTreeSet<DeviceId>,
+) -> Result<Vec<MetadataRecord>, Failure> {
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {
         by_version
@@ -360,7 +371,12 @@ fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRec
             .filter(|c| c.record.revision == current_revision)
             .collect();
         let first = &current[0].record;
-        let expected = first.k as usize + first.m as usize;
+        let unreadable = first
+            .shards
+            .iter()
+            .filter(|s| unavailable.contains(&s.device))
+            .count();
+        let expected = first.k as usize + first.m as usize - unreadable;
         if current.len() != expected {
             return Err(Failure::Error(ErrorDetail {
                 key: Some(key.to_string()),
@@ -1025,7 +1041,7 @@ fn place(
 ) -> Result<Vec<DeviceStatus>, Failure> {
     let mut eligible: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active && d.free_bytes >= shard_bytes)
+        .filter(|d| d.state == DeviceState::Active && d.available && d.free_bytes >= shard_bytes)
         .collect();
     eligible.sort_by(|a, b| {
         b.free_bytes
@@ -1918,6 +1934,7 @@ async fn relocate_lost_shards(
         .into_iter()
         .filter(|d| {
             d.state == DeviceState::Active
+                && d.available
                 && d.free_bytes >= shard_bytes
                 && !devices.contains(&d.device)
         })
@@ -2250,6 +2267,7 @@ async fn move_shard_of_record(
     let devices: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
     let eligible = |d: &DeviceStatus| {
         d.state == DeviceState::Active
+            && d.available
             && d.free_bytes >= shard_bytes
             && !devices.contains(&d.device)
     };
@@ -2429,7 +2447,7 @@ async fn drain(
     let required_devices = document.k as u64 + document.m as u64;
     let active: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active)
+        .filter(|d| d.state == DeviceState::Active && d.available)
         .collect();
     let target_free_bytes: u64 = active.iter().map(|d| d.free_bytes).sum();
     let mut shard_bytes: u64 = 0;
@@ -3008,7 +3026,7 @@ async fn scrub(
 ) -> Result<(), Failure> {
     respond(writer, id, Ok(Response::ScrubStarted)).await?;
     let mut sequence: u64 = 0;
-    let mut damaged_keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut damaged_keys: BTreeSet<String> = std::collections::BTreeSet::new();
     let mut failed_nodes = 0usize;
     let mut finding_count = 0usize;
 
@@ -3289,6 +3307,7 @@ enum RecordSource {
     #[cfg(test)]
     Fixed {
         owner: NodeId,
+        device: DeviceId,
         items: std::collections::VecDeque<Result<StreamedRecord, ErrorDetail>>,
     },
 }
@@ -3299,6 +3318,14 @@ impl RecordSource {
             RecordSource::Device(stream) => stream.owner,
             #[cfg(test)]
             RecordSource::Fixed { owner, .. } => *owner,
+        }
+    }
+
+    fn device(&self) -> DeviceId {
+        match self {
+            RecordSource::Device(stream) => stream.device,
+            #[cfg(test)]
+            RecordSource::Fixed { device, .. } => *device,
         }
     }
 
@@ -3319,7 +3346,7 @@ impl RecordSource {
 #[derive(Default)]
 struct CrossCheckOutcome {
     findings: usize,
-    damaged_keys: std::collections::BTreeSet<String>,
+    damaged_keys: BTreeSet<String>,
     versions_checked: u64,
     /// `Some(n)` when a stream failed after `n` versions were checked.
     stopped_after: Option<u64>,
@@ -3367,10 +3394,17 @@ async fn merge_sources(
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
 ) -> CrossCheckOutcome {
     let mut outcome = CrossCheckOutcome::default();
+    // Devices whose records cannot be read (5.6): the node's own scrub
+    // reported each one; here their copies are simply not expected.
+    let mut unavailable: BTreeSet<DeviceId> = BTreeSet::new();
     let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
     for source in sources.iter_mut() {
         match source.next().await {
             Ok(head) => heads.push(head),
+            Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
+                unavailable.insert(source.device());
+                heads.push(None);
+            }
             Err(failure) => {
                 let unreachable = Unreachable::from_failure(source.owner(), failure);
                 stop(&events, &mut outcome, unreachable).await;
@@ -3404,7 +3438,7 @@ async fn merge_sources(
                 taken.push(index);
             }
         }
-        for finding in check_group(group, &present) {
+        for finding in check_group(group, &present, &unavailable) {
             outcome.findings += 1;
             outcome
                 .damaged_keys
@@ -3430,6 +3464,10 @@ async fn merge_sources(
         for index in taken {
             match sources[index].next().await {
                 Ok(head) => heads[index] = head,
+                Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
+                    unavailable.insert(sources[index].device());
+                    heads[index] = None;
+                }
                 Err(failure) => {
                     let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
                     stop(&events, &mut outcome, unreachable).await;
@@ -3462,13 +3500,14 @@ async fn stop(
 fn check_group(
     group: Vec<LocatedRecord>,
     present: &BTreeMap<DeviceId, bool>,
+    unavailable: &BTreeSet<DeviceId>,
 ) -> Vec<ClusterFinding> {
     let mut findings = Vec::new();
     let Some(first) = group.first() else {
         return findings;
     };
     let key = first.record.key.clone();
-    let versions = match versions_of(&key, group.clone()) {
+    let versions = match versions_of_excluding(&key, group.clone(), unavailable) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {
@@ -3581,8 +3620,32 @@ mod tests {
     fn fixed(owner: NodeId, items: Vec<Result<StreamedRecord, ErrorDetail>>) -> RecordSource {
         RecordSource::Fixed {
             owner,
+            device: DeviceId(Uuid::nil()),
             items: items.into(),
         }
+    }
+
+    /// SPEC 5.6: a stream that fails as unavailable is skipped, and the
+    /// copies its device would hold are not expected, so the versions
+    /// naming that device are not reported inconsistent; the node's own
+    /// scrub reported the device once.
+    #[tokio::test]
+    async fn the_merge_skips_an_unavailable_device_without_reporting_its_versions() {
+        let shared = record(1, 0, [1, 2]);
+        let a = fixed(node(1), vec![Ok(streamed(1, &shared, true))]);
+        let b = RecordSource::Fixed {
+            owner: node(2),
+            device: device(2),
+            items: vec![Err(ErrorDetail::new(
+                ErrorCode::DeviceUnavailable,
+                "directory gone",
+            ))]
+            .into(),
+        };
+        let (outcome, events) = merged(vec![a, b]).await;
+        assert_eq!(outcome.versions_checked, 1, "{events:?}");
+        assert_eq!(outcome.stopped_after, None, "{events:?}");
+        assert_eq!(outcome.findings, 0, "{events:?}");
     }
 
     /// Run a merge over fixed sources and collect its events. The

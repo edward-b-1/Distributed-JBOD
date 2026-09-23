@@ -853,8 +853,8 @@ function renderOverview() {
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
     return el('tr', {}, el('td', {}, deviceCell(d.device)),
       el('td', {}, nodeCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
-      el('td', {}, el('span', { class: 'state ' + d.state, text: d.state })),
-      el('td', {}, d.state === 'removed' ? el('span', { class: 'hint', text: '—' }) : meter),
+      el('td', {}, el('span', { class: 'state ' + d.state, text: d.available === false ? d.state + ', unavailable' : d.state, title: d.available === false ? 'the node cannot read this device: disk failed, not mounted, or destroyed' : null })),
+      el('td', {}, d.state === 'removed' || d.available === false ? el('span', { class: 'hint', text: '—' }) : meter),
       el('td', { class: 'num', text: human(d.free_bytes) }), el('td', { class: 'num', text: human(d.total_bytes) }),
       el('td', {}, actions));
   }));

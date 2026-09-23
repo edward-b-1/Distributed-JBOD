@@ -72,6 +72,10 @@ pub enum DeviceError {
         "{path} has an objects directory but no identity file; the identity file was deleted or the directory belongs to something else"
     )]
     ForeignDirectory { path: PathBuf },
+    #[error(
+        "device at {path} is unavailable: its directory or identity file cannot be read; the disk failed, is not mounted, or was destroyed (SPEC 5.6)"
+    )]
+    Unavailable { path: PathBuf },
     #[error("identity file at {path} is not valid: {reason}")]
     BadIdentity { path: PathBuf, reason: String },
     #[error("device {device:?} at {path} belongs to cluster {actual}, not {expected}")]
@@ -299,6 +303,21 @@ impl Device {
         &self.root
     }
 
+    /// Confirm the device is still there: its identity file can be read
+    /// (5.6). One `stat`, done before every write, listing, scrub, and
+    /// space report, so a disk that failed, unmounted, or was destroyed
+    /// after startup is refused rather than silently recreated.
+    pub fn check_present(&self) -> Result<(), DeviceError> {
+        let identity_path = self.root.join(DEVICE_IDENTITY_FILE);
+        match fs::metadata(&identity_path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeviceError::Unavailable {
+                path: self.root.clone(),
+            }),
+            Err(e) => Err(io_error(&identity_path, e)),
+        }
+    }
+
     pub fn id(&self) -> DeviceId {
         self.identity.device_id
     }
@@ -324,6 +343,7 @@ impl Device {
     /// Total size of the filesystem and the bytes this system may still
     /// use on it (5.5).
     pub fn space(&self, headroom: f64) -> Result<SpaceReport, DeviceError> {
+        self.check_present()?;
         let stat = rustix::fs::statvfs(&self.root)
             .map_err(|errno| io_error(&self.root, io::Error::from(errno)))?;
         let available = stat.f_bavail * stat.f_frsize;
@@ -356,6 +376,7 @@ impl Device {
 
     /// Every key directory on this device, in path order.
     pub fn key_directories(&self) -> Result<Vec<PathBuf>, DeviceError> {
+        self.check_present()?;
         let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         let mut out = Vec::new();
         for first in read_dir_sorted(&bucket)? {
@@ -381,6 +402,7 @@ impl Device {
     ) -> Result<ShardWrite, DeviceError> {
         let length = shard_file_length(header.scheme, header.block_length, object_size)
             .ok_or(DeviceError::BadObjectSize { object_size })?;
+        self.check_present()?;
         let dir = self.object_directory(key_hash);
         fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
         let final_path = dir.join(shard_file_name(&header.version_id, header.shard_index));
@@ -404,6 +426,7 @@ impl Device {
             path: dir.clone(),
             source,
         })?;
+        self.check_present()?;
         fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
         let path = dir.join(record_file_name(&record.version));
         if path.exists() {
@@ -545,6 +568,7 @@ impl Device {
         mut on_record: impl FnMut(&MetadataRecord, bool) -> WalkStep,
         mut on_bad: impl FnMut(&Path, &DeviceError),
     ) -> Result<(), DeviceError> {
+        self.check_present()?;
         let cursor = after.map(|(hash, version)| (hash.directory_components(), version));
         let name_of = |path: &Path| {
             path.file_name()

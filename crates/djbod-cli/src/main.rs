@@ -31,7 +31,7 @@ use djbod_client::transport::Connector;
 use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
-use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery};
+use djbod_proto::message::{DrainEvent, ErrorCode, ErrorDetail, ListQuery};
 
 mod tables;
 
@@ -539,7 +539,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let mut rows = Vec::with_capacity(chosen.len());
             for device in chosen {
-                rows.push(client.device_contents(device).await.map_err(client_err)?);
+                match client.device_contents(device).await {
+                    Ok(contents) => rows.push(contents),
+                    // A device its node cannot read (5.6) has no counts;
+                    // say so and go on with the others.
+                    Err(e)
+                        if e.detail()
+                            .is_some_and(|d| d.code == ErrorCode::DeviceUnavailable) =>
+                    {
+                        eprintln!(
+                            "{device} unavailable: {}",
+                            e.detail().map(|d| d.message.clone()).unwrap_or_default()
+                        );
+                    }
+                    Err(e) => return Err(client_err(e)),
+                }
             }
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -593,6 +607,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices, &nodes));
+                        let unavailable = devices.iter().filter(|d| !d.available).count();
+                        if unavailable > 0 {
+                            eprintln!(
+                                "{unavailable} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed)"
+                            );
+                        }
                     }
                 }
             }
@@ -1790,6 +1810,7 @@ fn describe_scrub_finding(finding: &djbod_core::scrub::Finding) -> String {
         StaleTemporary { path, age_secs } => {
             format!("stale temporary: {}  {age_secs}s old", path.display())
         }
+        DeviceUnavailable { reason } => format!("device unavailable: {reason}"),
     }
 }
 

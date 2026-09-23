@@ -104,6 +104,9 @@ pub struct Node {
     /// Becomes true when an adopted document no longer lists this node
     /// (18.2.1, 6.2.6.3); the server stops accepting connections.
     removed: tokio::sync::watch::Sender<bool>,
+    /// Devices found unavailable at run time (5.6), so the loss is logged
+    /// once and its end once, not on every status request.
+    unavailable_reported: Mutex<HashSet<DeviceId>>,
     /// Loaded from the configured paths at startup (19.1.6.2).
     tls: Option<Arc<TlsMaterial>>,
     /// Connections accepted since startup, by transport, for status and
@@ -184,6 +187,33 @@ impl Node {
         self.devices.clone()
     }
 
+    /// Devices the document lists for this node that were not opened at
+    /// startup (5.6): their path is missing, empty, or not configured.
+    pub fn unavailable_devices(&self) -> Vec<DeviceId> {
+        let document = self.document.read().expect("document lock");
+        document
+            .devices
+            .iter()
+            .filter(|d| {
+                d.node == self.id()
+                    && d.state != DeviceState::Removed
+                    && !self.devices_by_id.contains_key(&d.id)
+            })
+            .map(|d| d.id)
+            .collect()
+    }
+
+    /// Record that `device` was found unavailable, or available again.
+    /// Returns true when that is a change, so the caller logs it once.
+    pub fn note_availability(&self, device: DeviceId, available: bool) -> bool {
+        let mut reported = self.unavailable_reported.lock().expect("availability lock");
+        if available {
+            reported.remove(&device)
+        } else {
+            reported.insert(device)
+        }
+    }
+
     fn document_path(config: &NodeConfig) -> PathBuf {
         config.state_dir.join(CLUSTER_DOCUMENT_FILE)
     }
@@ -249,7 +279,20 @@ impl Node {
         }
         let mut devices = Vec::with_capacity(config.devices.len());
         for path in &config.devices {
-            devices.push(Device::open(path, Some(document.cluster_id))?);
+            match Device::open(path, Some(document.cluster_id)) {
+                Ok(device) => devices.push(device),
+                // A missing directory or an empty mount point: the disk is
+                // not there. The device it should hold is reported
+                // unavailable (5.6) rather than the node refusing to start.
+                Err(e @ DeviceError::NotInitialised { .. }) => {
+                    tracing::warn!(path = %path.display(), %e, "configured device path cannot be opened; the device it held is unavailable");
+                }
+                Err(e @ DeviceError::Io { .. }) if matches!(&e, DeviceError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    tracing::warn!(path = %path.display(), %e, "configured device path cannot be opened; the device it held is unavailable");
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         let max_age = Duration::from_secs(config.temporary_max_age_secs);
         for device in &devices {
@@ -330,6 +373,15 @@ impl Node {
             by_id.insert(device.id(), device.clone());
             ordered.push(device);
         }
+        for entry in document.devices.iter().filter(|d| {
+            d.node == node_id && d.state != DeviceState::Removed && !by_id.contains_key(&d.id)
+        }) {
+            tracing::warn!(
+                device = %entry.id,
+                label = entry.label.as_deref().unwrap_or("-"),
+                "device listed for this node was not opened: no configured path holds it; it is unavailable (SPEC 5.6)"
+            );
+        }
         Ok(Node {
             config,
             document: RwLock::new(document),
@@ -338,6 +390,7 @@ impl Node {
             versions: VersionGenerator::new(),
             writes_in_flight: Mutex::new(HashSet::new()),
             removed: tokio::sync::watch::Sender::new(false),
+            unavailable_reported: Mutex::new(HashSet::new()),
             tls,
             accepted_plain: AtomicU64::new(0),
             accepted_tls: AtomicU64::new(0),

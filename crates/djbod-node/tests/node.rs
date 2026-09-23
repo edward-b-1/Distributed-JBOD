@@ -931,3 +931,89 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
         Err(other) => panic!("expected SameFilesystem, got {other:?}"),
     }
 }
+
+/// SPEC 5.6: a device whose directory is destroyed while the node runs is
+/// reported unavailable, refuses a write rather than recreating the
+/// directory, and lists no records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_device_is_unavailable_and_not_recreated() {
+    let test = start_node(3, 2, 1).await;
+    let mut conn = test.connect_as_node().await;
+    let object = xorshift64_bytes(3 * BLOCK as usize + 17, 5);
+    let record = store_object(&test, &mut conn, "k", VersionId([5u8; 16]), &object).await;
+    let dead = test.devices()[1];
+    let root = test.device_root(dead);
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 3);
+            for status in &devices {
+                assert_eq!(status.available, status.device != dead, "{status:?}");
+                assert_eq!(status.total_bytes == 0, status.device == dead, "{status:?}");
+            }
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+
+    let refused = conn
+        .request(Request::PutMeta {
+            device: dead,
+            record: record.clone(),
+        })
+        .await;
+    match refused {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert_eq!(detail.device, Some(dead));
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(!root.exists(), "the write recreated {}", root.display());
+
+    let listed = conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await;
+    match listed {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// SPEC 5.6: a node starts without a device whose path is gone, and
+/// reports that device unavailable rather than refusing to start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
+    let test = start_node(3, 2, 1).await;
+    let dead = test.devices()[2];
+    std::fs::remove_dir_all(test.device_root(dead)).expect("destroy the device directory");
+    let reopened = Arc::new(Node::open(test.node.config().clone()).expect("starts without it"));
+    assert_eq!(reopened.devices().len(), 2);
+    assert_eq!(reopened.unavailable_devices(), vec![dead]);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(server::serve(reopened.clone(), listener));
+    let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
+        .await
+        .expect("connect");
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 3);
+            let missing = devices.iter().find(|d| d.device == dead).expect("listed");
+            assert!(!missing.available);
+            assert_eq!(missing.state, DeviceState::Active);
+            assert_eq!(missing.total_bytes, 0);
+            assert!(devices
+                .iter()
+                .filter(|d| d.device != dead)
+                .all(|d| d.available));
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+}
