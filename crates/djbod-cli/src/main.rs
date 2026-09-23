@@ -439,6 +439,43 @@ fn describe_detail(detail: &ErrorDetail) -> String {
     out
 }
 
+/// The exit code of `scrub` (SPEC 20.1.2.3): 0 when the run completed
+/// and nothing remains wrong; 2 when it completed and damage remains; 3
+/// when it did not complete and no damage was seen; 4 when it did not
+/// complete and damage was seen. Damage remaining is the findings, or
+/// with --repair the repairs that failed.
+fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failures: usize) -> i32 {
+    let damage_remaining = if repair {
+        repair_failures > 0
+    } else {
+        findings > 0
+    };
+    match (incomplete, findings > 0) {
+        (false, _) if !damage_remaining => 0,
+        (false, _) => 2,
+        (true, false) => 3,
+        (true, true) => 4,
+    }
+}
+
+/// The last line's verdict, in the words of SPEC 20.1.2.3.
+fn scrub_outcome(
+    repair: bool,
+    incomplete: bool,
+    findings: usize,
+    repair_failures: usize,
+) -> &'static str {
+    match scrub_exit_code(repair, incomplete, findings, repair_failures) {
+        0 if repair => "complete, everything found was repaired",
+        0 => "complete, no damage found",
+        2 if repair => "complete, some damage could not be repaired",
+        2 => "complete, damage found",
+        3 => "incomplete, no damage seen; run it again",
+        _ if repair => "incomplete, damage found was repaired where it could be; whether more exists is unknown, run it again",
+        _ => "incomplete, damage found and more may exist; run it again",
+    }
+}
+
 fn remote(e: ConnectionError) -> anyhow::Error {
     anyhow::anyhow!("{}", describe_error(&e))
 }
@@ -773,9 +810,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .map_err(client_err)?;
             let mut findings = 0usize;
             let mut repairs = 0usize;
+            let mut repair_failures = 0usize;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
+                        // Counted whatever the output mode: the exit code
+                        // depends on it (SPEC 20.1.2.3).
+                        match &event {
+                            ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_) => {
+                                findings += 1
+                            }
+                            ScrubEvent::Repaired { .. } => repairs += 1,
+                            ScrubEvent::RepairFailed { .. } => repair_failures += 1,
+                            _ => {}
+                        }
                         if cli.json {
                             println!("{}", serde_json::to_string(&event)?);
                             continue;
@@ -786,7 +834,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 device,
                                 finding,
                             } => {
-                                findings += 1;
                                 println!(
                                     "node {}  device {}\n  {}",
                                     short(&node.0),
@@ -818,7 +865,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 );
                             }
                             ScrubEvent::ClusterFinding(finding) => {
-                                findings += 1;
                                 println!("cluster check: {finding:?}");
                             }
                             ScrubEvent::CrossCheckStopped {
@@ -845,7 +891,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 );
                             }
                             ScrubEvent::Repaired { key, report } => {
-                                repairs += 1;
                                 let rewritten =
                                     report.shards.iter().filter(|s| s.rewritten).count();
                                 println!("repaired {key}: {rewritten} shard(s) rewritten");
@@ -858,15 +903,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     Err(end) => break end,
                 }
             };
+            // Incomplete means a node could not be scrubbed or the checks
+            // stopped; failed repairs end the stream with WriteFailed and
+            // the run is still complete.
+            let incomplete = end
+                .error
+                .as_ref()
+                .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
+            let code = scrub_exit_code(*repair, incomplete, findings, repair_failures);
             if !cli.json {
-                eprintln!("{findings} finding(s), {repairs} repair(s)");
+                eprintln!(
+                    "{findings} finding(s), {repairs} repair(s), {repair_failures} failed repair(s): {}",
+                    scrub_outcome(*repair, incomplete, findings, repair_failures)
+                );
+                if let Some(error) = &end.error {
+                    eprintln!("scrub incomplete: {}", describe_detail(error));
+                }
             }
-            if let Some(error) = end.error {
-                eprintln!("scrub incomplete: {}", describe_detail(&error));
-                std::process::exit(2);
-            }
-            if findings > 0 && !*repair {
-                std::process::exit(2);
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Command::MoveShard {
@@ -1844,6 +1899,31 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SPEC 20.1.2.3: the four outcomes and their codes, for both forms.
+    #[test]
+    fn scrub_exit_codes_follow_the_four_outcomes() {
+        // (repair, incomplete, findings, repair_failures) -> code
+        let cases = [
+            (false, false, 0, 0, 0),
+            (false, false, 3, 0, 2),
+            (false, true, 0, 0, 3),
+            (false, true, 3, 0, 4),
+            (true, false, 0, 0, 0),
+            (true, false, 3, 0, 0), // everything found was repaired
+            (true, false, 3, 1, 2), // one repair failed
+            (true, true, 0, 0, 3),
+            (true, true, 3, 0, 4), // repaired, but the scan did not finish
+            (true, true, 3, 2, 4),
+        ];
+        for (repair, incomplete, findings, failures, code) in cases {
+            assert_eq!(
+                scrub_exit_code(repair, incomplete, findings, failures),
+                code,
+                "repair={repair} incomplete={incomplete} findings={findings} failures={failures}"
+            );
+        }
+    }
 
     #[test]
     fn the_cluster_id_is_read_from_an_older_nodes_refusal() {

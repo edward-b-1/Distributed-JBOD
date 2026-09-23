@@ -2038,10 +2038,33 @@ checking; findings made before that point stand, and with `--repair`
 those keys, and only those, are repaired. A key that could not be checked is never queued for
 repair. The run then ends as incomplete (`NodeUnreachable`) whether or
 not damage was also found, so the caller can tell "there is confirmed
-damage" from "the check did not finish" (the exit codes of #156). There
+damage" from "the check did not finish" (the exit codes of 20.1.2.3). There
 is no retry: a failure to reach a node is reported the first time (16.1).
 Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
+
+20.1.2.3 [D] **Exit codes.** `djbod scrub` has four outcomes and one
+exit code each, the same four for both forms of the command once
+"damage" is read for each: without `--repair` it is what was found, with
+`--repair` it is what could not be repaired.
+
+| Outcome | Code | `scrub` | `scrub --repair` |
+|---|---|---|---|
+| Complete, nothing wrong | 0 | no damage found | everything found was repaired |
+| Complete, damage | 2 | damage found | some damage could not be repaired |
+| Incomplete, no damage seen | 3 | run it again | run it again |
+| Incomplete, damage seen | 4 | damage found, and more may exist | damage found was repaired where it could be, but whether more exists is unknown: run it again |
+
+Zero means the guarantee holds; 3 and 4 mean it does not and the scan
+must be run again; 2 and 4 mean damage was confirmed. A repair job's
+promise is that all damage is fixed, and an unfinished scan cannot make
+it, so an incomplete `--repair` run exits 3 or 4 even if every repair it
+attempted succeeded. A complete run with a failed repair exits 2; an
+incomplete run with a failed repair exits 4. "Incomplete" is a run whose
+stream ended naming a node that could not be scrubbed or checks that
+stopped; a stream that ends only because repairs failed is complete.
+The last line of the human output states the outcome in these words;
+`--json` prints the events alone, and the exit code carries the verdict.
 
 20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard
 index already being written on that device (`WriteFailed`, "already being
