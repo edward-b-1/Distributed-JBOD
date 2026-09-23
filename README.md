@@ -278,6 +278,9 @@ network you trust; the guide has the steps.
 
 ## For developers
 
+The [architecture document](docs/architecture.md) explains the components,
+request paths, failure semantics, and consequences of the implemented design.
+
 The design is in [SPEC.md](SPEC.md), written before the code and kept in
 step with it: every decision is numbered and marked as decided, proposed,
 open, or deferred, and the reasoning behind rejected alternatives is kept.
