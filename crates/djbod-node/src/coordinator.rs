@@ -2570,7 +2570,7 @@ async fn fetch_device_records(
         match answer {
             Response::LocalRecords { records, truncated } => {
                 after = records.last().map(|r| RecordCursor {
-                    key: r.key.clone(),
+                    key_hash: r.key_hash,
                     version: r.version,
                 });
                 all.extend(records);

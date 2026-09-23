@@ -831,7 +831,7 @@ pub async fn scan_references(
                         truncated,
                     }) => {
                         after = page.last().map(|r| RecordCursor {
-                            key: r.key.clone(),
+                            key_hash: r.key_hash,
                             version: r.version,
                         });
                         records.extend(page);

@@ -589,3 +589,100 @@ fn cleanup_removes_only_old_temporaries() {
     assert!(fresh.exists());
     assert!(real.exists());
 }
+
+/// SPEC 15.2.2: a walk from a cursor visits the records after it, in key
+/// hash then version order, reports whether the shard file is present,
+/// and stops when asked.
+#[test]
+fn walk_records_from_a_cursor_resumes_in_hash_order_and_reports_shard_presence() {
+    use djbod_core::device::WalkStep;
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let device = new_device(dir.path());
+    let scheme = Scheme::new(1, 0).expect("valid scheme");
+    let mut expected: Vec<(KeyHash, VersionId)> = Vec::new();
+    for i in 0..12u8 {
+        let key = format!("key-{i}");
+        let version = VersionId([i; 16]);
+        store_object(
+            std::slice::from_ref(&device),
+            scheme,
+            &key,
+            version,
+            &xorshift64_bytes(50, i as u64),
+        );
+        expected.push((hash_key(key.as_bytes()), version));
+    }
+    expected.sort();
+    // A second version of one key, to check the version order within a
+    // key directory; and one shard file removed, to check the flag.
+    let extra_key = "key-3";
+    store_object(
+        std::slice::from_ref(&device),
+        scheme,
+        extra_key,
+        VersionId([200; 16]),
+        &xorshift64_bytes(50, 99),
+    );
+    expected.push((hash_key(extra_key.as_bytes()), VersionId([200; 16])));
+    expected.sort();
+    let (missing_hash, missing_version) = expected[5];
+    fs::remove_file(
+        device
+            .object_directory(&missing_hash)
+            .join(shard_file_name(&missing_version, ShardIndex(0))),
+    )
+    .expect("remove shard");
+
+    let mut seen = Vec::new();
+    device
+        .walk_records_from(
+            None,
+            |r, present| {
+                seen.push((r.key_hash, r.version, present));
+                WalkStep::Continue
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk");
+    assert_eq!(
+        seen.iter().map(|(h, v, _)| (*h, *v)).collect::<Vec<_>>(),
+        expected,
+        "hash then version order"
+    );
+    assert!(seen
+        .iter()
+        .all(|(h, v, present)| *present != ((*h, *v) == (missing_hash, missing_version))));
+
+    // From a cursor in the middle: exactly what follows it.
+    let cursor = expected[4];
+    let mut after = Vec::new();
+    device
+        .walk_records_from(
+            Some((&cursor.0, cursor.1)),
+            |r, _| {
+                after.push((r.key_hash, r.version));
+                WalkStep::Continue
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk from cursor");
+    assert_eq!(after, expected[5..].to_vec());
+
+    // Stopping stops.
+    let mut count = 0;
+    device
+        .walk_records_from(
+            None,
+            |_, _| {
+                count += 1;
+                if count == 3 {
+                    WalkStep::Stop
+                } else {
+                    WalkStep::Continue
+                }
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk with stop");
+    assert_eq!(count, 3);
+}
