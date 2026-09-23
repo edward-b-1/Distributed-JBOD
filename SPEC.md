@@ -1846,13 +1846,11 @@ learned either way; `djbod` reads it from that refusal, prints it as
 usual, and notes on standard error that the node wants upgrading. The
 nil UUID is therefore never a cluster id (6.2.1).
 
-19.1.5.2 [D] **Protocol version.** Every field of a message is required
-until 1.0: there is no installed base to read leniently for, and an
-optional field whose absence means "an older build" hides which of the
-two it is. An incompatible change to a message bumps the protocol
-version, so that the older side is refused by name at `Hello` rather
-than failing to decode. Version 2 made the build a required field of
-`Hello` and of `LocalStatus`.
+19.1.5.2 [D] **Every field of a message is required.** Before 1.0
+there is no installed base to stay compatible with, so no field is
+optional for the sake of a build that predates it: an optional field
+whose absence means "an older build" hides which of the two it is. A
+field is optional only when its absence is a legitimate value.
 
 19.1.6 [D] **TLS.** Optional; when enabled it authenticates nodes to each
 other, authenticates clients, and encrypts every connection. TLS wraps

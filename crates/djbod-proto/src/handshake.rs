@@ -16,9 +16,7 @@ use uuid::Uuid;
 
 use djbod_core::cluster::NodeId;
 
-/// Bumped for every incompatible change to a message (SPEC 19.1.5):
-/// 2 made `build` a required field of `Hello` and of `LocalStatus`.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
