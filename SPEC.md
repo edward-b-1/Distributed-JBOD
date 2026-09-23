@@ -1162,7 +1162,7 @@ three:
   record larger than the frame, and the document's
   `max_user_metadata_bytes` (9.4.2, capped at 48 MiB) rules that out.
 - *Memory:* a coordinator that merges holds one page per stream, per
-  node for a listing or per device for the cross-node scrub (20.1.2).
+  node for a listing or per device for the cross-node scrub (20.1.2.2).
   At 8 MiB, three nodes with two disks each is 48 MiB in flight; a
   cluster of 16 devices is 128 MiB, still comfortable on the small
   machines this system is for. At 32 MiB the 16-device case is 512 MiB,
@@ -1211,6 +1211,22 @@ instant. The internal walks need no more: a scrub that misses a key
 written during it finds it next time, a drain's list cannot grow because
 a `draining` device receives no new shards, and the removal scan is
 protected by requiring that state first (issue #28).
+
+15.2.3 [P] **One connection per collection.** The code is asynchronous
+and any of it may open a connection, so nothing bounds the number of
+connections open at once except the shape of the work. The rule that
+keeps the shape right: work over a collection travels over one
+long-lived connection that pages through it, never one connection per
+element. Listing the keys, streaming a device's records, and the scrub
+and drain event streams follow it; a walk that looked something up per
+element over a fresh connection would open connections in proportion to
+the collection and exhaust the coordinator's local ports (issue #152).
+Where an operation needs the same fact for every element of a
+collection, the fact is carried in the stream (the shard-present flag of
+`LocalRecords`, 19.1.3) rather than asked for element by element. The
+retry and pooling of connections that would make per-element requests
+survivable is a separate matter (issue #154) and not a reason to break
+the rule.
 
 15.3 [X] A sorted index to make listing fast is deferred.
 
@@ -1719,11 +1735,13 @@ coordinator, and those nodes send to each other. Every response is either
 `LocalRecords`
 : Request: device UUID, optional cursor (the last key hash and version of
   the previous page). Response: the readable records on that device after
-  the cursor, sorted by key hash then version, in pages of at most 8 MiB
-  of encoded records with a flag saying more follow (15.2.2). A page
-  begins at the cursor's directory and reads only what it returns. The
-  drain's and the removal scan's list of versions (18.2.1, 18.5), and
-  the count behind `contents` (18.2.3).
+  the cursor, sorted by key hash then version, each tagged with whether
+  the shard file for that version is present on the device (one `stat`
+  as the page is built), in pages of at most 8 MiB of encoded records
+  with a flag saying more follow (15.2.2). A page begins at the cursor's
+  directory and reads only what it returns. The drain's and the removal
+  scan's list of versions (18.2.1, 18.5), the count behind `contents`
+  (18.2.3), and the streams the cluster-wide scrub merges (20.1.2).
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of
@@ -1762,7 +1780,9 @@ coordinator, and those nodes send to each other. Every response is either
 `GetMeta`
 : Request: device UUID, key hash, version id. Response: the record, or
   `ERROR` if absent. With a `probe` flag the response also states whether
-  the shard file for this version is present on that device.
+  the shard file for this version is present on that device. Kept in the
+  protocol with no current caller: the scrub's probe, its only user, was
+  replaced by the flag `LocalRecords` carries (20.1.2).
 
 `DeleteVersion`
 : Request: device UUID, key hash, version id. The node deletes the record,
@@ -1963,30 +1983,64 @@ send one `LocalScrub` request to every node in the cluster document; each
 node runs the engine over its own devices at the requested rate and
 streams its findings back as they arise, ending with a summary. The
 coordinator merges the streams into one report. It then performs the
-checks no single node can: for every key, that k+m record copies exist
-and agree and that every listed device has its shard file (the scan of
-18.5, which catches a device that lost both record and shard for a
-version). With `--repair` it runs `RepairObject` once for each damaged
-key from the merged set, so repairs are never issued concurrently for one
-object. Detection therefore moves no data over the network; only repair
-does, and only for damaged objects.
+checks no single node can: for every version, that k+m record copies
+exist and agree, that no stale copy remains, and that every listed
+device has its shard file (the scan of 18.5, which catches a device that
+lost both record and shard for a version). With `--repair` it runs
+`RepairObject` once for each damaged key from the merged set, so repairs
+are never issued concurrently for one object. Detection therefore moves
+no data over the network; only repair does, and only for damaged objects.
+
+20.1.2.2 [P] **The cross-node checks are a merge.** Every version leaves
+a record copy on each device that has one of its shards (9.4.4), so the
+evidence for every check is the set of record copies across the cluster,
+grouped by version. The coordinator gathers it once per device, not once
+per key: it opens one `LocalRecords` stream per device in the cluster
+document, all at once and held for the whole phase, and merges them in
+their shared order, key hash then version (15.2.2). At each step it
+takes the smallest (key hash, version) among the streams' current
+entries and collects every stream whose entry matches; that group is the
+version's copies, each tagged with its device and with whether that
+device has the shard file. From the group alone it decides: fewer copies
+than the current revision lists devices, or copies that disagree, is
+`RecordsInconsistent`; a copy at a lower revision on a device the
+current revision no longer lists is `StaleCopy`; a listed device that
+has the record but not the shard file is `ShardMissingOnDevice`. A
+listed device that is no longer in the cluster document has no stream,
+so its copy is absent and the version shows as `RecordsInconsistent`,
+which is what it is; repair rebuilds the shard elsewhere (18.3). No
+lookup and no probe is made,
+and no list of keys is held: the phase's memory is one page per device
+plus the current group, so it is proportional to the number of devices,
+and its connections are one per device. This replaces the per-key
+lookups and probes the phase was first built with, which opened six
+connections per key on a three-node `2+1` cluster and made about a
+million and a half connections to check a quarter of a million keys
+(issue #152); it is the rule of 15.2.3 applied.
+
+The merge reports its progress: an event every 10,000 versions, carrying
+the versions checked so far and the key hash reached, so a client can
+show where a long run is rather than a silent hour. (At the few
+milliseconds a version costs, that is an event every minute or so; a
+time-based trigger as well was considered and dropped as a second
+mechanism for one feature.) A `--repair` run then repairs each damaged
+key as before.
 
 A node that cannot be reached, or that refuses or answers out of
 protocol, is not damage and is never reported as damage. In the first
 phase such a node is reported once and the others are scrubbed. In the
-cross-node phase every key needs every node, and so does listing the
-keys, so the first node that cannot be used ends the phase: the scrub
-reports the node, how many keys were checked and how many were not (or
-that the keys could not be listed at all), and stops checking; findings made
-before that point stand, and with `--repair` those keys, and only those,
-are repaired. A key that could not be checked is never queued for
+cross-node phase every version needs every device's stream, so a stream
+that cannot be opened, or that ends in an error before the merge is
+done, ends the phase: the scrub reports the node, how many versions were
+checked before it stopped, and that the rest could not be (their number
+is not known without a second pass and is not guessed), and stops
+checking; findings made before that point stand, and with `--repair`
+those keys, and only those, are repaired. A key that could not be checked is never queued for
 repair. The run then ends as incomplete (`NodeUnreachable`) whether or
 not damage was also found, so the caller can tell "there is confirmed
 damage" from "the check did not finish" (the exit codes of #156). There
 is no retry: a failure to reach a node is reported the first time (16.1).
-The one such case that is damage is a record naming a device no longer
-in the cluster document, `DeviceForShardNotInClusterDocument`, which repair fixes by
-rebuilding that shard elsewhere (18.3). Scheduling is left to cron or a
+Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 
 20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard

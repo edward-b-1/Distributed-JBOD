@@ -28,9 +28,9 @@ use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    ClusterFinding, DataFrame, DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail,
-    KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, RepairReport, Request,
-    Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
+    ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
+    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor,
+    RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -666,38 +666,6 @@ async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failu
         keys,
         truncated: cut || any_node_truncated,
     })
-}
-
-/// Every key in the cluster, newest version each, fetched page by page.
-async fn all_keys(node: &Arc<Node>) -> Result<Vec<String>, Failure> {
-    let mut all = Vec::new();
-    let mut start_after: Option<String> = None;
-    loop {
-        let page = list_keys(
-            node,
-            ListQuery {
-                prefix: None,
-                start_after: start_after.clone(),
-                limit: None,
-            },
-        )
-        .await?;
-        match page {
-            Response::ListKeys { keys, truncated } => {
-                start_after = keys.last().map(|e| e.key.clone());
-                all.extend(keys.into_iter().map(|e| e.key));
-                if !truncated || start_after.is_none() {
-                    return Ok(all);
-                }
-            }
-            other => {
-                return Err(error(
-                    ErrorCode::Internal,
-                    format!("list_keys answered {other:?}"),
-                ))
-            }
-        }
-    }
 }
 
 // ------------------------------------------------------------------ GET
@@ -2570,10 +2538,10 @@ async fn fetch_device_records(
         match answer {
             Response::LocalRecords { records, truncated } => {
                 after = records.last().map(|r| RecordCursor {
-                    key_hash: r.key_hash,
-                    version: r.version,
+                    key_hash: r.record.key_hash,
+                    version: r.record.version,
                 });
-                all.extend(records);
+                all.extend(records.into_iter().map(|r| r.record));
                 if !truncated || after.is_none() {
                     return Ok(all);
                 }
@@ -3068,66 +3036,25 @@ async fn scrub(
     }
     while tasks.join_next().await.is_some() {}
 
-    // Phase 2: cross-node checks over every key (20.1.2, 18.5).
-    // Listing the keys needs every node too; failing that, nothing can
-    // be checked and the count of unchecked keys is unknown.
-    let mut check_stopped: Option<(u64, Option<u64>)> = None;
-    let keys: Vec<String> = match all_keys(node).await {
-        Ok(keys) => keys,
-        Err(failure) => {
-            let unreachable = Unreachable::from_failure(node.id(), failure);
-            check_stopped = Some((0, None));
-            send_event(
-                writer,
-                id,
-                &mut sequence,
-                &ScrubEvent::CrossCheckStopped {
-                    node: unreachable.node,
-                    detail: unreachable.detail,
-                    keys_checked: 0,
-                    keys_unchecked: None,
-                },
-            )
-            .await?;
-            Vec::new()
-        }
+    // Phase 2: the cross-node checks, a merge of one record stream per
+    // device (20.1.2.2), relayed as its events arrive over a channel.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
+    let merge = {
+        let node = node.clone();
+        tokio::spawn(async move { cross_check(&node, sender).await })
     };
-    for (position, key) in keys.iter().enumerate() {
-        let findings = match cross_check_key(node, key).await {
-            Ok(findings) => findings,
-            Err(unreachable) => {
-                // Every key needs every node, so nothing after this point
-                // can be checked; say so once and stop (20.1.2). What was
-                // found before it stands.
-                let unchecked = (keys.len() - position) as u64;
-                check_stopped = Some((position as u64, Some(unchecked)));
-                send_event(
-                    writer,
-                    id,
-                    &mut sequence,
-                    &ScrubEvent::CrossCheckStopped {
-                        node: unreachable.node,
-                        detail: unreachable.detail,
-                        keys_checked: position as u64,
-                        keys_unchecked: Some(unchecked),
-                    },
-                )
-                .await?;
-                break;
-            }
-        };
-        for finding in findings {
-            finding_count += 1;
-            damaged_keys.insert(key.clone());
-            send_event(
-                writer,
-                id,
-                &mut sequence,
-                &ScrubEvent::ClusterFinding(finding),
-            )
-            .await?;
-        }
+    while let Some(event) = receiver.recv().await {
+        send_event(writer, id, &mut sequence, &event).await?;
     }
+    let outcome = merge.await.map_err(|join| {
+        error(
+            ErrorCode::Internal,
+            format!("cross-node check task failed: {join}"),
+        )
+    })?;
+    finding_count += outcome.findings;
+    damaged_keys.extend(outcome.damaged_keys);
+    let check_stopped: Option<u64> = outcome.stopped_after;
 
     // Phase 3: repairs, one per damaged key, from this one place.
     let mut repair_failures = 0usize;
@@ -3156,15 +3083,16 @@ async fn scrub(
     }
 
     let end = if failed_nodes > 0 || check_stopped.is_some() {
-        let unchecked = match check_stopped {
-            Some((_, Some(count))) => format!("{count} key(s) could not be checked"),
-            Some((_, None)) => "the keys could not be listed, so none was checked".to_string(),
-            None => "every key was checked".to_string(),
+        let checks = match check_stopped {
+            Some(checked) => format!(
+                "the cross-node checks stopped after {checked} version(s), the rest unchecked"
+            ),
+            None => "every version was checked".to_string(),
         };
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::NodeUnreachable,
             format!(
-                "{failed_nodes} node(s) could not be scrubbed; {unchecked}; {finding_count} finding(s) where checks ran"
+                "{failed_nodes} node(s) could not be scrubbed; {checks}; {finding_count} finding(s) where checks ran"
             ),
         ))
     } else if repair_failures > 0 {
@@ -3247,9 +3175,9 @@ async fn relay_local_scrub(
 /// The checks only the coordinator can make for one key: record copies
 /// complete and agreeing, and every listed device actually holding its
 /// shard file.
-/// A node the cross-node check could not use: unreachable, or refusing
-/// or answering out of protocol. The key it was checking is unchecked,
-/// and so is every key after it.
+/// A node the cross-node check could not use: unreachable, refusing, or
+/// answering out of protocol, or a device stream that ended in error.
+/// Every version from that point on is unchecked.
 struct Unreachable {
     node: NodeId,
     detail: ErrorDetail,
@@ -3271,36 +3199,273 @@ impl Unreachable {
     }
 }
 
-/// The checks no single node can make for one key (20.1.2): that the
-/// record copies exist and agree, that no stale copy remains, and that
-/// every listed device has its shard. Damage is returned as findings; a
-/// node that cannot be asked is not damage and ends the check instead.
-async fn cross_check_key(
+/// One record as a device stream yields it.
+struct StreamedRecord {
+    device: DeviceId,
+    record: MetadataRecord,
+    shard_present: bool,
+}
+
+/// One device's `LocalRecords` stream: a connection held for the whole
+/// cross-node phase and pages fetched as the merge consumes them.
+struct DeviceStream {
+    owner: NodeId,
+    device: DeviceId,
+    connection: Connection,
+    page: std::collections::VecDeque<DeviceRecord>,
+    after: Option<RecordCursor>,
+    exhausted: bool,
+}
+
+impl DeviceStream {
+    async fn open(node: &Node, owner: NodeId, device: DeviceId) -> Result<DeviceStream, Failure> {
+        Ok(DeviceStream {
+            owner,
+            device,
+            connection: connect_to(node, owner).await?,
+            page: std::collections::VecDeque::new(),
+            after: None,
+            exhausted: false,
+        })
+    }
+
+    async fn next(&mut self) -> Result<Option<StreamedRecord>, Failure> {
+        if self.page.is_empty() && !self.exhausted {
+            let answer = self
+                .connection
+                .request(Request::LocalRecords {
+                    device: self.device,
+                    after: self.after.clone(),
+                })
+                .await
+                .map_err(|e| remote_failure(self.owner, e))?;
+            match answer {
+                Response::LocalRecords { records, truncated } => {
+                    self.after = records.last().map(|r| RecordCursor {
+                        key_hash: r.record.key_hash,
+                        version: r.record.version,
+                    });
+                    self.exhausted = !truncated || records.is_empty();
+                    self.page = records.into();
+                }
+                other => {
+                    return Err(error(
+                        ErrorCode::ProtocolViolation,
+                        format!("{} answered LocalRecords with {other:?}", self.owner),
+                    ))
+                }
+            }
+        }
+        Ok(self.page.pop_front().map(|r| StreamedRecord {
+            device: self.device,
+            record: r.record,
+            shard_present: r.shard_present,
+        }))
+    }
+}
+
+/// A source of one device's records for the merge: the device's stream,
+/// or, in tests, a fixed sequence that may end in a failure.
+enum RecordSource {
+    Device(Box<DeviceStream>),
+    #[cfg(test)]
+    Fixed {
+        owner: NodeId,
+        items: std::collections::VecDeque<Result<StreamedRecord, ErrorDetail>>,
+    },
+}
+
+impl RecordSource {
+    fn owner(&self) -> NodeId {
+        match self {
+            RecordSource::Device(stream) => stream.owner,
+            #[cfg(test)]
+            RecordSource::Fixed { owner, .. } => *owner,
+        }
+    }
+
+    async fn next(&mut self) -> Result<Option<StreamedRecord>, Failure> {
+        match self {
+            RecordSource::Device(stream) => stream.next().await,
+            #[cfg(test)]
+            RecordSource::Fixed { items, .. } => match items.pop_front() {
+                None => Ok(None),
+                Some(Ok(item)) => Ok(Some(item)),
+                Some(Err(detail)) => Err(Failure::Error(detail)),
+            },
+        }
+    }
+}
+
+/// What the cross-node phase found and where it got to.
+#[derive(Default)]
+struct CrossCheckOutcome {
+    findings: usize,
+    damaged_keys: std::collections::BTreeSet<String>,
+    versions_checked: u64,
+    /// `Some(n)` when a stream failed after `n` versions were checked.
+    stopped_after: Option<u64>,
+}
+
+/// How often the merge reports where it is (20.1.2.2).
+const PROGRESS_EVERY_VERSIONS: u64 = 10_000;
+
+/// The cross-node checks (20.1.2.2): open one record stream per device
+/// in the document, all at once, and merge them.
+async fn cross_check(
     node: &Arc<Node>,
-    key: &str,
-) -> Result<Vec<ClusterFinding>, Box<Unreachable>> {
+    events: tokio::sync::mpsc::Sender<ScrubEvent>,
+) -> CrossCheckOutcome {
+    let document = node.document();
+    let mut sources = Vec::new();
+    for entry in document
+        .devices
+        .iter()
+        .filter(|d| d.state != DeviceState::Removed)
+    {
+        match DeviceStream::open(node, entry.node, entry.id).await {
+            Ok(stream) => sources.push(RecordSource::Device(Box::new(stream))),
+            Err(failure) => {
+                let mut outcome = CrossCheckOutcome::default();
+                stop(
+                    &events,
+                    &mut outcome,
+                    Unreachable::from_failure(entry.node, failure),
+                )
+                .await;
+                return outcome;
+            }
+        }
+    }
+    merge_sources(sources, events).await
+}
+
+/// Merge the sources in (key hash, version) order; each group of equal
+/// heads is one version's copies across the cluster, checked from the
+/// group alone. A source that fails ends the merge after the group in
+/// hand; an event the client no longer reads ends it silently.
+async fn merge_sources(
+    mut sources: Vec<RecordSource>,
+    events: tokio::sync::mpsc::Sender<ScrubEvent>,
+) -> CrossCheckOutcome {
+    let mut outcome = CrossCheckOutcome::default();
+    let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
+    for source in sources.iter_mut() {
+        match source.next().await {
+            Ok(head) => heads.push(head),
+            Err(failure) => {
+                let unreachable = Unreachable::from_failure(source.owner(), failure);
+                stop(&events, &mut outcome, unreachable).await;
+                return outcome;
+            }
+        }
+    }
+    loop {
+        let Some(smallest) = heads
+            .iter()
+            .flatten()
+            .map(|h| (h.record.key_hash, h.record.version))
+            .min()
+        else {
+            return outcome;
+        };
+        let mut group: Vec<LocatedRecord> = Vec::new();
+        let mut present: BTreeMap<DeviceId, bool> = BTreeMap::new();
+        let mut taken: Vec<usize> = Vec::new();
+        for (index, head) in heads.iter_mut().enumerate() {
+            let matches = head
+                .as_ref()
+                .is_some_and(|h| (h.record.key_hash, h.record.version) == smallest);
+            if matches {
+                let item = head.take().expect("matched");
+                present.insert(item.device, item.shard_present);
+                group.push(LocatedRecord {
+                    device: item.device,
+                    record: item.record,
+                });
+                taken.push(index);
+            }
+        }
+        for finding in check_group(group, &present) {
+            outcome.findings += 1;
+            outcome
+                .damaged_keys
+                .insert(finding_key(&finding).to_string());
+            if events
+                .send(ScrubEvent::ClusterFinding(finding))
+                .await
+                .is_err()
+            {
+                return outcome;
+            }
+        }
+        outcome.versions_checked += 1;
+        if outcome.versions_checked % PROGRESS_EVERY_VERSIONS == 0 {
+            let progress = ScrubEvent::CrossCheckProgress {
+                versions_checked: outcome.versions_checked,
+                key_hash: smallest.0,
+            };
+            if events.send(progress).await.is_err() {
+                return outcome;
+            }
+        }
+        for index in taken {
+            match sources[index].next().await {
+                Ok(head) => heads[index] = head,
+                Err(failure) => {
+                    let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
+                    stop(&events, &mut outcome, unreachable).await;
+                    return outcome;
+                }
+            }
+        }
+    }
+}
+
+async fn stop(
+    events: &tokio::sync::mpsc::Sender<ScrubEvent>,
+    outcome: &mut CrossCheckOutcome,
+    unreachable: Unreachable,
+) {
+    outcome.stopped_after = Some(outcome.versions_checked);
+    let _ = events
+        .send(ScrubEvent::CrossCheckStopped {
+            node: unreachable.node,
+            detail: unreachable.detail,
+            versions_checked: outcome.versions_checked,
+            versions_unchecked: None,
+        })
+        .await;
+}
+
+/// The checks for one version from its copies (20.1.2.2): that the
+/// copies of the current revision exist and agree, that no stale copy
+/// remains, and that every listed device also has the shard file.
+fn check_group(
+    group: Vec<LocatedRecord>,
+    present: &BTreeMap<DeviceId, bool>,
+) -> Vec<ClusterFinding> {
     let mut findings = Vec::new();
-    let located = lookup(node, hash_key(key.as_bytes()))
-        .await
-        .map_err(|f| Box::new(Unreachable::from_failure(node.id(), f)))?;
-    // The copies are in hand; what follows is judged from them alone.
-    let versions = match versions_of(key, located.clone()) {
+    let Some(first) = group.first() else {
+        return findings;
+    };
+    let key = first.record.key.clone();
+    let versions = match versions_of(&key, group.clone()) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {
-                key: key.to_string(),
+                key,
                 version: detail.version,
                 detail: detail.message,
             });
-            return Ok(findings);
+            return findings;
         }
-        Err(other) => return Err(Box::new(Unreachable::from_failure(node.id(), other))),
+        Err(_) => return findings,
     };
-    let document = node.document();
     for record in &versions {
-        for (device, revision) in stale_copies(record, &located) {
+        for (device, revision) in stale_copies(record, &group) {
             findings.push(ClusterFinding::StaleCopy {
-                key: key.to_string(),
+                key: key.clone(),
                 version: record.version,
                 device,
                 revision,
@@ -3313,56 +3478,29 @@ async fn cross_check_key(
             continue;
         }
         for shard in &record.shards {
-            let Some(owner) = document.device(shard.device).map(|d| d.node) else {
-                findings.push(ClusterFinding::DeviceForShardNotInClusterDocument {
-                    key: key.to_string(),
+            // A device the document no longer lists has no stream, so its
+            // copy is absent and the version is already inconsistent
+            // above; here every listed device has a copy, and the
+            // question is only whether it also has the shard file.
+            if present.get(&shard.device) == Some(&false) {
+                findings.push(ClusterFinding::ShardMissingOnDevice {
+                    key: key.clone(),
                     version: record.version,
                     device: shard.device,
                     shard_index: shard.index,
                 });
-                continue;
-            };
-            let probe = async {
-                let mut connection = connect_to(node, owner).await?;
-                connection
-                    .request(Request::GetMeta {
-                        device: shard.device,
-                        key_hash: record.key_hash,
-                        version: record.version,
-                        probe: true,
-                    })
-                    .await
-                    .map_err(|e| remote_failure(owner, e))
-            };
-            match probe.await {
-                Ok(Response::GetMeta {
-                    shard_present: Some(present),
-                    ..
-                }) => {
-                    if !present {
-                        findings.push(ClusterFinding::ShardMissingOnDevice {
-                            key: key.to_string(),
-                            version: record.version,
-                            device: shard.device,
-                            shard_index: shard.index,
-                        })
-                    }
-                }
-                // Not answered as asked: the shard is unchecked, not missing.
-                Ok(other) => {
-                    return Err(Box::new(Unreachable::from_failure(
-                        owner,
-                        error(
-                            ErrorCode::ProtocolViolation,
-                            format!("{owner} answered GetMeta with {other:?}"),
-                        ),
-                    )))
-                }
-                Err(failure) => return Err(Box::new(Unreachable::from_failure(owner, failure))),
             }
         }
     }
-    Ok(findings)
+    findings
+}
+
+fn finding_key(finding: &ClusterFinding) -> &str {
+    match finding {
+        ClusterFinding::RecordsInconsistent { key, .. }
+        | ClusterFinding::ShardMissingOnDevice { key, .. }
+        | ClusterFinding::StaleCopy { key, .. } => key,
+    }
 }
 
 #[cfg(test)]
@@ -3404,6 +3542,154 @@ mod tests {
             content_type: None,
             user_metadata: BTreeMap::new(),
         }
+    }
+
+    fn node(n: u128) -> NodeId {
+        NodeId(Uuid::from_u128(n))
+    }
+
+    fn streamed(
+        device_number: u128,
+        record: &MetadataRecord,
+        shard_present: bool,
+    ) -> StreamedRecord {
+        StreamedRecord {
+            device: device(device_number),
+            record: record.clone(),
+            shard_present,
+        }
+    }
+
+    fn fixed(owner: NodeId, items: Vec<Result<StreamedRecord, ErrorDetail>>) -> RecordSource {
+        RecordSource::Fixed {
+            owner,
+            items: items.into(),
+        }
+    }
+
+    /// Run a merge over fixed sources and collect its events. The
+    /// channel is bounded, as in the scrub, so the events are drained
+    /// while the merge runs; draining afterwards would block a merge that
+    /// sends more events than the buffer holds.
+    async fn merged(sources: Vec<RecordSource>) -> (CrossCheckOutcome, Vec<ScrubEvent>) {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
+        let merge = tokio::spawn(merge_sources(sources, sender));
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            events.push(event);
+        }
+        (merge.await.expect("merge task"), events)
+    }
+
+    /// SPEC 20.1.2.2: each version is judged from the group of its copies
+    /// across the streams; a stream that fails ends the merge after the
+    /// group in hand, with the count of versions checked.
+    #[tokio::test]
+    async fn the_merge_checks_each_version_from_its_copies_and_stops_where_a_stream_fails() {
+        // Three versions in hash order, whatever their key text.
+        let mut records: Vec<MetadataRecord> = (1..=3u8)
+            .map(|v| {
+                let mut r = record(v, 0, [1, 2]);
+                r.key = format!("key-{v}");
+                r.key_hash = hash_key(r.key.as_bytes());
+                r
+            })
+            .collect();
+        records.sort_by_key(|r| (r.key_hash, r.version));
+        let (intact, missing, unchecked) = (&records[0], &records[1], &records[2]);
+        let a = fixed(
+            node(1),
+            vec![
+                Ok(streamed(1, intact, true)),
+                Ok(streamed(1, missing, true)),
+                Ok(streamed(1, unchecked, true)),
+            ],
+        );
+        // Device 2 lacks the second version's shard, then its stream dies.
+        let b = fixed(
+            node(2),
+            vec![
+                Ok(streamed(2, intact, true)),
+                Ok(streamed(2, missing, false)),
+                Err(ErrorDetail::new(ErrorCode::NodeUnreachable, "gone")),
+            ],
+        );
+        let (outcome, events) = merged(vec![a, b]).await;
+        assert_eq!(outcome.versions_checked, 2, "{events:?}");
+        assert_eq!(outcome.stopped_after, Some(2));
+        assert_eq!(outcome.findings, 1);
+        assert_eq!(
+            outcome.damaged_keys.iter().collect::<Vec<_>>(),
+            vec![&missing.key]
+        );
+        assert!(matches!(
+            &events[0],
+            ScrubEvent::ClusterFinding(ClusterFinding::ShardMissingOnDevice { key, device: d, shard_index: 1, .. })
+                if *key == missing.key && *d == device(2)
+        ));
+        assert!(matches!(
+            &events[1],
+            ScrubEvent::CrossCheckStopped { node: n, versions_checked: 2, versions_unchecked: None, .. }
+                if *n == node(2)
+        ));
+        assert_eq!(events.len(), 2, "{events:?}");
+    }
+
+    /// A copy missing on one device is fewer than the record lists, and
+    /// so is a copy on a device the document no longer has, since that
+    /// device has no stream; a run over clean copies reports progress and
+    /// nothing else.
+    #[tokio::test]
+    async fn the_merge_reports_inconsistent_copies_unlisted_devices_and_progress() {
+        let only_on_one = record(1, 0, [1, 2]);
+        let mut on_gone_device = record(2, 0, [1, 3]);
+        on_gone_device.key = "gone".to_string();
+        on_gone_device.key_hash = hash_key(b"gone");
+        let a = fixed(
+            node(1),
+            vec![
+                Ok(streamed(1, &only_on_one, true)),
+                Ok(streamed(1, &on_gone_device, true)),
+            ],
+        );
+        let b = fixed(node(2), vec![]);
+        let (outcome, events) = merged(vec![a, b]).await;
+        assert_eq!(outcome.versions_checked, 2);
+        assert_eq!(outcome.stopped_after, None);
+        assert!(events.iter().any(|e| matches!(e,
+            ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, .. }) if key == "k")));
+        assert!(
+            events.iter().any(|e| matches!(e,
+            ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, detail, .. })
+                if key == "gone" && detail.contains("1 record copies found, 2 expected"))),
+            "{events:?}"
+        );
+
+        // Progress: two clean streams of PROGRESS_EVERY_VERSIONS + 1 versions.
+        let count = PROGRESS_EVERY_VERSIONS + 1;
+        let make = |n: u128| {
+            fixed(
+                node(n),
+                (0..count)
+                    .map(|i| {
+                        let mut r = record(0, 0, [1, 2]);
+                        r.version = VersionId((i as u128).to_be_bytes());
+                        Ok(streamed(n, &r, true))
+                    })
+                    .collect(),
+            )
+        };
+        let (outcome, events) = merged(vec![make(1), make(2)]).await;
+        assert_eq!(outcome.versions_checked, count);
+        assert_eq!(outcome.findings, 0);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [ScrubEvent::CrossCheckProgress { versions_checked, .. }] if *versions_checked == PROGRESS_EVERY_VERSIONS
+            ),
+            "{} event(s)",
+            events.len()
+        );
     }
 
     #[test]

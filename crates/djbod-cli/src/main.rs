@@ -824,17 +824,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             ScrubEvent::CrossCheckStopped {
                                 node,
                                 detail,
-                                keys_checked,
-                                keys_unchecked,
+                                versions_checked,
+                                versions_unchecked,
                             } => {
-                                let unchecked = match keys_unchecked {
+                                let unchecked = match versions_unchecked {
                                     Some(count) => format!("{count} not checked"),
-                                    None => "the keys could not be listed".to_string(),
+                                    None => "the rest not checked".to_string(),
                                 };
                                 println!(
-                                    "cross-node checks stopped at node {}: {}; {keys_checked} key(s) checked, {unchecked}",
+                                    "cross-node checks stopped at node {}: {}; {versions_checked} version(s) checked, {unchecked}",
                                     short(&node.0),
                                     detail.message
+                                );
+                            }
+                            ScrubEvent::CrossCheckProgress {
+                                versions_checked, ..
+                            } => {
+                                eprintln!(
+                                    "cross-node checks: {versions_checked} version(s) checked"
                                 );
                             }
                             ScrubEvent::Repaired { key, report } => {

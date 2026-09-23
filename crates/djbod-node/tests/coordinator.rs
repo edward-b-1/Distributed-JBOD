@@ -1598,8 +1598,8 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
                 pages += 1;
                 records += page.len();
                 after = page.last().map(|r| RecordCursor {
-                    key_hash: r.key_hash,
-                    version: r.version,
+                    key_hash: r.record.key_hash,
+                    version: r.record.version,
                 });
                 if !truncated {
                     break;

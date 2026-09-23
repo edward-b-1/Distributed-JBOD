@@ -131,6 +131,14 @@ pub struct RecordCursor {
     pub version: VersionId,
 }
 
+/// One record as a device streams it (`LocalRecords`): the copy it holds
+/// and whether it also holds the shard file the record lists for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub record: MetadataRecord,
+    pub shard_present: bool,
+}
+
 /// Where a paged lookup continues from: the last (version, device) of the
 /// previous page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,9 +232,10 @@ pub enum Request {
     },
     LocalList(ListQuery),
     /// Every record on one local device, for the drain (18.2.1), the
-    /// removal scan (18.5), and `contents` (18.2.3), in pages: records
-    /// after `after`, sorted by key hash then version, up to
-    /// `MAX_LIST_PAGE_BYTES` of encoded records.
+    /// removal scan (18.5), `contents` (18.2.3), and the cross-node scrub
+    /// (20.1.2.2), in pages: records after `after`, sorted by key hash
+    /// then version, up to `MAX_LIST_PAGE_BYTES` of encoded records, each
+    /// with whether the device has the shard file.
     LocalRecords {
         device: DeviceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,6 +273,9 @@ pub enum Request {
         device: DeviceId,
         record: MetadataRecord,
     },
+    /// Kept in the protocol with no current caller: the scrub's probe,
+    /// its only user, was replaced by the flag `LocalRecords` carries
+    /// (SPEC 20.1.2.2).
     GetMeta {
         device: DeviceId,
         key_hash: KeyHash,
@@ -457,7 +469,7 @@ pub enum Response {
     /// A page of records; `truncated` says whether more follow after the
     /// last one.
     LocalRecords {
-        records: Vec<MetadataRecord>,
+        records: Vec<DeviceRecord>,
         truncated: bool,
     },
     /// The node has created and reserved the file; send blocks.
@@ -529,15 +541,6 @@ pub enum ClusterFinding {
         revision: u64,
         current_revision: u64,
     },
-    /// The record lists a shard on a device that is not in the cluster
-    /// document at all (it was removed with its node, 6.2.6.3); repair
-    /// rebuilds that shard on a device that is (18.3).
-    DeviceForShardNotInClusterDocument {
-        key: String,
-        version: VersionId,
-        device: DeviceId,
-        shard_index: u8,
-    },
 }
 
 /// One frame of a `Scrub` stream, in the order things happen: local
@@ -563,16 +566,24 @@ pub enum ScrubEvent {
         detail: ErrorDetail,
     },
     ClusterFinding(ClusterFinding),
-    /// The cross-node checks stopped because `node` could not be reached
-    /// or did not answer as a node (SPEC 20.1.2): the keys before this
-    /// point were checked, the rest were not. Not damage, and the
-    /// unchecked keys are never repaired; the run ends as incomplete.
-    /// `keys_unchecked` is `None` when the keys could not even be listed.
+    /// The cross-node checks stopped because `node` could not be reached,
+    /// or its record stream ended in an error (SPEC 20.1.2): the versions
+    /// before this point were checked, the rest were not. Not damage, and
+    /// the unchecked versions are never repaired; the run ends as
+    /// incomplete.
     CrossCheckStopped {
         node: NodeId,
         detail: ErrorDetail,
-        keys_checked: u64,
-        keys_unchecked: Option<u64>,
+        versions_checked: u64,
+        /// `None` when the remainder cannot be counted without a second
+        /// pass, which is the case for a merge that stops part way.
+        versions_unchecked: Option<u64>,
+    },
+    /// Where the cross-node checks have got to (20.1.2.2): sent every
+    /// 10,000 versions.
+    CrossCheckProgress {
+        versions_checked: u64,
+        key_hash: KeyHash,
     },
     Repaired {
         key: String,
