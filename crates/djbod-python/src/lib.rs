@@ -117,7 +117,7 @@ struct Identity {
     cluster_id: String,
     cluster_name: Option<String>,
     node: Option<String>,
-    build: Option<String>,
+    build: String,
     document_version: u64,
 }
 

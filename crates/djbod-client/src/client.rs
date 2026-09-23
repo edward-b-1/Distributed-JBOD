@@ -128,7 +128,7 @@ pub struct Identity {
     pub cluster_id: Uuid,
     pub cluster_name: Option<String>,
     pub node: Option<NodeId>,
-    pub build: Option<String>,
+    pub build: String,
     pub document_version: u64,
 }
 

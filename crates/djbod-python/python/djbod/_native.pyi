@@ -37,7 +37,7 @@ class Identity:
     cluster_id: str
     cluster_name: Optional[str]
     node: Optional[str]
-    build: Optional[str]
+    build: str
     document_version: int
 
 class Client:

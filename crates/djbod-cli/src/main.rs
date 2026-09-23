@@ -352,10 +352,7 @@ async fn reachable_node(cli: &Cli) -> anyhow::Result<(SocketAddr, Uuid)> {
     Ok((node, client.cluster_id()))
 }
 
-/// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1). A
-/// node from before that item refuses the nil id as a mismatch; its
-/// refusal names the cluster it serves, so the id is taken from there,
-/// with a note that the node wants upgrading.
+/// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1).
 async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
     if cli.nodes.is_empty() {
         bail!("no node address: pass --node or set DJBOD_NODE");
@@ -365,37 +362,10 @@ async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
     for &address in &cli.nodes {
         match djbod_client::ask(&connector, address).await {
             Ok(identity) => return Ok(identity),
-            Err(e) => {
-                if let Some(cluster_id) =
-                    e.detail().and_then(|d| cluster_id_from_refusal(&d.message))
-                {
-                    eprintln!(
-                        "note: the node at {address} runs a build from before `get-cluster-id`; it should be upgraded. Its refusal named its cluster, used here."
-                    );
-                    return Ok(djbod_client::Identity {
-                        address,
-                        cluster_id,
-                        cluster_name: None,
-                        node: e.detail().and_then(|d| d.node),
-                        build: None,
-                        document_version: 0,
-                    });
-                }
-                attempts.push(format!("{address}: {}", client_err(e)));
-            }
+            Err(e) => attempts.push(format!("{address}: {}", client_err(e))),
         }
     }
     bail!("no node answered: {}", attempts.join("; "))
-}
-
-/// The cluster id in an older node's refusal of the nil id, whose text
-/// is fixed: "peer belongs to cluster <nil>, this node to <id>".
-fn cluster_id_from_refusal(message: &str) -> Option<Uuid> {
-    let rest = message.strip_prefix(&format!(
-        "peer belongs to cluster {}, this node to ",
-        Uuid::nil()
-    ))?;
-    rest.get(..36)?.parse().ok()
 }
 
 /// The library's error as an administrator wants to read it (SPEC 16.2).
@@ -531,10 +501,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     (_, None) => "-".to_string(),
                 };
                 println!("node      {node_text} at {}", addresses.join(", "));
-                println!(
-                    "build     {}",
-                    hello.build.as_deref().unwrap_or("older, unreported")
-                );
+                println!("build     {}", hello.build);
                 println!("document  version {}", document.version);
                 println!("transport {}", document.transport);
             }
@@ -1853,21 +1820,5 @@ mod tests {
                 "repair={repair} incomplete={incomplete} findings={findings} failures={failures}"
             );
         }
-    }
-
-    #[test]
-    fn the_cluster_id_is_read_from_an_older_nodes_refusal() {
-        let id = Uuid::new_v4();
-        let message = format!(
-            "peer belongs to cluster {}, this node to {id}; this node serves cluster {id}",
-            Uuid::nil()
-        );
-        assert_eq!(cluster_id_from_refusal(&message), Some(id));
-        assert_eq!(cluster_id_from_refusal("something else"), None);
-        assert_eq!(
-            cluster_id_from_refusal(&format!("peer belongs to cluster {id}, this node to {id}")),
-            None,
-            "only a refusal of the nil id is an answer"
-        );
     }
 }

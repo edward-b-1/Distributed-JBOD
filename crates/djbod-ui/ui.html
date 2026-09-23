@@ -668,8 +668,7 @@ function renderHealth() {
   const nodes = cluster.nodes;
   const unreachable = nodes.filter((n) => n.error);
   const behind = nodes.filter((n) => !n.error && n.version !== status.document_version);
-  const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build || 'older'));
-  const older = nodes.filter((n) => !n.error && !n.build);
+  const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build));
   const names = (list) => list.map((n) => nodeText(n.node)).join(', ');
   let cls = 'ok', title, sub;
   const actions = [];
@@ -685,7 +684,7 @@ function renderHealth() {
   } else if (builds.size > 1) {
     cls = 'warn';
     title = 'Consistent, builds differ';
-    sub = older.length ? `${names(older)} ${older.length === 1 ? 'runs' : 'run'} an older build; upgrade before the next change to the cluster document` : `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
+    sub = `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
   } else {
     title = 'Cluster consistent';
     sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
@@ -752,10 +751,9 @@ function renderBanners() {
         renderBanners();
       } }))));
 }
-// The build a node reported, or a name for a reachable node that did not,
-// which predates builds in Hello (SPEC 19.1.5).
+// The build a node reported (SPEC 19.1.5); '-' when it was not reached.
 function nodeBuild(n) {
-  return n.build || 'older, unreported';
+  return n.build || '-';
 }
 // The distinct builds among the reachable nodes.
 function nodeBuilds(cluster) {
@@ -825,7 +823,7 @@ function renderOverview() {
       el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
       el('td', {}, reachable ? check('ok', 'ping ok') : check('bad', 'ping failed', n.error)),
       el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : atVersion ? check('ok', `version ${n.version}`) : check('bad', `version ${n.version}`, `current is ${doc.version}; Sync brings it up`)),
-      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : n.build ? check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null) : check('warn', 'older, unreported', 'from before builds were sent; upgrade')),
+      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null)),
       el('td', {}, check(transport === 'tls' ? 'ok' : 'warn', transport === 'tls' ? 'required' : transport === 'tls-optional' ? 'optional' : 'plain', transport === 'tls' ? null : 'clients may connect without TLS')),
       el('td', {}, check(deviceCount === 0 ? 'bad' : draining ? 'warn' : 'ok', String(deviceCount), inUse.length ? `${human(freeHere)} free` : 'no devices in use')),
       // The devices by state, one line; the note about a pending drain is
