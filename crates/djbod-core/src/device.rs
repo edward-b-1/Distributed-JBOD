@@ -22,7 +22,7 @@ use crate::checksum::BlockChecksum;
 use crate::keyhash::KeyHash;
 use crate::layout::{
     object_directory, parse_record_file_name, record_file_name, shard_file_name, DEFAULT_BUCKET,
-    OBJECTS_DIR, RECORD_SUFFIX, SHARD_SUFFIX,
+    OBJECTS_DIR, SHARD_SUFFIX,
 };
 use crate::record::{DeviceId, MetadataRecord, RecordError, SYSTEM_NAME};
 use crate::shardfile::{
@@ -149,6 +149,13 @@ fn temporary_path(final_path: &Path) -> PathBuf {
 pub struct SpaceReport {
     pub total_bytes: u64,
     pub free_bytes: u64,
+}
+
+/// What a record walk's callback asks for next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalkStep {
+    Continue,
+    Stop,
 }
 
 /// An initialised device: a directory with an identity file.
@@ -515,33 +522,94 @@ impl Device {
     pub fn walk_records(
         &self,
         mut on_record: impl FnMut(&MetadataRecord),
+        on_bad: impl FnMut(&Path, &DeviceError),
+    ) -> Result<(), DeviceError> {
+        self.walk_records_from(
+            None,
+            |record, _| {
+                on_record(record);
+                WalkStep::Continue
+            },
+            on_bad,
+        )
+    }
+
+    /// Visit the records after `after` in key hash then version order,
+    /// which is the order the directories are in (SPEC 15.2.2), until
+    /// `on_record` asks to stop. Each record comes with whether this
+    /// device has the shard file the record lists for it. Directories
+    /// before the cursor are not entered, so a page costs what it returns.
+    pub fn walk_records_from(
+        &self,
+        after: Option<(&KeyHash, VersionId)>,
+        mut on_record: impl FnMut(&MetadataRecord, bool) -> WalkStep,
         mut on_bad: impl FnMut(&Path, &DeviceError),
     ) -> Result<(), DeviceError> {
+        let cursor = after.map(|(hash, version)| (hash.directory_components(), version));
+        let name_of = |path: &Path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
         let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         for first in read_dir_sorted(&bucket)? {
+            let first_name = name_of(&first);
+            // Whether this directory is the one the cursor is in: only
+            // then does the next level need comparing; before it, skip.
+            let on_first = match &cursor {
+                Some(([c, _, _], _)) if first_name < *c => continue,
+                Some(([c, _, _], _)) => first_name == *c,
+                None => false,
+            };
             for second in read_dir_sorted(&first)? {
+                let second_name = name_of(&second);
+                let on_second = match &cursor {
+                    Some(([_, c, _], _)) if on_first && second_name < *c => continue,
+                    Some(([_, c, _], _)) => on_first && second_name == *c,
+                    None => false,
+                };
                 for key_dir in read_dir_sorted(&second)? {
+                    let key_name = name_of(&key_dir);
+                    let on_key = match &cursor {
+                        Some(([_, _, c], _)) if on_second && key_name < *c => continue,
+                        Some(([_, _, c], _)) => on_second && key_name == *c,
+                        None => false,
+                    };
                     for entry in read_dir_sorted(&key_dir)? {
-                        let name = entry
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        if !name.ends_with(RECORD_SUFFIX) {
+                        let Some(version) = parse_record_file_name(&name_of(&entry)) else {
                             continue;
+                        };
+                        if let (true, Some((_, c))) = (on_key, &cursor) {
+                            if version <= *c {
+                                continue;
+                            }
                         }
-                        match fs::read_to_string(&entry) {
+                        let record = match fs::read_to_string(&entry) {
                             Ok(json) => match MetadataRecord::from_json(&json) {
-                                Ok(record) => on_record(&record),
-                                Err(source) => on_bad(
-                                    &entry,
-                                    &DeviceError::Record {
-                                        path: entry.clone(),
-                                        source,
-                                    },
-                                ),
+                                Ok(record) => record,
+                                Err(source) => {
+                                    on_bad(
+                                        &entry,
+                                        &DeviceError::Record {
+                                            path: entry.clone(),
+                                            source,
+                                        },
+                                    );
+                                    continue;
+                                }
                             },
-                            Err(e) => on_bad(&entry, &io_error(&entry, e)),
+                            Err(e) => {
+                                on_bad(&entry, &io_error(&entry, e));
+                                continue;
+                            }
+                        };
+                        let shard_present = record
+                            .shard_on(self.id())
+                            .map(|index| key_dir.join(shard_file_name(&version, index)).is_file())
+                            .unwrap_or(false);
+                        if on_record(&record, shard_present) == WalkStep::Stop {
+                            return Ok(());
                         }
                     }
                 }

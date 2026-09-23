@@ -386,7 +386,7 @@ fn every_request_round_trips() {
         Request::LocalRecords {
             device: device(4),
             after: Some(RecordCursor {
-                key: "k".to_string(),
+                key_hash: hash_key(b"k"),
                 version: VersionId([1u8; 16]),
             }),
         },

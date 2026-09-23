@@ -122,11 +122,12 @@ impl ErrorDetail {
 /// way by encoded size.
 pub const MAX_LIST_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Where a paged record listing continues from: the last (key, version)
-/// of the previous page.
+/// Where a paged record listing continues from: the last (key hash,
+/// version) of the previous page, the order a device's directories are in
+/// (SPEC 15.2.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordCursor {
-    pub key: String,
+    pub key_hash: KeyHash,
     pub version: VersionId,
 }
 
@@ -222,9 +223,10 @@ pub enum Request {
         after: Option<LookupCursor>,
     },
     LocalList(ListQuery),
-    /// Every record on one local device, for the drain (18.2.1) and the
-    /// removal scan (18.5), in pages: records after `after`, sorted by
-    /// key then version, up to `MAX_LIST_PAGE_BYTES` of encoded records.
+    /// Every record on one local device, for the drain (18.2.1), the
+    /// removal scan (18.5), and `contents` (18.2.3), in pages: records
+    /// after `after`, sorted by key hash then version, up to
+    /// `MAX_LIST_PAGE_BYTES` of encoded records.
     LocalRecords {
         device: DeviceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]

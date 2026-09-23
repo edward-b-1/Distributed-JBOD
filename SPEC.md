@@ -1139,16 +1139,66 @@ fixed maximum size (19.1.2) and a message beyond it is a hard failure.
 Every listing is therefore paged: a `ListKeys` or `LocalList` page holds
 at most 8 MiB of key text, and a `LocalRecords` or `LocalLookup` page at
 most 8 MiB of encoded records, each with a flag saying more follow and a
-cursor to continue from (the last key; the last key and version; or the
-last version and device). A single record larger than a page travels
-alone in its own page. A client `limit` only makes a page smaller. Every
+cursor to continue from (the last key; the last key hash and version; or
+the last version and device). A single record larger than a page travels
+alone in its own page.
+
+15.2.2.1 [D] **Why 8 MiB.** The figure is a judgment, set when paging
+was built, not a derivation; that it is an eighth of the frame limit is
+a coincidence of both being powers of two. Three loose constraints
+bound it, and any value from about 1 MiB to about 32 MiB satisfies all
+three:
+
+- *Above:* well under the 64 MiB frame limit (19.1.2), so that a page,
+  its framing, and the CBOR overhead of its entries can never approach
+  the frame's hard failure. The page rule that keeps this true is: an
+  item is added when the page is empty, or when adding it keeps the page
+  within the limit; otherwise the page ends there and the item starts the
+  next one. Items are encoded to be measured, so the rule counts the
+  bytes that will travel. A page therefore never holds two items that
+  together exceed the limit, and the largest page possible is one item
+  larger than the limit, alone. Ten records of 30 MiB each travel as ten
+  pages of one record. The only way to exceed a frame would be a single
+  record larger than the frame, and the document's
+  `max_user_metadata_bytes` (9.4.2, capped at 48 MiB) rules that out.
+- *Memory:* a coordinator that merges holds one page per stream, per
+  node for a listing or per device for the cross-node scrub (20.1.2).
+  At 8 MiB, three nodes with two disks each is 48 MiB in flight; a
+  cluster of 16 devices is 128 MiB, still comfortable on the small
+  machines this system is for. At 32 MiB the 16-device case is 512 MiB,
+  which is not.
+- *Below:* every page is a round trip, so the page size sets how many
+  requests a walk over a large device costs. A record encodes to roughly
+  2 KB, so an 8 MiB page holds about 4,000 records, and a device with
+  250,000 records streams in about 60 pages; at 1 MiB it would take
+  about 500, at 32 MiB about 16. The page's transfer time matters too:
+  8 MiB is about 70 ms on a gigabit link and about 0.7 s on a 100 Mbit
+  one, so a page never stalls a client for long even on the slowest
+  network the system is meant to run on.
+
+Within the range, 8 MiB is a round figure near the middle. Nothing
+depends on the exact value: a change needs no protocol version bump,
+since a page is defined by "more follow" and a cursor, not by its size,
+and a client that limits a listing (`limit`) only ever makes pages
+smaller. The same reasoning applied to the frame limit itself, 64 MiB,
+gives a different answer, because that one is derived: it must carry
+the largest permitted shard block (6.2.4) in one frame. A client `limit` only makes a page smaller. Every
 internal walk (the listing coordinator over each node, the lookup behind
 every read, the scrub's cross-node pass, the drain, the removal scan,
 `reencode`) follows the pages to the end.
 
 The cursor is the sort key of the last item returned, never a position
 or a server-side token, and every page is computed afresh from disk, so
-no state is held between pages and nothing expires. The guarantee this
+no state is held between pages and nothing expires. A page must also
+cost no more than the items it returns: `LocalRecords` sorts by key hash
+then version, which is the order the device's directories are already in
+(9.1.5), so a page begins its walk at the cursor's directory and stops
+when full, and streaming a whole device reads each record once. (As
+first built it sorted by key text, which meant walking and parsing every
+record on the device for every page; a 250,000-record device was walked
+some seventy times to be streamed once.) Key hash order is a total
+order shared by every device, which is what a merge across devices needs
+(20.1.2). The guarantee this
 gives, the same as S3's `ListObjects` or `readdir`, is exactly: every
 item that exists for the whole of a walk appears exactly once; an item
 created or deleted during the walk may or may not appear, depending on
@@ -1667,11 +1717,13 @@ coordinator, and those nodes send to each other. Every response is either
   coordinator's problem.
 
 `LocalRecords`
-: Request: device UUID, optional cursor (the last key and version of the
-  previous page). Response: the readable records on that device after the
-  cursor, sorted by key then version, in pages of at most 8 MiB of
-  encoded records with a flag saying more follow (15.2.2); the drain's
-  and the removal scan's list of versions (18.2.1, 18.5).
+: Request: device UUID, optional cursor (the last key hash and version of
+  the previous page). Response: the readable records on that device after
+  the cursor, sorted by key hash then version, in pages of at most 8 MiB
+  of encoded records with a flag saying more follow (15.2.2). A page
+  begins at the cursor's directory and reads only what it returns. The
+  drain's and the removal scan's list of versions (18.2.1, 18.5), and
+  the count behind `contents` (18.2.3).
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of
