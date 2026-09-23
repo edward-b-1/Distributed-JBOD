@@ -1,5 +1,5 @@
 //! A connection to a node, from the point of view of whoever opened it:
-//! the coordinator talking to a holder, the command-line tool, or a test.
+//! the coordinator talking to another node, the command-line tool, or a test.
 
 use std::net::SocketAddr;
 
@@ -247,7 +247,7 @@ impl Connection {
     }
 
     /// The whole `GetShard` conversation. Returns the blocks in stripe
-    /// order with the checksums the holder stored for them; they are not
+    /// order with the checksums the node stored for them; they are not
     /// verified here.
     pub async fn get_shard(
         &mut self,
@@ -355,7 +355,7 @@ impl Connection {
                 .map_err(WireError::Io)?;
             if read == 0 {
                 // Source ended early. Tell the coordinator so it aborts the
-                // holders, then report what it says.
+                // devices, then report what it says.
                 self.send_end(
                     id,
                     StreamEnd::failed(ErrorDetail::new(

@@ -183,7 +183,7 @@ fn record_for(
 }
 
 /// Store a whole object on one node's devices through the protocol, one
-/// shard per device, then its record on every holder.
+/// shard per device, then its record on every one of them.
 async fn store_object(
     test: &TestNode,
     conn: &mut Connection,
@@ -855,7 +855,7 @@ async fn a_sender_that_abandons_a_shard_leaves_nothing_and_abort_shard_is_idempo
         id,
         StreamEnd::failed(djbod_proto::message::ErrorDetail::new(
             ErrorCode::WriteFailed,
-            "another holder failed",
+            "another node failed",
         )),
     )
     .await

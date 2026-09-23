@@ -14,7 +14,7 @@
 //! | PutObject   | client: body bytes        |                           |
 //! | GetObject   |                           | coordinator: body bytes   |
 //! | PutShard    | sender: blocks (on READY) |                           |
-//! | GetShard    |                           | holder: blocks            |
+//! | GetShard    |                           | node: blocks              |
 //!
 //! Body streams are chunked at the coordinator's discretion; each chunk is
 //! checksummed like a block so the transport is checked end to end.
@@ -231,7 +231,7 @@ pub enum Request {
         after: Option<RecordCursor>,
     },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
-    /// the holder answers `PutShardDone`.
+    /// the node answers `PutShardDone`.
     PutShard {
         device: DeviceId,
         key_hash: KeyHash,
@@ -458,9 +458,9 @@ pub enum Response {
         records: Vec<MetadataRecord>,
         truncated: bool,
     },
-    /// The holder has created and reserved the file; send blocks.
+    /// The node has created and reserved the file; send blocks.
     PutShardReady,
-    /// The holder has fsynced and renamed the file.
+    /// The node has fsynced and renamed the file.
     PutShardDone,
     /// Followed by a block stream.
     GetShard {
@@ -503,15 +503,15 @@ pub enum ScrubItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClusterFinding {
-    /// Fewer record copies than the record itself says there are holders,
+    /// Fewer record copies than the record lists devices,
     /// or copies that disagree, or a copy on an unlisted device.
     RecordsInconsistent {
         key: String,
         version: Option<VersionId>,
         detail: String,
     },
-    /// A holder listed in the record does not have the shard file.
-    ShardMissingOnHolder {
+    /// A device listed in the record does not have the shard file.
+    ShardMissingOnDevice {
         key: String,
         version: VersionId,
         device: DeviceId,
@@ -662,7 +662,7 @@ impl DataFrame {
 }
 
 /// Terminates a stream. `error` is `None` on success. For `PutShard` the
-/// sender supplies the object size and checksum here so the holder can
+/// sender supplies the object size and checksum here so the node can
 /// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
 /// coordinator reports the whole-object verification here (11.7), which
 /// is why a client must read this frame before trusting the body.

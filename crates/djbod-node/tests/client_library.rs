@@ -329,13 +329,13 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
     let body: Vec<u8> = vec![3u8; BLOCK as usize + 1];
     client.put("k", &body, None).await.expect("put");
     let record = client.head("k").await.expect("head");
-    let holders: Vec<_> = record.shards.iter().map(|s| s.device).collect();
+    let listed: Vec<_> = record.shards.iter().map(|s| s.device).collect();
     let spare = a
         .node
         .devices()
         .iter()
         .map(|d| d.id())
-        .find(|d| !holders.contains(d))
+        .find(|d| !listed.contains(d))
         .expect("a device without a shard");
 
     // Move shard 0 to the spare device.
@@ -343,7 +343,7 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
         .move_shard("k", 0, Some(spare))
         .await
         .expect("move shard");
-    assert_eq!(moved.source, holders[0]);
+    assert_eq!(moved.source, listed[0]);
     assert_eq!(moved.record.shards[0].device, spare);
     assert_eq!(moved.record.revision, record.revision + 1);
     assert!(moved.source_cleaned && !moved.rebuilt);

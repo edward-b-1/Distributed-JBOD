@@ -79,7 +79,6 @@ small clusters, with an administrator in the loop when something breaks.
 | **Shard block** | One device's piece of one stripe. The unit that carries a checksum. |
 | **Shard file** | All of one device's shard blocks for one version, concatenated, plus a header. See 9.3 for the open alternative. |
 | **Shard index** | The position 0 .. k+m-1 of a shard within its stripe. Indices 0 .. k-1 are data, k .. k+m-1 are parity. |
-| **Holder** | A device listed in a version's metadata record as holding one of its shards, and, by extension, the node that device belongs to. Every holder also keeps a copy of the record (9.4.4). |
 | **Metadata record** | The small document describing one version: where its shards are and how it was encoded. |
 | **Failure domain** | A grouping of devices that are expected to fail together. Deferred; v1 knows only devices. |
 
@@ -709,7 +708,7 @@ lexicographically yields creation order.
 
 9.2.4 [D] **PUT to an existing key replaces it.** The coordinator writes
 the new version fully (all shards and records durable), then deletes the
-old version from its holders, then acknowledges. If the
+old version from its devices, then acknowledges. If the
 coordinator dies between the two steps the key briefly has two versions;
 reads return the newest by ULID and the scrubber or a later PUT removes the
 older. This also resolves concurrent writes to the same key (21.1) as
@@ -875,7 +874,7 @@ knows which to rewrite.
 durable, using the same temporary-name, fsync, rename procedure, followed
 by an fsync of the directory.
 
-9.4.4 [D] Because the record is on every holder, and every read must reach
+9.4.4 [D] Because the record is on every device that has a shard, and every read must reach
 every node, the read path checks that all copies agree. Disagreement is an
 error (section 16). Copies at a lower placement revision than the highest
 one found are the leftovers of a re-placement and are ignored, as 18.8.1
@@ -930,7 +929,7 @@ everything written so far is removed.
 
 10.8 [D] The coordinator (or the client, section 17) reads the body one
 stripe at a time, splits it into k data blocks, computes m parity blocks,
-computes k+m checksums, and streams block and checksum to each holder,
+computes k+m checksums, and streams block and checksum to each device's node,
 each frame tagged with its stripe number. It also folds every body byte
 into the whole-object checksum (8.3.6) as it goes. Memory in use per
 request is bounded by one stripe plus parity.
@@ -962,10 +961,10 @@ accept a frame into its own buffer while the socket would block and send
 nothing until the next write, and the last frame of a conversation (an
 `EndOfStream` after many blocks) has no next write, so without the flush
 both sides waited on each other. The receiving side of a body or shard
-stream, the coordinator reading a client's body and a holder reading a
+stream, the coordinator reading a client's body and a node reading a
 coordinator's blocks, waits at most `stream_idle_timeout_secs` (default
-120) for the next frame and then abandons the write: the holder drops its
-temporary file, the coordinator aborts every holder and reports
+120) for the next frame and then abandons the write: the node drops its
+temporary file, the coordinator aborts every shard write and reports
 `WriteFailed`. A sender that has legitimately paused longer than that is
 told so and can retry; a sender that died no longer leaves temporaries
 and connections behind. The timeout is per frame, not per stream, so a
@@ -976,16 +975,16 @@ slow client is fine as long as it keeps sending.
 11.1 [D] The client sends a key to a coordinator.
 
 11.2 [D] The coordinator broadcasts a lookup (section 13) and receives the
-metadata records from every holder. It checks that the key in the record
+metadata records from every listed device. It checks that the key in the record
 matches the requested key (9.1.6) and that all copies agree. If more than
 one version is present (9.2.4) it selects the newest.
 
 11.3 [D] For each stripe in order, the coordinator requests shard blocks
-`0 .. k-1` (the data blocks) from their holders, verifies each block against
+`0 .. k-1` (the data blocks) from their devices, verifies each block against
 its checksum, and delivers the stripe to the client. Parity blocks are not
 read.
 
-11.4 [D] If any block fails its checksum, or any holder is unreachable, the
+11.4 [D] If any block fails its checksum, or any device's node is unreachable, the
 request fails with an error identifying the device UUID, key, version,
 shard index, and stripe number. No reconstruction is attempted in v1.
 
@@ -1037,13 +1036,13 @@ authoritative "not found".
 
 ## 14. Delete
 
-14.1 [D] Deleting a key looks up its version(s), instructs every holder to
+14.1 [D] Deleting a key looks up its version(s), instructs the node of every listed device to
 delete the shard file and metadata record, and reports success only when
-all have confirmed. Any unreachable holder fails the delete.
+all have confirmed. Any unreachable node fails the delete.
 
-14.2 [P] Holders delete the metadata record first, then the shard file,
+14.2 [P] Each node deletes the metadata record first, then the shard file,
 then remove the key directory if empty. A partially deleted version, one
-where some holders still have a record, is reported by lookup as
+where some devices still have a record, is reported by lookup as
 inconsistent (16.1) and the delete can be retried.
 
 14.3 [X] Delete markers and versioned-delete semantics belong to
@@ -1125,7 +1124,7 @@ Options for doing better, recorded here so the choice is made once:
    it needs a rebuild command and a scrub check.
 6. **Deduplication at the source**: only the device holding shard index 0
    of a version reports it, which makes the coordinator's merge free but
-   makes a listing depend on every shard-0 holder being reachable, which
+   makes a listing depend on every shard-0 device being reachable, which
    under fail-stop (16.1) it already does. Combines with any of the above.
 
 Recommendation: keep keyset paging as the client-facing API, since the
@@ -1285,7 +1284,7 @@ is deferred.
 18.2 [D] **Drain a device.** Set its state to `draining`. It receives no
 new shards. A drain job finds every version with a shard on that device,
 places that shard on another eligible device, and updates the metadata
-record on all holders. When no record references the device, it is set to
+record on all its devices. When no record references the device, it is set to
 `removed` and may be detached. Draining a node is draining all its devices.
 
 18.2.1 [D] **Three commands, one job each.** State, movement, and
@@ -1377,7 +1376,7 @@ reconstructed from k surviving shards rather than copied. `RepairObject`
 does this on its own for a shard whose device is no longer in the cluster
 document (condition `Lost`): it chooses a new device as a write would
 (10.4, 10.5), rebuilds the shard there, and writes the record at the next
-revision to the new holder first, then the others, exactly as a
+revision to the new device first, then the others, exactly as a
 re-placement does (18.8.2). A shard on a device that is still listed but
 unreachable is a fail-stop error, as before: the administrator decides
 between waiting and the forced removal of 6.2.6.3.
@@ -1390,7 +1389,7 @@ rewritten on the same or another device.
 18.3 and 18.4 for one key, served by any node like the other client
 operations. It reads every shard of the newest version in full: a shard
 whose file cannot be opened is unreadable, a shard with any block failing
-its checksum is corrupt, and an unreachable holder is a fail-stop error.
+its checksum is corrupt, and an unreachable node is a fail-stop error.
 Every stripe is decoded from the intact blocks and the whole object is
 checked against the record's checksum before anything is written; more
 than m damaged shards, or a checksum mismatch, is an error and nothing
@@ -1445,7 +1444,7 @@ differ in revision during a re-placement, and the rules become:
   present; require k+m copies of that revision, all equal; ignore
   lower-revision copies. Fewer than k+m copies of the highest revision is
   `RecordsInconsistent`, as now. A read therefore fails during the window
-  in which a re-placement has written its new record to some holders but
+  in which a re-placement has written its new record to some devices but
   not all, which is fail-stop behaving as designed, and succeeds once the
   window closes.
 - **Repair** (18.4.2 amended): trust the highest revision present,
@@ -1475,7 +1474,7 @@ so the whole is safe to rerun:
    intact shards as repair does. `d'` refuses if it already holds the
    shard, which a rerun treats as done.
 2. Build the record at revision r+1 with `shards[i].device = d'`.
-3. `PutMeta` it to `d'`, then to every other holder in the new record.
+3. `PutMeta` it to `d'`, then to every other device in the new record.
    `PutMeta` is amended to replace an existing copy when the incoming
    revision is higher and the version id, key, and body checksum match,
    and to refuse otherwise.
@@ -1631,13 +1630,13 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: key, size. Response: version id, key hash, and the ordered list
   of k+m (device UUID, node address) chosen by 10.4 and 10.5. The
   coordinator opens no transfers; the client sends `PutShard` to each
-  holder itself.
+  device itself.
 
 `CommitObject` (client as coordinator; deferred)
 : Request: the complete metadata record for a version whose shards the
   client has finished sending. The coordinator verifies that every listed
-  holder reports the shard file present and complete (`GetMeta` with a
-  probe flag, or a dedicated check), then sends `PutMeta` to every holder,
+  node reports the shard file present and complete (`GetMeta` with a
+  probe flag, or a dedicated check), then sends `PutMeta` to every device,
   then, if a previous version of the key exists, deletes it (9.2.4).
   Response: none.
 
@@ -1913,7 +1912,7 @@ node runs the engine over its own devices at the requested rate and
 streams its findings back as they arise, ending with a summary. The
 coordinator merges the streams into one report. It then performs the
 checks no single node can: for every key, that k+m record copies exist
-and agree and that every listed holder has its shard file (the scan of
+and agree and that every listed device has its shard file (the scan of
 18.5, which catches a device that lost both record and shard for a
 version). With `--repair` it runs `RepairObject` once for each damaged
 key from the merged set, so repairs are never issued concurrently for one
@@ -1933,12 +1932,12 @@ repair. The run then ends as incomplete (`NodeUnreachable`) whether or
 not damage was also found, so the caller can tell "there is confirmed
 damage" from "the check did not finish" (the exit codes of #156). There
 is no retry: a failure to reach a node is reported the first time (16.1).
-The one holder case that is damage is a record naming a device no longer
+The one such case that is damage is a record naming a device no longer
 in the cluster document, `DeviceForShardNotInClusterDocument`, which repair fixes by
 rebuilding that shard elsewhere (18.3). Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 
-20.1.2.1 [D] A holder refuses a second `PutShard` for a version and shard
+20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard
 index already being written on that device (`WriteFailed`, "already being
 written"), and temporary file names carry a token unique to the process
 and the call, so two writers can never share one temporary file. Both
@@ -2262,7 +2261,7 @@ one is a format upgrade with a migration, not a setting.
 **Metadata replicated, not erasure-coded.** Metadata is tiny, is read
 before any shard can be fetched, and is the only thing that knows where
 shards are. Coding it would add k round trips to every read and buy
-nothing. It is copied to every shard holder, as MinIO does.
+nothing. It is copied to every shard's device, as MinIO does.
 
 **Key hash directories.** Keys are not filesystem-safe. Hashing gives fixed
 length, path-safe, uniformly distributed names. The plain key is kept
@@ -2279,7 +2278,7 @@ empty, and gives concurrent writers a last-writer-wins outcome by ULID.
 
 **Uniform format regardless of object size.** One code path for storage,
 scrub, repair, and recovery. The cost of a small object is one small shard
-file per holder, accepted.
+file per device, accepted.
 
 **Separate S3 process, native binary protocol.** S3's value is
 compatibility, so implement it faithfully in a translation layer. The
@@ -2327,7 +2326,7 @@ Object: 10 MiB.
   349,526 bytes, plus a 4 KiB header and an 88-byte footer and trailer.
   Each shard file is about 3.34 MiB.
 - Stored total: about 13.4 MiB for 10 MiB of data, a ratio of 1.33.
-- Four metadata records of a few hundred bytes each, one per holder.
+- Four metadata records of a few hundred bytes each, one per device.
 - Read: fetch shard blocks 0, 1, 2 for each stripe from three devices,
   verify four × three checksums, deliver 10 MiB. The parity device is not
   touched.
