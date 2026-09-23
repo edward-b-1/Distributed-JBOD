@@ -88,7 +88,7 @@ pub enum Finding {
         version: VersionId,
         shard_index: u8,
     },
-    /// A record that does not list this device as a holder at all.
+    /// A record that does not list this device among its shards at all.
     RecordNotForThisDevice {
         path: PathBuf,
         key: String,

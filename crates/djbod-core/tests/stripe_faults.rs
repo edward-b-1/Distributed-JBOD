@@ -322,7 +322,7 @@ fn more_than_m_damaged_blocks_is_unrecoverable_listing_every_fault() {
 
 #[test]
 fn swapped_blocks_are_both_caught_by_their_checksums() {
-    // Two holders return each other's block. Both blocks are intact bytes
+    // Two devices return each other's block. Both blocks are intact bytes
     // but neither matches the checksum stored for its index.
     let code = reed_solomon_code_for(4, 2);
     let data = xorshift64_bytes(4 * 512, 8);

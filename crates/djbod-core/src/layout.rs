@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <device root>/
-//!     device.json
+//!     DISTRIBUTED-JBOD-DEVICE.json   identity file (SPEC 5.2, `device::DEVICE_IDENTITY_FILE`)
 //!     objects/
 //!         <bucket>/                 v1 has only "default"
 //!             ab/cd/<64-hex key hash>/
@@ -16,7 +16,6 @@ use crate::erasure::ShardIndex;
 use crate::keyhash::KeyHash;
 use crate::version::VersionId;
 
-pub const DEVICE_IDENTITY_FILE: &str = "device.json";
 pub const OBJECTS_DIR: &str = "objects";
 pub const DEFAULT_BUCKET: &str = "default";
 pub const RECORD_SUFFIX: &str = ".meta.json";

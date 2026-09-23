@@ -16,9 +16,9 @@ use djbod_proto::frame::{
 };
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
-    LookupCursor, Message, MessageError, RecordCursor, RepairReport, Request, Response,
-    ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
+    DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, MessageError, RecordCursor, RepairReport, Request,
+    Response, ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -386,7 +386,7 @@ fn every_request_round_trips() {
         Request::LocalRecords {
             device: device(4),
             after: Some(RecordCursor {
-                key: "k".to_string(),
+                key_hash: hash_key(b"k"),
                 version: VersionId([1u8; 16]),
             }),
         },
@@ -551,7 +551,10 @@ fn every_response_round_trips() {
             devices: vec![status],
         },
         Response::LocalRecords {
-            records: vec![sample_record()],
+            records: vec![DeviceRecord {
+                record: sample_record(),
+                shard_present: true,
+            }],
             truncated: false,
         },
         Response::LocalLookup {

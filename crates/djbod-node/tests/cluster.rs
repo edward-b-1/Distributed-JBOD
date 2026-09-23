@@ -566,7 +566,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
     std::fs::write(&path1, &bytes).expect("write");
 
     // Damage 2: obj-1's shard 2 file deleted (local finding: record
-    // without shard; cross-node: shard missing on holder).
+    // without shard; cross-node: shard missing on its device).
     let (_node2, device2, path2) = shard_path(&records[1], 2);
     std::fs::remove_file(&path2).expect("remove");
 
@@ -619,7 +619,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
         })
         .collect();
     assert!(
-        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnHolder { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
+        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnDevice { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
         "{cluster:?}"
     );
     assert!(
@@ -679,7 +679,7 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
         .await
         .expect("put");
     b.stop();
-    let (events, end) = run_scrub(&mut client, false).await;
+    let (events, end) = run_scrub(&mut client, true).await;
     assert!(events
         .iter()
         .any(|e| matches!(e, ScrubEvent::NodeFailed { node, .. } if *node == b.node.id())));
@@ -690,8 +690,31 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
             .count(),
         1
     );
+    // The cross-node checks cannot run without b: its device's stream
+    // cannot be opened, so they stop before the first version; nothing is
+    // damaged and nothing is repaired.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            ScrubEvent::CrossCheckStopped { node, versions_checked: 0, versions_unchecked: None, .. }
+            if *node == b.node.id())),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::ClusterFinding(_)
+                | ScrubEvent::Repaired { .. }
+                | ScrubEvent::RepairFailed { .. }
+        )),
+        "an unreachable node is not damage: {events:?}"
+    );
     let error = end.error.expect("incomplete scrub is reported");
     assert_eq!(error.code, ErrorCode::NodeUnreachable);
+    assert!(
+        error.message.contains("stopped after 0 version(s)"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -789,7 +812,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         .find(|dev| before.shard_on(*dev).is_none())
         .expect("one device holds nothing");
 
-    // Move shard 0 from its holder to the spare device on another node.
+    // Move shard 0 from its device to the spare device on another node.
     let source = before.shards[0].device;
     let after = match client
         .request(Request::MoveShard {
@@ -821,7 +844,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
     let (_, got) = client.get_object("k").await.expect("get");
     assert_eq!(got, body);
 
-    // While a holder's node is down, the lookup itself is fail-stop (16.1).
+    // While a device's node is down, the lookup itself is fail-stop (16.1).
     let victim = after
         .shards
         .iter()

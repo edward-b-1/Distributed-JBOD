@@ -108,3 +108,7 @@ magick png/djbod-favicon-16.png png/djbod-favicon-24.png png/djbod-favicon-32.pn
 ## Alternative directions
 
 Six earlier exploratory concepts are kept in [`concepts/`](concepts/README.md) for reference.
+
+[`exploration/`](exploration/README.md) keeps the colour comparisons behind the
+current palette — which blues and yellows were tried, and why the ones in use
+won. Useful before reopening a colour decision.

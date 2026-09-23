@@ -14,7 +14,7 @@
 //! | PutObject   | client: body bytes        |                           |
 //! | GetObject   |                           | coordinator: body bytes   |
 //! | PutShard    | sender: blocks (on READY) |                           |
-//! | GetShard    |                           | holder: blocks            |
+//! | GetShard    |                           | node: blocks              |
 //!
 //! Body streams are chunked at the coordinator's discretion; each chunk is
 //! checksummed like a block so the transport is checked end to end.
@@ -122,12 +122,21 @@ impl ErrorDetail {
 /// way by encoded size.
 pub const MAX_LIST_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Where a paged record listing continues from: the last (key, version)
-/// of the previous page.
+/// Where a paged record listing continues from: the last (key hash,
+/// version) of the previous page, the order a device's directories are in
+/// (SPEC 15.2.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordCursor {
-    pub key: String,
+    pub key_hash: KeyHash,
     pub version: VersionId,
+}
+
+/// One record as a device streams it (`LocalRecords`): the copy it holds
+/// and whether it also holds the shard file the record lists for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub record: MetadataRecord,
+    pub shard_present: bool,
 }
 
 /// Where a paged lookup continues from: the last (version, device) of the
@@ -222,16 +231,18 @@ pub enum Request {
         after: Option<LookupCursor>,
     },
     LocalList(ListQuery),
-    /// Every record on one local device, for the drain (18.2.1) and the
-    /// removal scan (18.5), in pages: records after `after`, sorted by
-    /// key then version, up to `MAX_LIST_PAGE_BYTES` of encoded records.
+    /// Every record on one local device, for the drain (18.2.1), the
+    /// removal scan (18.5), `contents` (18.2.3), and the cross-node scrub
+    /// (20.1.2.2), in pages: records after `after`, sorted by key hash
+    /// then version, up to `MAX_LIST_PAGE_BYTES` of encoded records, each
+    /// with whether the device has the shard file.
     LocalRecords {
         device: DeviceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<RecordCursor>,
     },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
-    /// the holder answers `PutShardDone`.
+    /// the node answers `PutShardDone`.
     PutShard {
         device: DeviceId,
         key_hash: KeyHash,
@@ -262,6 +273,9 @@ pub enum Request {
         device: DeviceId,
         record: MetadataRecord,
     },
+    /// Kept in the protocol with no current caller: the scrub's probe,
+    /// its only user, was replaced by the flag `LocalRecords` carries
+    /// (SPEC 20.1.2.2).
     GetMeta {
         device: DeviceId,
         key_hash: KeyHash,
@@ -455,12 +469,12 @@ pub enum Response {
     /// A page of records; `truncated` says whether more follow after the
     /// last one.
     LocalRecords {
-        records: Vec<MetadataRecord>,
+        records: Vec<DeviceRecord>,
         truncated: bool,
     },
-    /// The holder has created and reserved the file; send blocks.
+    /// The node has created and reserved the file; send blocks.
     PutShardReady,
-    /// The holder has fsynced and renamed the file.
+    /// The node has fsynced and renamed the file.
     PutShardDone,
     /// Followed by a block stream.
     GetShard {
@@ -503,15 +517,15 @@ pub enum ScrubItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClusterFinding {
-    /// Fewer record copies than the record itself says there are holders,
+    /// Fewer record copies than the record lists devices,
     /// or copies that disagree, or a copy on an unlisted device.
     RecordsInconsistent {
         key: String,
         version: Option<VersionId>,
         detail: String,
     },
-    /// A holder listed in the record does not have the shard file.
-    ShardMissingOnHolder {
+    /// A device listed in the record does not have the shard file.
+    ShardMissingOnDevice {
         key: String,
         version: VersionId,
         device: DeviceId,
@@ -526,13 +540,6 @@ pub enum ClusterFinding {
         device: DeviceId,
         revision: u64,
         current_revision: u64,
-    },
-    /// A holder listed in the record could not be asked.
-    HolderUnavailable {
-        key: String,
-        version: VersionId,
-        device: DeviceId,
-        detail: String,
     },
 }
 
@@ -559,6 +566,25 @@ pub enum ScrubEvent {
         detail: ErrorDetail,
     },
     ClusterFinding(ClusterFinding),
+    /// The cross-node checks stopped because `node` could not be reached,
+    /// or its record stream ended in an error (SPEC 20.1.2): the versions
+    /// before this point were checked, the rest were not. Not damage, and
+    /// the unchecked versions are never repaired; the run ends as
+    /// incomplete.
+    CrossCheckStopped {
+        node: NodeId,
+        detail: ErrorDetail,
+        versions_checked: u64,
+        /// `None` when the remainder cannot be counted without a second
+        /// pass, which is the case for a merge that stops part way.
+        versions_unchecked: Option<u64>,
+    },
+    /// Where the cross-node checks have got to (20.1.2.2): sent every
+    /// 10,000 versions.
+    CrossCheckProgress {
+        versions_checked: u64,
+        key_hash: KeyHash,
+    },
     Repaired {
         key: String,
         report: RepairReport,
@@ -649,7 +675,7 @@ impl DataFrame {
 }
 
 /// Terminates a stream. `error` is `None` on success. For `PutShard` the
-/// sender supplies the object size and checksum here so the holder can
+/// sender supplies the object size and checksum here so the node can
 /// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
 /// coordinator reports the whole-object verification here (11.7), which
 /// is why a client must read this frame before trusting the body.

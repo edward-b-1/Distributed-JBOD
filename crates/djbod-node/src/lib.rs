@@ -18,7 +18,7 @@
 //!   18.1).
 //!
 //! Frames and connections come from the `djbod-client` crate, which the
-//! coordinator uses to reach holders and every client program uses too.
+//! coordinator uses to reach other nodes and every client program uses too.
 //!
 //! Disk work runs on tokio's blocking pool via `spawn_blocking`;
 //! `djbod-core` stays synchronous (4.4).

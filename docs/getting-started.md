@@ -269,8 +269,11 @@ Each node reads every record and every block on its own devices against
 their checksums, no data crosses the network for that, and streams its
 findings back as it goes. The coordinator then checks what no single node
 can: that every object's record copies are complete and agree, and that
-every holder has its shard file. Exit code 0 when clean, 2 when anything
-was found or a node could not be scrubbed. `--rate-mib 50` caps each
+every listed device has its shard file. The exit code says what to do
+next: 0 clean, 2 damage found (or, with `--repair`, some of it could not
+be repaired), 3 the run did not finish and nothing was seen, so run it
+again, 4 the run did not finish and damage was seen (SPEC.md 20.1.2.3).
+`--rate-mib 50` caps each
 node's read rate; `--json` gives one event per line. On a real
 installation this runs from a cron job or a systemd timer on any one
 machine.
@@ -343,7 +346,7 @@ target/release/djbod move-shard photos/cat.jpg 2 --to <device-uuid>
 
 The shard is copied from its current device when that device is intact
 and rebuilt from the other shards when it is not. The record on every
-holder then gains a placement `revision` (SPEC.md 18.8.1), and the old
+device then gains a placement `revision` (SPEC.md 18.8.1), and the old
 copy is removed. If the old device was unreachable at the time, its copy
 stays behind; the next `scrub` reports it as a stale copy and `scrub
 --repair` removes it.

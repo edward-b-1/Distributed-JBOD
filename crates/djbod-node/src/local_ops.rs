@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use djbod_core::cluster::DeviceState;
-use djbod_core::device::{Device, DeviceError, ShardWrite};
+use djbod_core::device::{Device, DeviceError, ShardWrite, WalkStep};
 use djbod_core::erasure::{Scheme, ShardIndex};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::layout::shard_file_name;
@@ -16,8 +16,8 @@ use djbod_core::shardfile::{ShardFileError, ShardFileHeader};
 use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
-    LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
+    DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
     MAX_LIST_PAGE_BYTES,
 };
 
@@ -384,39 +384,50 @@ async fn local_records(
         }));
     };
     let id = device.id();
-    let mut records = blocking(move || {
-        let mut out: Vec<MetadataRecord> = Vec::new();
-        device.walk_records(
-            |record| out.push(record.clone()),
+    // One page: as many records as fit in a frame with room to spare,
+    // read from the cursor onwards and no further (SPEC 15.2.2).
+    let (page, truncated, encode_failure) = blocking(move || {
+        let mut page: Vec<DeviceRecord> = Vec::new();
+        let mut bytes = 0usize;
+        let mut truncated = false;
+        let mut encode_failure: Option<String> = None;
+        device.walk_records_from(
+            after.as_ref().map(|c| (&c.key_hash, c.version)),
+            |record, shard_present| {
+                let encoded = match djbod_proto::codec::encode_cbor(record) {
+                    Ok(bytes) => bytes.len(),
+                    Err(e) => {
+                        encode_failure = Some(e.to_string());
+                        return WalkStep::Stop;
+                    }
+                };
+                if !page.is_empty() && bytes + encoded > MAX_LIST_PAGE_BYTES {
+                    truncated = true;
+                    return WalkStep::Stop;
+                }
+                bytes += encoded;
+                page.push(DeviceRecord {
+                    record: record.clone(),
+                    shard_present,
+                });
+                WalkStep::Continue
+            },
             |path, error| {
                 tracing::warn!(path = %path.display(), %error, "unreadable record skipped");
             },
         )?;
-        Ok(out)
+        Ok((page, truncated, encode_failure))
     })
     .await
     .map_err(|f| match f {
         Failure::Error(d) => Failure::Error(with_device(d, id)),
         other => other,
     })?;
-    records.sort_by(|a, b| a.key.cmp(&b.key).then(a.version.cmp(&b.version)));
-    if let Some(after) = after {
-        records.retain(|r| (r.key.as_str(), r.version) > (after.key.as_str(), after.version));
-    }
-    // One page: as many records as fit in a frame with room to spare.
-    let mut page = Vec::new();
-    let mut bytes = 0usize;
-    let mut truncated = false;
-    for record in records {
-        let encoded = djbod_proto::codec::encode_cbor(&record)
-            .map_err(|e| Failure::Error(ErrorDetail::new(ErrorCode::Internal, e.to_string())))?
-            .len();
-        if !page.is_empty() && bytes + encoded > MAX_LIST_PAGE_BYTES {
-            truncated = true;
-            break;
-        }
-        bytes += encoded;
-        page.push(record);
+    if let Some(reason) = encode_failure {
+        return Err(Failure::Error(ErrorDetail::new(
+            ErrorCode::Internal,
+            reason,
+        )));
     }
     Ok(Response::LocalRecords {
         records: page,
