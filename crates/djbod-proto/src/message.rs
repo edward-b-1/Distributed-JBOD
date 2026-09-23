@@ -417,7 +417,6 @@ pub enum Response {
         coordinator: NodeId,
         /// Every node asked, with its build.
         nodes: Vec<NodeStatus>,
-        #[serde(default)]
         transport: Transport,
         devices: Vec<DeviceStatus>,
     },
@@ -460,7 +459,6 @@ pub enum Response {
         node: NodeId,
         document_version: u64,
         /// Whether this node has TLS material loaded (19.1.6.4).
-        #[serde(default)]
         tls_ready: bool,
         /// This node's build (SPEC 6.2.6.4).
         build: String,

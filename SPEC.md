@@ -265,12 +265,11 @@ joining node fetches it from a bootstrap peer.
 the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
 `max_user_metadata_bytes` (9.4.2), the transport mode `transport` (19.1.6:
-`plain`, `tls-optional`, or `tls`; absent means `plain`), the node list
-(UUID, addresses, optional label), and the device list (UUID, owning node,
-state, optional label). The
-three limits and the transport were added after the first documents were
-written; a document without them means the defaults. `djbod cluster
-set-limits` and `djbod cluster set-transport` change them. The document
+`plain`, `tls-optional`, or `tls`), the node list (UUID, addresses,
+optional label), and the device list (UUID, owning node, state, optional
+label). Every field is required except the names and labels, whose
+absence means unnamed (19.1.5.2). `djbod cluster set-limits` and `djbod
+cluster set-transport` change the limits and the transport. The document
 never holds key material (20.6).
 
 The checksum algorithm and key hash algorithm are **not** configuration.
@@ -473,10 +472,9 @@ is behind; `djbod cluster show` prints every node's build for the same
 reason (19.1.5), and `djbod status` prints the build of the node that
 answered, naming the client's own beside it when the two differ, and
 the build of each device's node in its table, gathered from the
-`LocalStatus` answers. The rule for a rolling upgrade follows: upgrade every
-node before making a change that uses a field the older build lacks. A
-document without such a field is accepted by old and new builds alike,
-since an absent optional field means its default (6.2.2). As built,
+`LocalStatus` answers. The rule for a rolling upgrade follows: upgrade
+every node before making a change to the document, since every field is
+required (19.1.5.2) and a build must know them all to read it. As built,
 `ClusterDocument`, `NodeEntry`, and `DeviceEntry` deny unknown fields; a
 request a node cannot decode is answered with `ProtocolViolation` on its
 request id and the connection is then closed, since what the request
@@ -1846,7 +1844,7 @@ learned either way; `djbod` reads it from that refusal, prints it as
 usual, and notes on standard error that the node wants upgrading. The
 nil UUID is therefore never a cluster id (6.2.1).
 
-19.1.5.2 [D] **Every field of a message is required.** Before 1.0
+19.1.5.2 [D] **Every field is required**, in a message and in the cluster document. Before 1.0
 there is no installed base to stay compatible with, so no field is
 optional for the sake of a build that predates it: an optional field
 whose absence means "an older build" hides which of the two it is. A

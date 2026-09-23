@@ -146,6 +146,8 @@ mod tests {
         serde_json::from_value(serde_json::json!({
             "version": 1, "cluster_id": Uuid::nil(), "k": 1, "m": 1,
             "block_size": 65536, "independence_level": "device", "headroom": 0.0,
+            "max_key_bytes": 16384, "max_object_bytes": 1099511627776u64,
+            "max_user_metadata_bytes": 10485760, "transport": "plain",
             "nodes": [], "devices": [],
         }))
         .expect("document")
