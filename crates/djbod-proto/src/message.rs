@@ -321,6 +321,14 @@ pub struct DeviceContents {
     pub shard_bytes: u64,
 }
 
+/// One node as `Status` reports it: the build it gave in its
+/// `LocalStatus` (SPEC 6.2.6.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatus {
+    pub node: NodeId,
+    pub build: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceStatus {
     pub device: DeviceId,
@@ -407,6 +415,8 @@ pub enum Response {
         cluster_name: Option<String>,
         document_version: u64,
         coordinator: NodeId,
+        /// Every node asked, with its build.
+        nodes: Vec<NodeStatus>,
         transport: Transport,
         devices: Vec<DeviceStatus>,
     },
@@ -450,6 +460,8 @@ pub enum Response {
         document_version: u64,
         /// Whether this node has TLS material loaded (19.1.6.4).
         tls_ready: bool,
+        /// This node's build (SPEC 6.2.6.4).
+        build: String,
         devices: Vec<DeviceStatus>,
     },
     /// A page of record copies; `truncated` says whether more follow

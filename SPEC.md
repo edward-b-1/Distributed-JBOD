@@ -469,8 +469,11 @@ disagreement 6.2.6.1 forbids, with no error until the next change, when
 automatically. The refusal is an ordinary error on the request, naming
 the field and the refusing node's build, so the proposer sees which node
 is behind; `djbod cluster show` prints every node's build for the same
-reason (19.1.5). The rule for a rolling upgrade follows: upgrade every
-node before making a change to the document, since every field is
+reason (19.1.5), and `djbod status` prints the build of the node that
+answered, naming the client's own beside it when the two differ, and
+the build of each device's node in its table, gathered from the
+`LocalStatus` answers. The rule for a rolling upgrade follows: upgrade
+every node before making a change to the document, since every field is
 required (19.1.5.2) and a build must know them all to read it. As built,
 `ClusterDocument`, `NodeEntry`, and `DeviceEntry` deny unknown fields; a
 request a node cannot decode is answered with `ProtocolViolation` on its
@@ -1628,8 +1631,9 @@ coordinator, and those nodes send to each other. Every response is either
 `Status`
 : Request: none. Response: cluster id, cluster name if set (6.2.5.3),
   document version, coordinator node
-  UUID, and for every device in the cluster: UUID, owning node, state,
-  total bytes, free bytes. Implemented by broadcasting `LocalStatus`.
+  UUID, every node asked with the build it reported (6.2.6.4), and for
+  every device in the cluster: UUID, owning node, state, total bytes,
+  free bytes. Implemented by broadcasting `LocalStatus`.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
@@ -1712,8 +1716,9 @@ coordinator, and those nodes send to each other. Every response is either
 **Node to node**
 
 `LocalStatus`
-: Request: none. Response: node UUID, document version, and for each
-  local device: UUID, state, total bytes, free bytes (5.5).
+: Request: none. Response: node UUID, document version, the node's
+  build (6.2.6.4), and for each local device: UUID, state, total bytes,
+  free bytes (5.5).
 
 `LocalLookup`
 : Request: key hash, optional cursor (the last version and device of the

@@ -126,6 +126,8 @@ target/release/djbod status
 cluster   4e9a31f4-...
 document  version 1
 answered  by node 15dd0194-...
+build     0.1.0+3c3fd58b0
+transport plain
 
 DEVICE                                NODE                                  STATE          TOTAL          FREE
 2bb98674-...                          15dd0194-...                          active      22.5 GiB      13.2 GiB

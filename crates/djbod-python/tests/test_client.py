@@ -83,6 +83,8 @@ def test_status_and_document(client):
     assert status.transport == "plain"
     assert len(status.devices) == 2
     assert status.devices[0]["state"] == "active"
+    assert [n["node"] for n in status.nodes] == [status.coordinator]
+    assert status.nodes[0]["build"] == client.identity().build
     document = client.cluster_document()
     assert document["name"] == "pytest"
     assert document["version"] == status.document_version

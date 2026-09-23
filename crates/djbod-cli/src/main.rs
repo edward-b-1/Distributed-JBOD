@@ -411,6 +411,17 @@ fn describe_detail(detail: &ErrorDetail) -> String {
     out
 }
 
+/// The build of the node that answered, and this client's when it differs:
+/// a mismatch between the two is the first thing worth noticing (SPEC
+/// 6.2.6.4).
+fn build_text(node: &str, client: &str) -> String {
+    if node == client {
+        node.to_string()
+    } else {
+        format!("{node} (this client: {client})")
+    }
+}
+
 /// The exit code of `scrub` (SPEC 20.1.2.3): 0 when the run completed
 /// and nothing remains wrong; 2 when it completed and damage remains; 3
 /// when it did not complete and no damage was seen; 4 when it did not
@@ -547,9 +558,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             } = client.status().await.map_err(client_err)?;
+            // The build of the node that answered, from its Hello (SPEC
+            // 19.1.5): the connection that served the request is still
+            // the current one.
+            let build = client.identity().await.map_err(client_err)?.build;
             {
                 {
                     if cli.json {
@@ -560,6 +576,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 "cluster_name": cluster_name,
                                 "document_version": document_version,
                                 "coordinator": coordinator,
+                                "build": build,
+                                "nodes": nodes,
                                 "transport": transport.to_string(),
                                 "devices": devices,
                             }))?
@@ -571,9 +589,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                         println!("document  version {document_version}");
                         println!("answered  by node {}", coordinator.0);
+                        println!("build     {}", build_text(&build, djbod_client::BUILD));
                         println!("transport {transport}");
                         println!();
-                        print!("{}", tables::status(&devices));
+                        print!("{}", tables::status(&devices, &nodes));
                     }
                 }
             }
@@ -1796,6 +1815,15 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_text_names_the_client_only_when_it_differs() {
+        assert_eq!(build_text("0.1.0+abc", "0.1.0+abc"), "0.1.0+abc");
+        assert_eq!(
+            build_text("0.1.0+abc", "0.1.0+def"),
+            "0.1.0+abc (this client: 0.1.0+def)"
+        );
+    }
 
     /// SPEC 20.1.2.3: the four outcomes and their codes, for both forms.
     #[test]

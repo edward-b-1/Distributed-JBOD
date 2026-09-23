@@ -16,7 +16,7 @@ use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    NodeStatus, RepairReport, Request, Response, ScrubEvent, StreamEnd,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -117,6 +117,8 @@ pub struct Status {
     pub cluster_name: Option<String>,
     pub document_version: u64,
     pub coordinator: NodeId,
+    /// Every node asked, with its build.
+    pub nodes: Vec<NodeStatus>,
     pub transport: Transport,
     pub devices: Vec<DeviceStatus>,
 }
@@ -544,6 +546,7 @@ impl Client {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             } => Ok(Status {
@@ -551,6 +554,7 @@ impl Client {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             }),

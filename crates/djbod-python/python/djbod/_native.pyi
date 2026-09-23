@@ -29,6 +29,7 @@ class Status:
     cluster_name: Optional[str]
     document_version: int
     coordinator: str
+    nodes: list[dict[str, Any]]
     transport: str
     devices: list[dict[str, Any]]
 

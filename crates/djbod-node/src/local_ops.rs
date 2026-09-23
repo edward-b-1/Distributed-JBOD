@@ -311,6 +311,7 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
         node: node.id(),
         document_version: document.version,
         tls_ready: node.tls().is_some(),
+        build: djbod_client::BUILD.to_string(),
         devices,
     })
 }
