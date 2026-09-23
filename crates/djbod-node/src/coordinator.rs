@@ -3567,15 +3567,18 @@ mod tests {
         }
     }
 
-    /// Run a merge over fixed sources and collect its events.
+    /// Run a merge over fixed sources and collect its events. The
+    /// channel is bounded, as in the scrub, so the events are drained
+    /// while the merge runs; draining afterwards would block a merge that
+    /// sends more events than the buffer holds.
     async fn merged(sources: Vec<RecordSource>) -> (CrossCheckOutcome, Vec<ScrubEvent>) {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);
-        let outcome = merge_sources(sources, sender).await;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
+        let merge = tokio::spawn(merge_sources(sources, sender));
         let mut events = Vec::new();
-        while let Ok(event) = receiver.try_recv() {
+        while let Some(event) = receiver.recv().await {
             events.push(event);
         }
-        (outcome, events)
+        (merge.await.expect("merge task"), events)
     }
 
     /// SPEC 20.1.2.2: each version is judged from the group of its copies
