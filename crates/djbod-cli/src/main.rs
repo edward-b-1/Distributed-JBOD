@@ -441,11 +441,6 @@ fn describe_detail(detail: &ErrorDetail) -> String {
     out
 }
 
-/// The exit code of `scrub` (SPEC 20.1.2.3): 0 when the run completed
-/// and nothing remains wrong; 2 when it completed and damage remains; 3
-/// when it did not complete and no damage was seen; 4 when it did not
-/// complete and damage was seen. Damage remaining is the findings, or
-/// with --repair the repairs that failed.
 /// The build of the node that answered, and this client's when it differs:
 /// a mismatch between the two is the first thing worth noticing (SPEC
 /// 6.2.6.4). A node that sent no build predates builds in Hello.
@@ -457,6 +452,11 @@ fn build_text(node: Option<&str>, client: &str) -> String {
     }
 }
 
+/// The exit code of `scrub` (SPEC 20.1.2.3): 0 when the run completed
+/// and nothing remains wrong; 2 when it completed and damage remains; 3
+/// when it did not complete and no damage was seen; 4 when it did not
+/// complete and damage was seen. Damage remaining is the findings, or
+/// with --repair the repairs that failed.
 fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failures: usize) -> i32 {
     let damage_remaining = if repair {
         repair_failures > 0
