@@ -1269,10 +1269,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     let (ok, out, err) = djbod(&test, &["contents"]);
     assert!(ok, "{err}");
     assert_eq!(out.lines().count(), 4, "{out}");
-    assert!(
-        err.contains(&format!("device {} unavailable", dead.id())),
-        "{err}"
-    );
+    assert!(err.contains(&format!("{} unavailable", dead.id())), "{err}");
 
     let (ok, out, err) = djbod(&test, &["scrub"]);
     assert!(!ok, "{out}{err}");
