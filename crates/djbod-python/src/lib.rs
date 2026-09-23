@@ -105,6 +105,9 @@ struct Status {
     cluster_name: Option<String>,
     document_version: u64,
     coordinator: String,
+    /// Every node asked: node, build (absent from an older node), as
+    /// `djbod --json status` shows them.
+    nodes: Py<PyAny>,
     transport: String,
     /// Every device: device, node, state, label, node_label, total_bytes,
     /// free_bytes, as `djbod --json status` shows them.
@@ -367,6 +370,7 @@ impl Client {
             cluster_name: status.cluster_name,
             document_version: status.document_version,
             coordinator: status.coordinator.0.to_string(),
+            nodes: pythonize(py, &status.nodes)?.unbind(),
             transport: status.transport.to_string(),
             devices: pythonize(py, &status.devices)?.unbind(),
         })

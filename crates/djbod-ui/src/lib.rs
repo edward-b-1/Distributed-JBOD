@@ -538,6 +538,7 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             cluster_name,
             document_version,
             coordinator,
+            nodes,
             transport,
             devices,
         } => Ok(Json(json!({
@@ -553,6 +554,8 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             "ui_to_node_tls": conn.is_tls(),
             // This server's own build, shown in the page header.
             "ui_build": djbod_client::BUILD,
+            // Every node asked and its build (SPEC 6.2.6.4).
+            "nodes": nodes,
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),

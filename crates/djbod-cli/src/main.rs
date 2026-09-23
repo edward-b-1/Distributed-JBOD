@@ -591,6 +591,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             } = client.status().await.map_err(client_err)?;
@@ -609,6 +610,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 "document_version": document_version,
                                 "coordinator": coordinator,
                                 "build": build,
+                                "nodes": nodes,
                                 "transport": transport.to_string(),
                                 "devices": devices,
                             }))?
@@ -626,7 +628,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                         println!("transport {transport}");
                         println!();
-                        print!("{}", tables::status(&devices));
+                        print!("{}", tables::status(&devices, &nodes));
                     }
                 }
             }

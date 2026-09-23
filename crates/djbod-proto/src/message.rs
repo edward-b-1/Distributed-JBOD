@@ -321,6 +321,15 @@ pub struct DeviceContents {
     pub shard_bytes: u64,
 }
 
+/// One node as `Status` reports it: the build it gave in its
+/// `LocalStatus` (SPEC 6.2.6.4), absent from a node that predates it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatus {
+    pub node: NodeId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceStatus {
     pub device: DeviceId,
@@ -407,6 +416,10 @@ pub enum Response {
         cluster_name: Option<String>,
         document_version: u64,
         coordinator: NodeId,
+        /// Every node asked, with its build; empty from a coordinator
+        /// that predates builds in `Status`.
+        #[serde(default)]
+        nodes: Vec<NodeStatus>,
         #[serde(default)]
         transport: Transport,
         devices: Vec<DeviceStatus>,
@@ -452,6 +465,9 @@ pub enum Response {
         /// Whether this node has TLS material loaded (19.1.6.4).
         #[serde(default)]
         tls_ready: bool,
+        /// This node's build (SPEC 6.2.6.4); absent from an older node.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        build: Option<String>,
         devices: Vec<DeviceStatus>,
     },
     /// A page of record copies; `truncated` says whether more follow

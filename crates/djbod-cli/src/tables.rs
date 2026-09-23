@@ -3,7 +3,7 @@
 use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_client::admin::NodeDocument;
 use djbod_core::cluster::ClusterDocument;
-use djbod_proto::message::{DeviceContents, DeviceStatus, KeyEntry};
+use djbod_proto::message::{DeviceContents, DeviceStatus, KeyEntry, NodeStatus};
 
 use super::human_bytes;
 
@@ -63,29 +63,41 @@ pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> S
     render(table, &[4, 5, 6, 7])
 }
 
-pub(super) fn status(devices: &[DeviceStatus]) -> String {
+pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
     let mut table = Table::new();
     table.set_header([
         "DEVICE",
         "LABEL",
         "NODE",
         "NODE LABEL",
+        "NODE BUILD",
         "STATE",
         "TOTAL",
         "FREE",
     ]);
     for d in devices {
+        // The owning node's build: unreported by a node that predates
+        // builds in LocalStatus, unknown under a coordinator that
+        // predates them in Status (SPEC 6.2.6.4).
+        let build = match nodes.iter().find(|n| n.node == d.node) {
+            Some(NodeStatus {
+                build: Some(build), ..
+            }) => build.as_str(),
+            Some(_) => "older, unreported",
+            None => "-",
+        };
         table.add_row([
             d.device.0.to_string(),
             d.label.as_deref().unwrap_or("-").to_string(),
             d.node.0.to_string(),
             d.node_label.as_deref().unwrap_or("-").to_string(),
+            build.to_string(),
             format!("{:?}", d.state).to_lowercase(),
             human_bytes(d.total_bytes),
             human_bytes(d.free_bytes),
         ]);
     }
-    render(table, &[5, 6])
+    render(table, &[6, 7])
 }
 
 pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument]) -> String {

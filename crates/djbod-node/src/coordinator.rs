@@ -29,8 +29,9 @@ use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
-    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor,
-    RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
+    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, NodeStatus,
+    RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition,
+    ShardRepair, StreamEnd,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -494,15 +495,32 @@ async fn device_contents(node: &Arc<Node>, device: DeviceId) -> Result<Response,
 
 async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     let document = node.document();
-    let devices = device_statuses(node, broadcast(node, Request::LocalStatus).await?)?;
+    let answers = broadcast(node, Request::LocalStatus).await?;
+    let nodes = node_statuses(&answers);
+    let devices = device_statuses(node, answers)?;
     Ok(Response::Status {
         cluster_id: document.cluster_id,
         cluster_name: document.name.clone(),
         document_version: document.version,
         coordinator: node.id(),
+        nodes,
         transport: document.transport,
         devices,
     })
+}
+
+/// Each node asked and the build it reported (6.2.6.4).
+fn node_statuses(answers: &[(NodeId, Response)]) -> Vec<NodeStatus> {
+    let mut nodes = Vec::new();
+    for (target, response) in answers {
+        if let Response::LocalStatus { build, .. } = response {
+            nodes.push(NodeStatus {
+                node: *target,
+                build: build.clone(),
+            });
+        }
+    }
+    nodes
 }
 
 /// Combine the `LocalStatus` answers of the nodes asked into one device
