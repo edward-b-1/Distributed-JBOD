@@ -374,6 +374,31 @@ impl Device {
         object_directory(&self.root, DEFAULT_BUCKET, key_hash)
     }
 
+    /// The key directory for a write, created if absent: the two
+    /// partition levels and the key directory itself (9.1.2), each with a
+    /// plain `mkdir`, and nothing above them. The bucket and the objects
+    /// tree are made only by `initialise`, so a write can never rebuild a
+    /// device whose tree has gone; that is refused as unavailable (5.6).
+    fn key_directory_for_write(&self, key_hash: &KeyHash) -> Result<PathBuf, DeviceError> {
+        self.check_present()?;
+        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
+        if !bucket.is_dir() {
+            return Err(DeviceError::Unavailable {
+                path: self.root.clone(),
+            });
+        }
+        let mut path = bucket;
+        for component in key_hash.directory_components() {
+            path.push(component);
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(io_error(&path, e)),
+            }
+        }
+        Ok(path)
+    }
+
     /// Every key directory on this device, in path order.
     pub fn key_directories(&self) -> Result<Vec<PathBuf>, DeviceError> {
         self.check_present()?;
@@ -402,9 +427,7 @@ impl Device {
     ) -> Result<ShardWrite, DeviceError> {
         let length = shard_file_length(header.scheme, header.block_length, object_size)
             .ok_or(DeviceError::BadObjectSize { object_size })?;
-        self.check_present()?;
-        let dir = self.object_directory(key_hash);
-        fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+        let dir = self.key_directory_for_write(key_hash)?;
         let final_path = dir.join(shard_file_name(&header.version_id, header.shard_index));
         let temp_path = temporary_path(&final_path);
         let writer = ShardFileWriter::create_with_reservation(&temp_path, header, Some(length))?;
@@ -426,8 +449,7 @@ impl Device {
             path: dir.clone(),
             source,
         })?;
-        self.check_present()?;
-        fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+        self.key_directory_for_write(&record.key_hash)?;
         let path = dir.join(record_file_name(&record.version));
         if path.exists() {
             let existing = self.read_record(&record.key_hash, &record.version)?;
