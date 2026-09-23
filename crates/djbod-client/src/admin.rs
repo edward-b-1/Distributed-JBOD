@@ -831,10 +831,10 @@ pub async fn scan_references(
                         truncated,
                     }) => {
                         after = page.last().map(|r| RecordCursor {
-                            key_hash: r.key_hash,
-                            version: r.version,
+                            key_hash: r.record.key_hash,
+                            version: r.record.version,
                         });
-                        records.extend(page);
+                        records.extend(page.into_iter().map(|r| r.record));
                         if !truncated || after.is_none() {
                             break;
                         }

@@ -16,8 +16,8 @@ use djbod_core::shardfile::{ShardFileError, ShardFileHeader};
 use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
-    LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
+    DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
     MAX_LIST_PAGE_BYTES,
 };
 
@@ -387,13 +387,13 @@ async fn local_records(
     // One page: as many records as fit in a frame with room to spare,
     // read from the cursor onwards and no further (SPEC 15.2.2).
     let (page, truncated, encode_failure) = blocking(move || {
-        let mut page: Vec<MetadataRecord> = Vec::new();
+        let mut page: Vec<DeviceRecord> = Vec::new();
         let mut bytes = 0usize;
         let mut truncated = false;
         let mut encode_failure: Option<String> = None;
         device.walk_records_from(
             after.as_ref().map(|c| (&c.key_hash, c.version)),
-            |record, _| {
+            |record, shard_present| {
                 let encoded = match djbod_proto::codec::encode_cbor(record) {
                     Ok(bytes) => bytes.len(),
                     Err(e) => {
@@ -406,7 +406,10 @@ async fn local_records(
                     return WalkStep::Stop;
                 }
                 bytes += encoded;
-                page.push(record.clone());
+                page.push(DeviceRecord {
+                    record: record.clone(),
+                    shard_present,
+                });
                 WalkStep::Continue
             },
             |path, error| {

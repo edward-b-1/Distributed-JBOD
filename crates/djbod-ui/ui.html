@@ -1220,7 +1220,7 @@ $('scrub-go').addEventListener('click', async () => {
   // node counts too, so the total is a floor). Then the cross-node checks
   // and any repairs run, which have no count in advance.
   const devicesToScrub = (state.status?.devices || []).filter((d) => d.state !== 'removed').length || 1;
-  let devicesDone = 0, bytesRead = 0, phase = 'local';
+  let devicesDone = 0, bytesRead = 0, phase = 'local', crossChecked = 0;
   const fill = $('scrub-fill'), text = $('scrub-progress-text'), started = performance.now();
   const showProgress = () => {
     const seconds = (performance.now() - started) / 1000;
@@ -1230,7 +1230,7 @@ $('scrub-go').addEventListener('click', async () => {
       text.textContent = `checking devices: ${devicesDone} of ${devicesToScrub} done, ${human(bytesRead)} read` + (seconds > 2 && bytesRead ? `, ${human(bytesRead / seconds)}/s` : '');
     } else {
       fill.style.width = '100%';
-      text.textContent = `devices done (${human(bytesRead)} read); cross-node checks${repairing ? ' and repairs' : ''}…`;
+      text.textContent = `devices done (${human(bytesRead)} read); cross-node checks${crossChecked ? `: ${crossChecked.toLocaleString()} versions checked` : ''}${repairing ? ', then repairs' : ''}…`;
     }
   };
   $('scrub-progress').hidden = false; fill.classList.add('working'); showProgress();
@@ -1238,7 +1238,7 @@ $('scrub-go').addEventListener('click', async () => {
     await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
       if (e.event === 'node_summary') { devicesDone++; bytesRead += e.summary.bytes_read || 0; }
       if (e.event === 'node_failed') devicesDone++;
-      if (e.event === 'cluster_finding' || e.event === 'cross_check_stopped' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
+      if (e.event === 'cluster_finding' || e.event === 'cross_check_stopped' || e.event === 'cross_check_progress' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
       if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${devicesDone} device(s), ${human(bytesRead)} read`; }
       else showProgress();
       switch (e.event) {
@@ -1246,7 +1246,8 @@ $('scrub-go').addEventListener('click', async () => {
         case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
         case 'node_failed': findings++; logLine(log, `node ${nodeText(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
-        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.keys_checked} key(s) checked, ${e.keys_unchecked === null ? 'the keys could not be listed' : `${e.keys_unchecked} not checked`}`, 'finding'); break;
+        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
+        case 'cross_check_progress': crossChecked = e.versions_checked; break;
         case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':

@@ -2005,9 +2005,11 @@ device has the shard file. From the group alone it decides: fewer copies
 than the current revision lists devices, or copies that disagree, is
 `RecordsInconsistent`; a copy at a lower revision on a device the
 current revision no longer lists is `StaleCopy`; a listed device that
-has the record but not the shard file is `ShardMissingOnDevice`; a
-listed device that is not in the cluster document is
-`DeviceForShardNotInClusterDocument`. No lookup and no probe is made,
+has the record but not the shard file is `ShardMissingOnDevice`. A
+listed device that is no longer in the cluster document has no stream,
+so its copy is absent and the version shows as `RecordsInconsistent`,
+which is what it is; repair rebuilds the shard elsewhere (18.3). No
+lookup and no probe is made,
 and no list of keys is held: the phase's memory is one page per device
 plus the current group, so it is proportional to the number of devices,
 and its connections are one per device. This replaces the per-key
@@ -2016,10 +2018,12 @@ connections per key on a three-node `2+1` cluster and made about a
 million and a half connections to check a quarter of a million keys
 (issue #152); it is the rule of 15.2.3 applied.
 
-The merge reports its progress: an event every 10,000 versions, or every
-ten seconds, whichever comes first, carrying the versions checked so far
-and the key hash reached, so a client can show where a long run is
-rather than a silent hour. A `--repair` run then repairs each damaged
+The merge reports its progress: an event every 10,000 versions, carrying
+the versions checked so far and the key hash reached, so a client can
+show where a long run is rather than a silent hour. (At the few
+milliseconds a version costs, that is an event every minute or so; a
+time-based trigger as well was considered and dropped as a second
+mechanism for one feature.) A `--repair` run then repairs each damaged
 key as before.
 
 A node that cannot be reached, or that refuses or answers out of
@@ -2036,9 +2040,7 @@ repair. The run then ends as incomplete (`NodeUnreachable`) whether or
 not damage was also found, so the caller can tell "there is confirmed
 damage" from "the check did not finish" (the exit codes of #156). There
 is no retry: a failure to reach a node is reported the first time (16.1).
-The one such case that is damage is a record naming a device no longer
-in the cluster document, `DeviceForShardNotInClusterDocument`, which repair fixes by
-rebuilding that shard elsewhere (18.3). Scheduling is left to cron or a
+Scheduling is left to cron or a
 systemd timer; a built-in schedule is a later addition.
 
 20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard
