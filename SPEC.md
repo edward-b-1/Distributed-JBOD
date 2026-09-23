@@ -470,7 +470,8 @@ disagreement 6.2.6.1 forbids, with no error until the next change, when
 automatically. The refusal is an ordinary error on the request, naming
 the field and the refusing node's build, so the proposer sees which node
 is behind; `djbod cluster show` prints every node's build for the same
-reason (19.1.5). The rule for a rolling upgrade follows: upgrade every
+reason (19.1.5), and `djbod status` prints the build of the node that
+answered, naming the client's own beside it when the two differ. The rule for a rolling upgrade follows: upgrade every
 node before making a change that uses a field the older build lacks. A
 document without such a field is accepted by old and new builds alike,
 since an absent optional field means its default (6.2.2). As built,

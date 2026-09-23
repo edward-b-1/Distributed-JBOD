@@ -446,6 +446,17 @@ fn describe_detail(detail: &ErrorDetail) -> String {
 /// when it did not complete and no damage was seen; 4 when it did not
 /// complete and damage was seen. Damage remaining is the findings, or
 /// with --repair the repairs that failed.
+/// The build of the node that answered, and this client's when it differs:
+/// a mismatch between the two is the first thing worth noticing (SPEC
+/// 6.2.6.4). A node that sent no build predates builds in Hello.
+fn build_text(node: Option<&str>, client: &str) -> String {
+    match node {
+        Some(build) if build == client => build.to_string(),
+        Some(build) => format!("{build} (this client: {client})"),
+        None => format!("older, unreported (this client: {client})"),
+    }
+}
+
 fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failures: usize) -> i32 {
     let damage_remaining = if repair {
         repair_failures > 0
@@ -583,6 +594,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 transport,
                 devices,
             } = client.status().await.map_err(client_err)?;
+            // The build of the node that answered, from its Hello (SPEC
+            // 19.1.5): the connection that served the request is still
+            // the current one.
+            let build = client.identity().await.map_err(client_err)?.build;
             {
                 {
                     if cli.json {
@@ -593,6 +608,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 "cluster_name": cluster_name,
                                 "document_version": document_version,
                                 "coordinator": coordinator,
+                                "build": build,
                                 "transport": transport.to_string(),
                                 "devices": devices,
                             }))?
@@ -604,6 +620,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                         println!("document  version {document_version}");
                         println!("answered  by node {}", coordinator.0);
+                        println!(
+                            "build     {}",
+                            build_text(build.as_deref(), djbod_client::BUILD)
+                        );
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices));
@@ -1829,6 +1849,19 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_text_names_the_client_only_when_it_differs() {
+        assert_eq!(build_text(Some("0.1.0+abc"), "0.1.0+abc"), "0.1.0+abc");
+        assert_eq!(
+            build_text(Some("0.1.0+abc"), "0.1.0+def"),
+            "0.1.0+abc (this client: 0.1.0+def)"
+        );
+        assert_eq!(
+            build_text(None, "0.1.0+def"),
+            "older, unreported (this client: 0.1.0+def)"
+        );
+    }
 
     /// SPEC 20.1.2.3: the four outcomes and their codes, for both forms.
     #[test]

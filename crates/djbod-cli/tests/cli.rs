@@ -107,6 +107,14 @@ async fn put_get_head_list_delete_from_the_command_line() {
     assert!(ok, "status failed: {err}");
     assert!(out.contains("DEVICE"), "{out}");
     assert_eq!(out.matches("active").count(), 4, "{out}");
+    // The node's build, which is this build, so the client is not named.
+    let build_line = format!("build     {}\n", djbod_client::BUILD);
+    assert!(out.contains(&build_line), "{out}");
+    assert!(!out.contains("this client"), "{out}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "status failed: {err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["build"].as_str(), Some(djbod_client::BUILD), "{out}");
 
     let (ok, out, err) = djbod(
         &test,
