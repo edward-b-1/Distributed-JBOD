@@ -231,10 +231,15 @@ reservations currently in flight on that device (if reservation is used,
 destroyed. Two ways a device becomes so. At startup, a device the
 cluster document lists for this node that no configured path opened
 (5.4). At run time, a device whose identity file (5.2) can no longer be
-read; the node checks for it, one `stat`, before every write, listing,
-scrub, and space report, so that a directory which vanished is never
-recreated by a write that would otherwise create its parents on
-whatever filesystem is at that path. The consequences:
+read, which is what the space report and the scrub look for, one
+`stat`, since it is the only thing that tells an empty mount point from
+a disk. A write or a listing does not check first: a write makes the
+partition and key directories with a plain `mkdir` and never anything
+above them, so on a device whose tree has gone it finds no parent, and
+a listing finds no bucket; each reports that as the device being
+unavailable. There is no window between a check and the act, and no
+write ever recreates a device's tree on whatever filesystem is at its
+path. The consequences:
 
 - `LocalStatus` and `Status` (19.1.3) report the device with `available`
   false and no space; the document's state (`active`, `draining`) is

@@ -186,7 +186,23 @@ pub fn scrub_device(
     let mut limiter = RateLimiter::new(options.max_bytes_per_second);
     let now = SystemTime::now();
 
-    for key_dir in device.key_directories()? {
+    // The tree may go between the check above and here; that is the same
+    // finding, not an error.
+    let key_directories = match device.key_directories() {
+        Ok(dirs) => dirs,
+        Err(e @ DeviceError::Unavailable { .. }) => {
+            report(
+                &mut summary,
+                on_finding,
+                Finding::DeviceUnavailable {
+                    reason: e.to_string(),
+                },
+            );
+            return Ok(summary);
+        }
+        Err(e) => return Err(e),
+    };
+    for key_dir in key_directories {
         let expected_hash = key_dir
             .file_name()
             .and_then(|n| n.to_str())

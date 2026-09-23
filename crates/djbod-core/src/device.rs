@@ -303,10 +303,12 @@ impl Device {
         &self.root
     }
 
-    /// Confirm the device is still there: its identity file can be read
-    /// (5.6). One `stat`, done before every write, listing, scrub, and
-    /// space report, so a disk that failed, unmounted, or was destroyed
-    /// after startup is refused rather than silently recreated.
+    /// Whether the device is still there: its identity file can be read
+    /// (5.6). For reports, the space report and the scrub, where it is the
+    /// only thing that tells an empty mount point from a disk. Writes and
+    /// listings do not check first; they fail on the missing tree and
+    /// report that as unavailable, so there is no window between a check
+    /// and the act.
     pub fn check_present(&self) -> Result<(), DeviceError> {
         let identity_path = self.root.join(DEVICE_IDENTITY_FILE);
         match fs::metadata(&identity_path) {
@@ -378,33 +380,44 @@ impl Device {
     /// partition levels and the key directory itself (9.1.2), each with a
     /// plain `mkdir`, and nothing above them. The bucket and the objects
     /// tree are made only by `initialise`, so a write can never rebuild a
-    /// device whose tree has gone; that is refused as unavailable (5.6).
+    /// device whose tree has gone: the `mkdir` finds no parent, and that
+    /// is the device being unavailable (5.6).
     fn key_directory_for_write(&self, key_hash: &KeyHash) -> Result<PathBuf, DeviceError> {
-        self.check_present()?;
-        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
-        if !bucket.is_dir() {
-            return Err(DeviceError::Unavailable {
-                path: self.root.clone(),
-            });
-        }
-        let mut path = bucket;
+        let mut path = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         for component in key_hash.directory_components() {
             path.push(component);
             match fs::create_dir(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(DeviceError::Unavailable {
+                        path: self.root.clone(),
+                    })
+                }
                 Err(e) => return Err(io_error(&path, e)),
             }
         }
         Ok(path)
     }
 
+    /// The bucket's partition directories, in order. A bucket that cannot
+    /// be found is the device being unavailable (5.6); anything missing
+    /// below it was deleted meanwhile and reads as empty.
+    fn read_bucket(&self) -> Result<Vec<PathBuf>, DeviceError> {
+        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
+        match fs::read_dir(&bucket) {
+            Ok(_) => read_dir_sorted(&bucket),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeviceError::Unavailable {
+                path: self.root.clone(),
+            }),
+            Err(e) => Err(io_error(&bucket, e)),
+        }
+    }
+
     /// Every key directory on this device, in path order.
     pub fn key_directories(&self) -> Result<Vec<PathBuf>, DeviceError> {
-        self.check_present()?;
-        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         let mut out = Vec::new();
-        for first in read_dir_sorted(&bucket)? {
+        for first in self.read_bucket()? {
             for second in read_dir_sorted(&first)? {
                 for key_dir in read_dir_sorted(&second)? {
                     if key_dir.is_dir() {
@@ -590,7 +603,6 @@ impl Device {
         mut on_record: impl FnMut(&MetadataRecord, bool) -> WalkStep,
         mut on_bad: impl FnMut(&Path, &DeviceError),
     ) -> Result<(), DeviceError> {
-        self.check_present()?;
         let cursor = after.map(|(hash, version)| (hash.directory_components(), version));
         let name_of = |path: &Path| {
             path.file_name()
@@ -598,8 +610,7 @@ impl Device {
                 .to_string_lossy()
                 .into_owned()
         };
-        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
-        for first in read_dir_sorted(&bucket)? {
+        for first in self.read_bucket()? {
             let first_name = name_of(&first);
             // Whether this directory is the one the cursor is in: only
             // then does the next level need comparing; before it, skip.
