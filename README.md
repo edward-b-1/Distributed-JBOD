@@ -159,10 +159,15 @@ up through a failure, but it must never be quiet about one.
 There is no alerting subsystem, no notification hook, no health daemon,
 and none is planned. The alarm is the operation. A read that meets a
 bad block, a corrupt record, or record copies that disagree fails and
-says what it found and where: the disk, the shard, the stripe. A write
-fails while any disk the cluster expects is unreadable, and names it.
-Your notebook or batch job stops with that error, which is how you find
-out, at the moment you would want to. `djbod status` and the web UI
+says what it found and where: the disk, the shard, the stripe. A read
+that meets a bad block, or a shard that is missing or on a disk that is
+gone, rebuilds the data from parity and hands it back, and says on the
+way out what it had to rebuild and where, so that a repair can follow.
+A write is placed on the emptiest disks the cluster can read, is
+attempted once, and fails with the node's own words if a disk refuses
+it; there is no second guess at another disk. Your notebook or batch
+job sees the error or the warning, which is how you find out, at the
+moment you would want to. `djbod status` and the web UI
 show the same facts on demand. `djbod scrub`, run by hand or from cron,
 checks every disk and every object and exits non-zero when it finds
 damage, so a scheduled scrub is one line of crontab and its exit code
