@@ -328,13 +328,16 @@ fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRec
     versions_of_excluding(key, located, &BTreeSet::new())
 }
 
-/// `versions_of` for the cross-node scrub (20.1.2.2), where a copy on a
-/// device the cluster cannot read (5.6) is not expected: that device is
-/// reported once, not once per version.
+/// `versions_of` for the cross-node scrub (20.1.2.2). `unread` names
+/// the devices whose record streams failed as unavailable (5.6) during
+/// this run, so none of their copies could arrive: a copy missing from
+/// one of them is not evidence about the version, only about the device,
+/// which the node's own scrub has already reported once. This decides
+/// what the report says and nothing else; no action is taken on it.
 fn versions_of_excluding(
     key: &str,
     located: Vec<LocatedRecord>,
-    unavailable: &BTreeSet<DeviceId>,
+    unread: &BTreeSet<DeviceId>,
 ) -> Result<Vec<MetadataRecord>, Failure> {
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {
@@ -371,12 +374,12 @@ fn versions_of_excluding(
             .filter(|c| c.record.revision == current_revision)
             .collect();
         let first = &current[0].record;
-        let unreadable = first
+        let unread_copies = first
             .shards
             .iter()
-            .filter(|s| unavailable.contains(&s.device))
+            .filter(|s| unread.contains(&s.device))
             .count();
-        let expected = first.k as usize + first.m as usize - unreadable;
+        let expected = first.k as usize + first.m as usize - unread_copies;
         if current.len() != expected {
             return Err(Failure::Error(ErrorDetail {
                 key: Some(key.to_string()),
@@ -3542,15 +3545,19 @@ async fn merge_sources(
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
 ) -> CrossCheckOutcome {
     let mut outcome = CrossCheckOutcome::default();
-    // Devices whose records cannot be read (5.6): the node's own scrub
-    // reported each one; here their copies are simply not expected.
-    let mut unavailable: BTreeSet<DeviceId> = BTreeSet::new();
+    // Record streams that failed because their device could not be read
+    // (5.6). Unlike any other failure, this does not stop the merge: the
+    // node's own scrub has reported the device once, and from here on
+    // the groups are checked without expecting a copy from it. A device
+    // that fails part way joins the set at that point; the groups before
+    // it were checked with its copies present.
+    let mut unread: BTreeSet<DeviceId> = BTreeSet::new();
     let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
     for source in sources.iter_mut() {
         match source.next().await {
             Ok(head) => heads.push(head),
             Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
-                unavailable.insert(source.device());
+                unread.insert(source.device());
                 heads.push(None);
             }
             Err(failure) => {
@@ -3586,7 +3593,7 @@ async fn merge_sources(
                 taken.push(index);
             }
         }
-        for finding in check_group(group, &present, &unavailable) {
+        for finding in check_group(group, &present, &unread) {
             outcome.findings += 1;
             outcome
                 .damaged_keys
@@ -3613,7 +3620,7 @@ async fn merge_sources(
             match sources[index].next().await {
                 Ok(head) => heads[index] = head,
                 Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
-                    unavailable.insert(sources[index].device());
+                    unread.insert(sources[index].device());
                     heads[index] = None;
                 }
                 Err(failure) => {
@@ -3648,14 +3655,14 @@ async fn stop(
 fn check_group(
     group: Vec<LocatedRecord>,
     present: &BTreeMap<DeviceId, bool>,
-    unavailable: &BTreeSet<DeviceId>,
+    unread: &BTreeSet<DeviceId>,
 ) -> Vec<ClusterFinding> {
     let mut findings = Vec::new();
     let Some(first) = group.first() else {
         return findings;
     };
     let key = first.record.key.clone();
-    let versions = match versions_of_excluding(&key, group.clone(), unavailable) {
+    let versions = match versions_of_excluding(&key, group.clone(), unread) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {

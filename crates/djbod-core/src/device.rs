@@ -382,7 +382,7 @@ impl Device {
     /// tree are made only by `initialise`, so a write can never rebuild a
     /// device whose tree has gone: the `mkdir` finds no parent, and that
     /// is the device being unavailable (5.6).
-    fn key_directory_for_write(&self, key_hash: &KeyHash) -> Result<PathBuf, DeviceError> {
+    fn create_key_directory(&self, key_hash: &KeyHash) -> Result<PathBuf, DeviceError> {
         let mut path = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         for component in key_hash.directory_components() {
             path.push(component);
@@ -440,7 +440,7 @@ impl Device {
     ) -> Result<ShardWrite, DeviceError> {
         let length = shard_file_length(header.scheme, header.block_length, object_size)
             .ok_or(DeviceError::BadObjectSize { object_size })?;
-        let dir = self.key_directory_for_write(key_hash)?;
+        let dir = self.create_key_directory(key_hash)?;
         let final_path = dir.join(shard_file_name(&header.version_id, header.shard_index));
         let temp_path = temporary_path(&final_path);
         let writer = ShardFileWriter::create_with_reservation(&temp_path, header, Some(length))?;
@@ -462,7 +462,7 @@ impl Device {
             path: dir.clone(),
             source,
         })?;
-        self.key_directory_for_write(&record.key_hash)?;
+        self.create_key_directory(&record.key_hash)?;
         let path = dir.join(record_file_name(&record.version));
         if path.exists() {
             let existing = self.read_record(&record.key_hash, &record.version)?;
