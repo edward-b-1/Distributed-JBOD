@@ -82,13 +82,18 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
             .find(|n| n.node == d.node)
             .map(|n| n.build.as_str())
             .unwrap_or("-");
+        // The document's state, and whether the node can read it (5.6).
+        let mut state = format!("{:?}", d.state).to_lowercase();
+        if !d.available {
+            state.push_str(", unavailable");
+        }
         table.add_row([
             d.device.0.to_string(),
             d.label.as_deref().unwrap_or("-").to_string(),
             d.node.0.to_string(),
             d.node_label.as_deref().unwrap_or("-").to_string(),
             build.to_string(),
-            format!("{:?}", d.state).to_lowercase(),
+            state,
             human_bytes(d.total_bytes),
             human_bytes(d.free_bytes),
         ]);

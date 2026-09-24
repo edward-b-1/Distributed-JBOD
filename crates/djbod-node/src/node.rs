@@ -184,6 +184,22 @@ impl Node {
         self.devices.clone()
     }
 
+    /// Devices the document lists for this node that were not opened at
+    /// startup (5.6): their path is missing, empty, or not configured.
+    pub fn unavailable_devices(&self) -> Vec<DeviceId> {
+        let document = self.document.read().expect("document lock");
+        document
+            .devices
+            .iter()
+            .filter(|d| {
+                d.node == self.id()
+                    && d.state != DeviceState::Removed
+                    && !self.devices_by_id.contains_key(&d.id)
+            })
+            .map(|d| d.id)
+            .collect()
+    }
+
     fn document_path(config: &NodeConfig) -> PathBuf {
         config.state_dir.join(CLUSTER_DOCUMENT_FILE)
     }
@@ -249,7 +265,20 @@ impl Node {
         }
         let mut devices = Vec::with_capacity(config.devices.len());
         for path in &config.devices {
-            devices.push(Device::open(path, Some(document.cluster_id))?);
+            match Device::open(path, Some(document.cluster_id)) {
+                Ok(device) => devices.push(device),
+                // A missing directory or an empty mount point: the disk is
+                // not there. The device it should hold is reported
+                // unavailable (5.6) rather than the node refusing to start.
+                Err(e @ DeviceError::NotInitialised { .. }) => {
+                    tracing::warn!(path = %path.display(), %e, "configured device path cannot be opened; the device it held is unavailable");
+                }
+                Err(e @ DeviceError::Io { .. }) if matches!(&e, DeviceError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    tracing::warn!(path = %path.display(), %e, "configured device path cannot be opened; the device it held is unavailable");
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
         let max_age = Duration::from_secs(config.temporary_max_age_secs);
         for device in &devices {
@@ -329,6 +358,15 @@ impl Node {
             let device = Arc::new(device);
             by_id.insert(device.id(), device.clone());
             ordered.push(device);
+        }
+        for entry in document.devices.iter().filter(|d| {
+            d.node == node_id && d.state != DeviceState::Removed && !by_id.contains_key(&d.id)
+        }) {
+            tracing::warn!(
+                device = %entry.id,
+                label = entry.label.as_deref().unwrap_or("-"),
+                "device listed for this node was not opened: no configured path holds it; it is unavailable (SPEC 5.6)"
+            );
         }
         Ok(Node {
             config,

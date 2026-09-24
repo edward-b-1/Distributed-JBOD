@@ -214,12 +214,31 @@ redundancy guarantee wherever it is set.
 5.4 [P] At startup the node also refuses to start if a device identity file
 has a `system` field other than `distributed-jbod`, names a different
 cluster id, has an unsupported format version, or if the same device UUID
-is claimed by two paths.
+is claimed by two paths. A configured path whose directory is missing,
+or exists but holds neither identity file nor objects tree (a mount
+point with nothing mounted), is not a refusal: the node starts without
+it and the device it should have held is unavailable (5.6). A directory
+with an objects tree but no identity file is still refused, since it is
+either someone else's or a device whose identity was destroyed by hand.
 
 5.5 [D] A device reports free space as the filesystem's free bytes as
 returned by `statvfs`, minus a configured headroom, minus the sum of
 reservations currently in flight on that device (if reservation is used,
 10.6).
+
+5.6 [D] **An unavailable device.** A device the node cannot read is
+*unavailable*: at startup, a device the cluster document lists for this
+node that no configured path opened (5.4), because the disk failed or
+was never mounted. A disk failure is a device failure, not a node
+failure: the node starts and serves its other devices, so that the
+cluster keeps every copy they hold and the administrator can retire the
+lost device while the node is up. `LocalStatus` and `Status` (19.1.3)
+report the device with `available` false and no space; the document's
+state (`active`, `draining`) is unchanged, because availability is what
+the node observes and state is what the administrator decided.
+`djbod status` prints `active, unavailable`. Placement (10.4),
+re-placement (18.8.2), and repair (18.3) choose only available devices,
+and a request naming the device is refused with `DeviceUnavailable`.
 
 ## 6. Configuration
 
@@ -1632,8 +1651,9 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: none. Response: cluster id, cluster name if set (6.2.5.3),
   document version, coordinator node
   UUID, every node asked with the build it reported (6.2.6.4), and for
-  every device in the cluster: UUID, owning node, state, total bytes,
-  free bytes. Implemented by broadcasting `LocalStatus`.
+  every device in the cluster: UUID, owning node, state, whether its
+  node can read it (5.6), total bytes, free bytes. Implemented by
+  broadcasting `LocalStatus`.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
@@ -1717,8 +1737,8 @@ coordinator, and those nodes send to each other. Every response is either
 
 `LocalStatus`
 : Request: none. Response: node UUID, document version, the node's
-  build (6.2.6.4), and for each local device: UUID, state, total bytes,
-  free bytes (5.5).
+  build (6.2.6.4), and for each local device: UUID, state, whether the
+  node can read it (5.6), total bytes, free bytes (5.5).
 
 `LocalLookup`
 : Request: key hash, optional cursor (the last version and device of the

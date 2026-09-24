@@ -1025,7 +1025,7 @@ fn place(
 ) -> Result<Vec<DeviceStatus>, Failure> {
     let mut eligible: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active && d.free_bytes >= shard_bytes)
+        .filter(|d| d.state == DeviceState::Active && d.available && d.free_bytes >= shard_bytes)
         .collect();
     eligible.sort_by(|a, b| {
         b.free_bytes
@@ -1918,6 +1918,7 @@ async fn relocate_lost_shards(
         .into_iter()
         .filter(|d| {
             d.state == DeviceState::Active
+                && d.available
                 && d.free_bytes >= shard_bytes
                 && !devices.contains(&d.device)
         })
@@ -2250,6 +2251,7 @@ async fn move_shard_of_record(
     let devices: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
     let eligible = |d: &DeviceStatus| {
         d.state == DeviceState::Active
+            && d.available
             && d.free_bytes >= shard_bytes
             && !devices.contains(&d.device)
     };
@@ -2429,7 +2431,7 @@ async fn drain(
     let required_devices = document.k as u64 + document.m as u64;
     let active: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active)
+        .filter(|d| d.state == DeviceState::Active && d.available)
         .collect();
     let target_free_bytes: u64 = active.iter().map(|d| d.free_bytes).sum();
     let mut shard_bytes: u64 = 0;

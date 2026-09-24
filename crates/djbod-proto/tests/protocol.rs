@@ -455,6 +455,7 @@ fn every_response_round_trips() {
         label: Some("nas1-bay0".to_string()),
         node_label: Some("nas1".to_string()),
         state: DeviceState::Active,
+        available: true,
         total_bytes: 4 << 40,
         free_bytes: 3 << 40,
     };

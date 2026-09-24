@@ -931,3 +931,50 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
         Err(other) => panic!("expected SameFilesystem, got {other:?}"),
     }
 }
+
+/// SPEC 5.6: a node starts without a device whose path is gone, and
+/// reports that device unavailable rather than refusing to start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
+    let test = start_node(3, 2, 1).await;
+    let dead = test.devices()[2];
+    std::fs::remove_dir_all(test.device_root(dead)).expect("destroy the device directory");
+    let reopened = Arc::new(Node::open(test.node.config().clone()).expect("starts without it"));
+    assert_eq!(reopened.devices().len(), 2);
+    assert_eq!(reopened.unavailable_devices(), vec![dead]);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(server::serve(reopened.clone(), listener));
+    let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
+        .await
+        .expect("connect");
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 3);
+            let missing = devices.iter().find(|d| d.device == dead).expect("listed");
+            assert!(!missing.available);
+            assert_eq!(missing.state, DeviceState::Active);
+            assert_eq!(missing.total_bytes, 0);
+            assert!(devices
+                .iter()
+                .filter(|d| d.device != dead)
+                .all(|d| d.available));
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+    // A request naming it is refused as unavailable, not as unknown.
+    match conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await
+    {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert!(detail.message.contains("unavailable"), "{detail:?}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

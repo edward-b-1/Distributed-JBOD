@@ -593,6 +593,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices, &nodes));
+                        let unavailable = devices.iter().filter(|d| !d.available).count();
+                        if unavailable > 0 {
+                            eprintln!(
+                                "{unavailable} device(s) unavailable: their node cannot read them (disk failed or not mounted)"
+                            );
+                        }
                     }
                 }
             }
