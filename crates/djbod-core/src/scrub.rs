@@ -96,6 +96,10 @@ pub enum Finding {
     },
     /// A temporary file older than the configured age.
     StaleTemporary { path: PathBuf, age_secs: u64 },
+    /// The device cannot be read at all (SPEC 5.6): its directory or
+    /// identity file is gone, or no configured path holds it. One
+    /// finding, and nothing more is read from it.
+    DeviceUnavailable { reason: String },
 }
 
 impl Finding {
@@ -165,10 +169,40 @@ pub fn scrub_device(
         device: Some(device.id()),
         ..ScrubSummary::default()
     };
+    match device.check_present() {
+        Ok(()) => {}
+        Err(e @ DeviceError::Unavailable { .. }) => {
+            report(
+                &mut summary,
+                on_finding,
+                Finding::DeviceUnavailable {
+                    reason: e.to_string(),
+                },
+            );
+            return Ok(summary);
+        }
+        Err(e) => return Err(e),
+    }
     let mut limiter = RateLimiter::new(options.max_bytes_per_second);
     let now = SystemTime::now();
 
-    for key_dir in device.key_directories()? {
+    // The tree may go between the check above and here; that is the same
+    // finding, not an error.
+    let key_directories = match device.key_directories() {
+        Ok(dirs) => dirs,
+        Err(e @ DeviceError::Unavailable { .. }) => {
+            report(
+                &mut summary,
+                on_finding,
+                Finding::DeviceUnavailable {
+                    reason: e.to_string(),
+                },
+            );
+            return Ok(summary);
+        }
+        Err(e) => return Err(e),
+    };
+    for key_dir in key_directories {
         let expected_hash = key_dir
             .file_name()
             .and_then(|n| n.to_str())

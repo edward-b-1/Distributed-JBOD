@@ -32,7 +32,7 @@ use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_core::stripe::FaultKind;
-use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Reconstruction};
+use djbod_proto::message::{DrainEvent, ErrorCode, ErrorDetail, ListQuery, Reconstruction};
 
 mod tables;
 
@@ -540,7 +540,21 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
             let mut rows = Vec::with_capacity(chosen.len());
             for device in chosen {
-                rows.push(client.device_contents(device).await.map_err(client_err)?);
+                match client.device_contents(device).await {
+                    Ok(contents) => rows.push(contents),
+                    // A device its node cannot read (5.6) has no counts;
+                    // say so and go on with the others.
+                    Err(e)
+                        if e.detail()
+                            .is_some_and(|d| d.code == ErrorCode::DeviceUnavailable) =>
+                    {
+                        eprintln!(
+                            "{device} unavailable: {}",
+                            e.detail().map(|d| d.message.clone()).unwrap_or_default()
+                        );
+                    }
+                    Err(e) => return Err(client_err(e)),
+                }
             }
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -594,10 +608,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices, &nodes));
-                        let unavailable = devices.iter().filter(|d| !d.available).count();
-                        if unavailable > 0 {
+                        let unavailable_count = devices.iter().filter(|d| !d.available).count();
+                        if unavailable_count > 0 {
                             eprintln!(
-                                "{unavailable} device(s) unavailable: their node cannot read them (disk failed or not mounted)"
+                                "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed)"
                             );
                         }
                     }
@@ -787,12 +801,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut findings = 0usize;
             let mut repairs = 0usize;
             let mut repair_failures = 0usize;
+            let mut unavailable_devices = 0usize;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
                         // Counted whatever the output mode: the exit code
-                        // depends on it (SPEC 20.1.2.3).
+                        // depends on it (SPEC 20.1.2.3). A device that could
+                        // not be read is not damage found but data not
+                        // checked: it makes the run incomplete (5.6).
                         match &event {
+                            ScrubEvent::NodeFinding {
+                                finding: djbod_core::scrub::Finding::DeviceUnavailable { .. },
+                                ..
+                            } => unavailable_devices += 1,
                             ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_) => {
                                 findings += 1
                             }
@@ -879,19 +900,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     Err(end) => break end,
                 }
             };
-            // Incomplete means a node could not be scrubbed or the checks
-            // stopped; failed repairs end the stream with WriteFailed and
-            // the run is still complete.
-            let incomplete = end
-                .error
-                .as_ref()
-                .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
+            // Incomplete means a node could not be scrubbed, the checks
+            // stopped, or a device could not be read; failed repairs end
+            // the stream with WriteFailed and the run is still complete.
+            let incomplete = unavailable_devices > 0
+                || end
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
             let code = scrub_exit_code(*repair, incomplete, findings, repair_failures);
             if !cli.json {
                 eprintln!(
                     "{findings} finding(s), {repairs} repair(s), {repair_failures} failed repair(s): {}",
                     scrub_outcome(*repair, incomplete, findings, repair_failures)
                 );
+                if unavailable_devices > 0 {
+                    eprintln!(
+                        "{unavailable_devices} device(s) unavailable, not checked: restore or retire them, then run again"
+                    );
+                }
                 if let Some(error) = &end.error {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
                 }
@@ -1859,6 +1886,7 @@ fn describe_scrub_finding(finding: &djbod_core::scrub::Finding) -> String {
         StaleTemporary { path, age_secs } => {
             format!("stale temporary: {}  {age_secs}s old", path.display())
         }
+        DeviceUnavailable { reason } => format!("device unavailable: {reason}"),
     }
 }
 

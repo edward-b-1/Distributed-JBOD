@@ -335,9 +335,9 @@ pub struct DeviceStatus {
     pub device: DeviceId,
     pub node: NodeId,
     pub state: DeviceState,
-    /// False when the node cannot read the device (SPEC 5.6): no
-    /// configured path holds it, because the disk failed or was not
-    /// mounted. Total and free are then 0 and nothing is placed on it.
+    /// False when the node cannot read the device (SPEC 5.6): the disk
+    /// failed, is not mounted, or was destroyed. Total and free are then 0
+    /// and nothing is placed on it.
     pub available: bool,
     /// The device's label from the cluster document, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
