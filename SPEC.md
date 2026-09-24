@@ -236,9 +236,13 @@ lost device while the node is up. `LocalStatus` and `Status` (19.1.3)
 report the device with `available` false and no space; the document's
 state (`active`, `draining`) is unchanged, because availability is what
 the node observes and state is what the administrator decided.
-`djbod status` prints `active, unavailable`. Placement (10.4),
-re-placement (18.8.2), and repair (18.3) choose only available devices,
-and a request naming the device is refused with `DeviceUnavailable`.
+`djbod status` prints `active, unavailable`. A client write is refused
+with `DeviceUnavailable` while any active device is unavailable, naming
+it: there is no alerting subsystem, and the refusal is how the operator
+learns of the failure (the README says why). Re-placement (18.8.2) and
+repair (18.3), which are how it is put right, choose among the
+available devices. A request naming the device is refused with
+`DeviceUnavailable`.
 
 ## 6. Configuration
 

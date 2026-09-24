@@ -1017,15 +1017,34 @@ struct ShardWriter {
 }
 
 /// Choose k+m distinct active devices with room for a shard file, most
-/// free space first, ties by device id (10.4, 10.5).
+/// free space first, ties by device id (10.4, 10.5). A client write is
+/// refused while any active device is unavailable (5.6): the refusal,
+/// naming the device, is how the operator learns of the failure. Repair
+/// and re-placement, which put it right, choose among the rest instead.
 fn place(
     statuses: &[DeviceStatus],
     scheme: Scheme,
     shard_bytes: u64,
 ) -> Result<Vec<DeviceStatus>, Failure> {
+    if let Some(d) = statuses
+        .iter()
+        .find(|d| d.state == DeviceState::Active && !d.available)
+    {
+        return Err(Failure::Error(ErrorDetail {
+            node: Some(d.node),
+            device: Some(d.device),
+            ..ErrorDetail::new(
+                ErrorCode::DeviceUnavailable,
+                format!(
+                    "device {} on node {} is unavailable: the disk failed or is not mounted; writes are refused until it is repaired or removed (SPEC 5.6)",
+                    d.device.0, d.node.0
+                ),
+            )
+        }));
+    }
     let mut eligible: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active && d.available && d.free_bytes >= shard_bytes)
+        .filter(|d| d.state == DeviceState::Active && d.free_bytes >= shard_bytes)
         .collect();
     eligible.sort_by(|a, b| {
         b.free_bytes
@@ -3577,6 +3596,43 @@ mod tests {
             device: device(device_number),
             record: record.clone(),
             shard_present,
+        }
+    }
+
+    /// SPEC 5.6: a client write is refused while an active device is
+    /// unavailable, naming it; the refusal is the alarm.
+    #[test]
+    fn placement_refuses_while_an_active_device_is_unavailable() {
+        let status = |n: u128, available: bool| DeviceStatus {
+            device: device(n),
+            node: node(1),
+            state: DeviceState::Active,
+            available,
+            label: None,
+            node_label: None,
+            total_bytes: 1 << 40,
+            free_bytes: 1 << 40,
+        };
+        let scheme = Scheme::new(2, 1).expect("scheme");
+        let all_present = [
+            status(1, true),
+            status(2, true),
+            status(3, true),
+            status(4, true),
+        ];
+        assert_eq!(place(&all_present, scheme, 1000).expect("placed").len(), 3);
+        let one_gone = [
+            status(1, true),
+            status(2, true),
+            status(3, true),
+            status(4, false),
+        ];
+        match place(&one_gone, scheme, 1000) {
+            Err(Failure::Error(detail)) => {
+                assert_eq!(detail.code, ErrorCode::DeviceUnavailable);
+                assert_eq!(detail.device, Some(device(4)));
+            }
+            other => panic!("expected a refusal, got {other:?}"),
         }
     }
 
