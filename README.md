@@ -142,8 +142,66 @@ What none of them offer is the recovery story: each object here is a
 plain JSON record beside a shard file on each disk, in a layout you can
 read, and `djbod-recover` reads the objects back from bare disks with
 nothing running. Where they win, they win clearly: S3 compatibility,
-scale, and years of production use. Distributed-JBOD is young, as the
-[Status](#status) section says.
+scale, years of production use, and self-management, which this
+project does not aim at, as the next section says. Distributed-JBOD is
+young, as the [Status](#status) section says.
+
+## When something fails
+
+Distributed-JBOD is built for one person's data on a few machines: a
+researcher who is also the administrator, a dataset of many terabytes,
+and consumer hardware that is probably aging. That sets the priorities.
+Durability first: erasure coding across every disk, and a checksum on
+every block, every record, and every object. Detection second: nothing
+wrong is ever read past, and nothing wrong is ever quiet. Then
+availability, of the kind the coding buys: the cluster keeps serving
+through the failures it was designed to survive, up to `m` disks, and
+does not pretend to more.
+
+Reads and writes both do what they can. A read that meets a bad block,
+a shard whose file is missing, or a shard on a disk or machine that
+cannot be reached rebuilds the data from parity and hands it back, and
+says on the way out what it had to rebuild and where. Expect such a
+read to be slower: from the first damaged stripe on, the node fetches
+the parity shards as well as the data and decodes every stripe, so a
+read that would have touched `k` disks touches `k + m` and spends CPU
+it otherwise would not, and it does so on every read of that object
+until a repair puts the disk right. The warning that comes back with
+the data is the cue to run one. Only damage beyond `m`, or record
+copies that disagree, fails the read. A write is
+placed on the emptiest disks the cluster can read, skipping ones it
+cannot, is attempted once, and fails with the node's own words if a
+disk refuses it; there is no second guess at another disk. When a write
+had to go around a dead disk, it says so.
+
+There is no alerting subsystem, no notification hook, no health daemon,
+and none is planned. The alarm is the operation. The reconstruction, the
+skipped disk, or the failure arrives with the result, as a warning or an
+error, and your notebook or batch job sees it, which is how you find
+out, at the moment you would want to. `djbod status` and the web UI
+show the same facts on demand. `djbod scrub`, run by hand or from cron,
+checks every disk and every object and exits non-zero when it finds
+damage, so a scheduled scrub is one line of crontab and its exit code
+is the whole integration.
+
+Repair is a command, not a background process. `djbod repair <key>`
+rebuilds one object; `djbod scrub --repair` rebuilds everything the
+checks found; `djbod cluster remove-node --force` retires a machine
+that will never come back and rebuilds what it held elsewhere, and a
+device-level equivalent is planned. Each says what it will cost before
+it acts, and nothing moves data on its own.
+
+That last sentence is the line this project draws. The operations are
+forgiving; the cluster is not self-managing. A system that also heals
+itself with nobody watching needs a quorum service for its
+configuration, failure detectors, automatic rebalancing and rebuilding,
+and retries around every transient error, and those are the parts that
+make Ceph a job to run. Here one person can read the whole design,
+every piece of state is a file you can inspect, a degraded read or
+write tells you it was degraded, and putting things right is a decision
+you take with the cost in front of you. If you need a cluster that
+repairs and rebalances itself while nobody is looking, you need one of
+the systems above.
 
 ## The tools
 
