@@ -854,7 +854,7 @@ async fn read_stripe_blocks(
 /// A shard a read could not open and will reconstruct around from the
 /// first stripe (11.4), and why. `Unavailable` may be temporary; the
 /// others will not mend themselves.
-struct ErasedShard {
+struct UnreadableShard {
     index: ShardIndex,
     device: DeviceId,
     fault: FaultKind,
@@ -863,11 +863,12 @@ struct ErasedShard {
     first_stripe: u64,
 }
 
-/// Open the shards of `indices` from `first_block` on, treating one that
-/// cannot be opened as erased rather than failing (11.4): a missing or
-/// unreadable file, a device that is unavailable, or a node that cannot
-/// be reached. A node that answers wrongly is still an error.
-async fn open_or_erase(
+/// Open the shards of `indices` from `first_block` on. One that cannot be
+/// opened is returned separately, to be reconstructed around, rather than
+/// failing the read (11.4): a missing or unreadable file, a device that
+/// is unavailable, or a node that cannot be reached. A node that answers
+/// wrongly is still an error.
+async fn open_shards(
     node: &Arc<Node>,
     document: &ClusterDocument,
     record: &MetadataRecord,
@@ -875,9 +876,9 @@ async fn open_or_erase(
     indices: &[ShardIndex],
     first_block: u64,
     block_count: u64,
-) -> Result<(Vec<ShardSource>, Vec<ErasedShard>), Failure> {
+) -> Result<(Vec<ShardSource>, Vec<UnreadableShard>), Failure> {
     let mut sources = Vec::with_capacity(indices.len());
-    let mut erased = Vec::new();
+    let mut unreadable = Vec::new();
     for &index in indices {
         let device = record
             .device_for(index)
@@ -909,7 +910,7 @@ async fn open_or_erase(
                         reason: detail.message,
                     },
                 };
-                erased.push(ErasedShard {
+                unreadable.push(UnreadableShard {
                     index,
                     device,
                     fault,
@@ -919,20 +920,24 @@ async fn open_or_erase(
             Err(other) => return Err(other),
         }
     }
-    Ok((sources, erased))
+    Ok((sources, unreadable))
 }
 
 /// The refusal when more than m shards cannot be read (11.4, 16.1): the
 /// first shard's own code, since a node down and a file gone call for
 /// different actions, and the whole list in the message.
-fn too_many_erased(key: &str, record: &MetadataRecord, erased: &[ErasedShard]) -> ErrorDetail {
-    let first = &erased[0];
+fn too_many_unreadable(
+    key: &str,
+    record: &MetadataRecord,
+    unreadable: &[UnreadableShard],
+) -> ErrorDetail {
+    let first = &unreadable[0];
     let code = match &first.fault {
         FaultKind::Missing => ErrorCode::NotFound,
         FaultKind::Unavailable { .. } => ErrorCode::DeviceUnavailable,
         _ => ErrorCode::BlockChecksumMismatch,
     };
-    let list: Vec<String> = erased
+    let list: Vec<String> = unreadable
         .iter()
         .map(|e| format!("shard {} on {}: {:?}", e.index.0, e.device, e.fault))
         .collect();
@@ -945,7 +950,7 @@ fn too_many_erased(key: &str, record: &MetadataRecord, erased: &[ErasedShard]) -
             code,
             format!(
                 "{} of {} shards cannot be read and at most {} may be: {}",
-                erased.len(),
+                unreadable.len(),
                 record.k as usize + record.m as usize,
                 record.m,
                 list.join("; ")
@@ -994,8 +999,9 @@ async fn get_object(
     };
 
     // Open one block stream per data shard before answering the client.
-    // A shard that cannot be opened is erased from the first stripe and
-    // parity is opened at once; more than m erased is the refusal (11.4).
+    // A shard that cannot be opened is reconstructed around from the
+    // first stripe and parity is opened at once; more than m such shards
+    // is the refusal (11.4).
     // Parity is otherwise not read unless a block turns out damaged.
     let data_indices = scheme.data_shard_indices();
     let all_indices = scheme.shard_indices();
@@ -1005,10 +1011,10 @@ async fn get_object(
         .filter(|i| !data_indices.contains(i))
         .collect();
     let mut sources: Vec<ShardSource> = Vec::new();
-    let mut erased: Vec<ErasedShard> = Vec::new();
+    let mut unreadable: Vec<UnreadableShard> = Vec::new();
     let mut parity_open = false;
     if record.size > 0 {
-        let opened = open_or_erase(
+        let opened = open_shards(
             node,
             &document,
             &record,
@@ -1021,12 +1027,12 @@ async fn get_object(
         match opened {
             Ok((opened, missing)) => {
                 sources.extend(opened);
-                erased.extend(missing);
+                unreadable.extend(missing);
             }
             Err(f) => return respond(writer, id, Err(f)).await,
         }
-        if !erased.is_empty() {
-            let opened = open_or_erase(
+        if !unreadable.is_empty() {
+            let opened = open_shards(
                 node,
                 &document,
                 &record,
@@ -1039,14 +1045,14 @@ async fn get_object(
             match opened {
                 Ok((opened, missing)) => {
                     sources.extend(opened);
-                    erased.extend(missing);
+                    unreadable.extend(missing);
                 }
                 Err(f) => return respond(writer, id, Err(f)).await,
             }
             parity_open = true;
         }
-        if erased.len() > scheme.parity_shards() {
-            let detail = too_many_erased(key, &record, &erased);
+        if unreadable.len() > scheme.parity_shards() {
+            let detail = too_many_unreadable(key, &record, &unreadable);
             return respond(writer, id, Err(Failure::Error(detail))).await;
         }
     }
@@ -1073,9 +1079,9 @@ async fn get_object(
             Err(detail) => return Err(fail_and_close(writer, id, detail).await),
         };
         let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
-        // Only the shards with a stream are asked for; an erased shard is
-        // simply not among them, and the decoder rebuilds the data from
-        // whatever k it has.
+        // Only the shards with a stream are asked for; one that could not
+        // be opened is simply not among them, and the decoder rebuilds the
+        // data from whatever k it has.
         let requested: Vec<ShardIndex> = sources.iter().map(|s| s.index).collect();
         let internal = |e: djbod_core::stripe::StripeError| ErrorDetail {
             key: Some(key.to_string()),
@@ -1091,7 +1097,7 @@ async fn get_object(
             // A damaged block: fetch the parity shards from this stripe
             // on and decode again from every block (11.4). Nothing is
             // written to any device; the damage is reported at the end.
-            let opened = open_or_erase(
+            let opened = open_shards(
                 node,
                 &document,
                 &record,
@@ -1103,7 +1109,7 @@ async fn get_object(
             .await;
             let mut parity = match opened {
                 Ok((opened, missing)) => {
-                    erased.extend(missing);
+                    unreadable.extend(missing);
                     opened
                 }
                 Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
@@ -1125,7 +1131,7 @@ async fn get_object(
             DecodedStripe::Intact { data } => data,
             DecodedStripe::Repaired { data, faults } => {
                 for fault in faults {
-                    if erased.iter().any(|e| e.index == fault.index) {
+                    if unreadable.iter().any(|u| u.index == fault.index) {
                         continue; // reported once for every stripe below
                     }
                     reconstructed.push(Reconstruction {
@@ -1186,7 +1192,7 @@ async fn get_object(
     }
     // A shard that could not be opened was reconstructed around in every
     // stripe from the one where it was first wanted.
-    for shard in erased {
+    for shard in unreadable {
         reconstructed.push(Reconstruction {
             shard_index: shard.index.0,
             device: shard.device,
