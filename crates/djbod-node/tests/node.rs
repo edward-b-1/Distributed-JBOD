@@ -932,6 +932,59 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
     }
 }
 
+/// SPEC 5.6: a device whose directory is destroyed while the node runs is
+/// reported unavailable, refuses a write rather than recreating the
+/// directory, and lists no records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_device_is_unavailable_and_not_recreated() {
+    let test = start_node(3, 2, 1).await;
+    let mut conn = test.connect_as_node().await;
+    let object = xorshift64_bytes(3 * BLOCK as usize + 17, 5);
+    let record = store_object(&test, &mut conn, "k", VersionId([5u8; 16]), &object).await;
+    let dead = test.devices()[1];
+    let root = test.device_root(dead);
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 3);
+            for status in &devices {
+                assert_eq!(status.available, status.device != dead, "{status:?}");
+                assert_eq!(status.total_bytes == 0, status.device == dead, "{status:?}");
+            }
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+
+    let refused = conn
+        .request(Request::PutMeta {
+            device: dead,
+            record: record.clone(),
+        })
+        .await;
+    match refused {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert_eq!(detail.device, Some(dead));
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(!root.exists(), "the write recreated {}", root.display());
+
+    let listed = conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await;
+    match listed {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
 /// SPEC 5.6: a node starts without a device whose path is gone, reports
 /// that device unavailable rather than refusing to start, refuses a
 /// request naming it, and places a write around it, saying so.

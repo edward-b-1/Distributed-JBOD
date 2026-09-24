@@ -1264,3 +1264,85 @@ fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     out
 }
+
+/// SPEC 5.6: a device whose directory is gone shows as unavailable in
+/// `status` and is skipped by `contents`; the scrub reports it once and
+/// does not report every version that named it; a write goes elsewhere
+/// and nothing is recreated at the dead path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_destroyed_device_is_reported_unavailable() {
+    let test = start_node(4, 2, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(200_000, 3)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // A device that holds a copy of the object's record.
+    let dead = test
+        .node
+        .devices()
+        .iter()
+        .find(|d| {
+            walk(d.root())
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with(".meta.json"))
+        })
+        .expect("a device with the record")
+        .clone();
+    let root = dead.root().to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    let (ok, out, err) = djbod(&test, &["status"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
+    assert!(err.contains("1 device(s) unavailable"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    for entry in json["devices"].as_array().expect("devices") {
+        let is_dead = entry["device"].as_str() == Some(&dead.id().0.to_string());
+        assert_eq!(entry["available"].as_bool(), Some(!is_dead), "{entry}");
+    }
+
+    let (ok, out, err) = djbod(&test, &["contents"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 4, "{out}");
+    assert!(err.contains(&format!("{} unavailable", dead.id())), "{err}");
+
+    // The device's contents were not checked: not damage, an incomplete
+    // run, exit 3, and no per-key noise for the copies it held.
+    let scrub = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "scrub",
+        ])
+        .output()
+        .expect("run djbod");
+    let out = String::from_utf8_lossy(&scrub.stdout);
+    let err = String::from_utf8_lossy(&scrub.stderr);
+    assert_eq!(scrub.status.code(), Some(3), "{out}{err}");
+    assert!(out.contains("device unavailable"), "{out}");
+    assert!(!out.contains("RecordsInconsistent"), "{out}");
+    assert!(!out.contains("ShardMissingOnDevice"), "{out}");
+    assert!(err.contains("0 finding(s)"), "{err}");
+    assert!(err.contains("incomplete"), "{err}");
+    assert!(
+        err.contains("1 device(s) unavailable, not checked"),
+        "{err}"
+    );
+
+    // A write goes around the device, says so, and exits 2 (SPEC 5.6);
+    // nothing is recreated at the dead path.
+    let (ok, out, err) = djbod(&test, &["put", "k2", source.to_str().unwrap()]);
+    assert!(!ok, "{out}{err}");
+    assert!(out.contains("stored k2 as version"), "{out}");
+    assert!(
+        err.contains("placed around 1 unavailable device(s)"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(!root.exists(), "{} was recreated", root.display());
+}

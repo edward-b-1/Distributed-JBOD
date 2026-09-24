@@ -686,3 +686,49 @@ fn walk_records_from_a_cursor_resumes_in_hash_order_and_reports_shard_presence()
         .expect("walk with stop");
     assert_eq!(count, 3);
 }
+
+/// SPEC 5.6: a write creates the partition and key directories with plain
+/// `mkdir` and never the objects tree above them; with the tree gone the
+/// write is refused as unavailable and nothing reappears.
+#[test]
+fn a_write_never_recreates_the_objects_tree() {
+    let dirs: Vec<tempfile::TempDir> = (0..3)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let devices: Vec<Device> = dirs.iter().map(|d| new_device(d.path())).collect();
+    let scheme = Scheme::new(2, 1).expect("scheme");
+    let object = xorshift64_bytes(3000, 4);
+    let record = store_object(&devices, scheme, "k", VersionId([4u8; 16]), &object);
+    let device = &devices[0];
+    let dir = &dirs[0];
+    let objects = dir.path().join("objects");
+    fs::remove_dir_all(&objects).expect("destroy the objects tree");
+
+    let mut again = record.clone();
+    again.version = VersionId([5u8; 16]);
+    assert!(matches!(
+        device.write_record(&again),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    let header = ShardFileHeader {
+        scheme,
+        shard_index: ShardIndex(0),
+        key_hash: record.key_hash,
+        version_id: again.version,
+        block_length: record.block_size,
+    };
+    assert!(matches!(
+        device.begin_shard(&record.key_hash, header, object.len() as u64),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    assert!(!objects.exists(), "the write recreated the objects tree");
+
+    // The identity file alone is not enough either: the tree is made by
+    // initialise and by nothing else.
+    fs::remove_file(dir.path().join(DEVICE_IDENTITY_FILE)).expect("remove identity");
+    assert!(matches!(
+        device.write_record(&again),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    assert!(!objects.exists());
+}

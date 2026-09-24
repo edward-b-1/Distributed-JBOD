@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use djbod_core::cluster::DeviceState;
-use djbod_core::device::{Device, DeviceError, ShardWrite, WalkStep};
+use djbod_core::device::{Device, DeviceError, ShardWrite, SpaceReport, WalkStep};
 use djbod_core::erasure::{Scheme, ShardIndex};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::layout::shard_file_name;
@@ -238,7 +238,7 @@ pub(crate) fn device_error_detail(e: DeviceError) -> ErrorDetail {
         {
             ErrorCode::NotFound
         }
-        DeviceError::Io { .. } => ErrorCode::DeviceUnavailable,
+        DeviceError::Io { .. } | DeviceError::Unavailable { .. } => ErrorCode::DeviceUnavailable,
         DeviceError::Record { .. } => ErrorCode::RecordsInconsistent,
         DeviceError::RecordExists { .. } => ErrorCode::WriteFailed,
         DeviceError::ShardFile(_) | DeviceError::BadObjectSize { .. } => ErrorCode::WriteFailed,
@@ -299,17 +299,33 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
     for device in node.devices() {
         let headroom = document.headroom;
         let id = device.id();
-        let space = blocking(move || device.space(headroom))
-            .await
-            .map_err(|f| match f {
-                Failure::Error(d) => Failure::Error(with_device(d, id)),
-                other => other,
-            })?;
+        // A device that cannot report its space is unavailable (5.6):
+        // shown as such with nothing free, rather than failing the whole
+        // status. Logged when it becomes so, and when it is back.
+        let (available, space) = match blocking(move || device.space(headroom)).await {
+            Ok(space) => (true, space),
+            Err(Failure::Error(detail)) => {
+                if node.note_availability(id, false) {
+                    tracing::warn!(device = %id, reason = %detail.message, "device unavailable");
+                }
+                (
+                    false,
+                    SpaceReport {
+                        total_bytes: 0,
+                        free_bytes: 0,
+                    },
+                )
+            }
+            Err(other) => return Err(other),
+        };
+        if available && node.note_availability(id, true) {
+            tracing::info!(device = %id, "device available again");
+        }
         devices.push(DeviceStatus {
             device: id,
             node: node.id(),
             state: state_of(id),
-            available: true,
+            available,
             label: document.device(id).and_then(|d| d.label.clone()),
             node_label: node_label.clone(),
             total_bytes: space.total_bytes,
@@ -960,7 +976,28 @@ async fn local_scrub(
     };
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubItem>(64);
     let devices = node.devices();
+    let unavailable = node.unavailable_devices();
     let engine = tokio::task::spawn_blocking(move || -> Result<(), DeviceError> {
+        // A listed device no configured path holds (5.6): one finding
+        // and an empty summary, as the engine reports one it cannot read.
+        for device_id in unavailable {
+            let finding = djbod_core::scrub::Finding::DeviceUnavailable {
+                reason: "not opened at startup: no configured path holds this device (SPEC 5.6)"
+                    .to_string(),
+            };
+            let _ = sender.blocking_send(ScrubItem::Finding {
+                device: device_id,
+                finding: finding.clone(),
+            });
+            let _ = sender.blocking_send(ScrubItem::Summary {
+                device: device_id,
+                summary: djbod_core::scrub::ScrubSummary {
+                    device: Some(device_id),
+                    findings: vec![finding],
+                    ..Default::default()
+                },
+            });
+        }
         for device in devices {
             let device_id = device.id();
             let sender_for_findings = sender.clone();

@@ -72,6 +72,10 @@ pub enum DeviceError {
         "{path} has an objects directory but no identity file; the identity file was deleted or the directory belongs to something else"
     )]
     ForeignDirectory { path: PathBuf },
+    #[error(
+        "device at {path} is unavailable: its directory or identity file cannot be read; the disk failed, is not mounted, or was destroyed (SPEC 5.6)"
+    )]
+    Unavailable { path: PathBuf },
     #[error("identity file at {path} is not valid: {reason}")]
     BadIdentity { path: PathBuf, reason: String },
     #[error("device {device:?} at {path} belongs to cluster {actual}, not {expected}")]
@@ -299,6 +303,23 @@ impl Device {
         &self.root
     }
 
+    /// Whether the device is still there: its identity file can be read
+    /// (5.6). For reports, the space report and the scrub, where it is the
+    /// only thing that tells an empty mount point from a disk. Writes and
+    /// listings do not check first; they fail on the missing tree and
+    /// report that as unavailable, so there is no window between a check
+    /// and the act.
+    pub fn check_present(&self) -> Result<(), DeviceError> {
+        let identity_path = self.root.join(DEVICE_IDENTITY_FILE);
+        match fs::metadata(&identity_path) {
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeviceError::Unavailable {
+                path: self.root.clone(),
+            }),
+            Err(e) => Err(io_error(&identity_path, e)),
+        }
+    }
+
     pub fn id(&self) -> DeviceId {
         self.identity.device_id
     }
@@ -324,6 +345,7 @@ impl Device {
     /// Total size of the filesystem and the bytes this system may still
     /// use on it (5.5).
     pub fn space(&self, headroom: f64) -> Result<SpaceReport, DeviceError> {
+        self.check_present()?;
         let stat = rustix::fs::statvfs(&self.root)
             .map_err(|errno| io_error(&self.root, io::Error::from(errno)))?;
         let available = stat.f_bavail * stat.f_frsize;
@@ -354,11 +376,48 @@ impl Device {
         object_directory(&self.root, DEFAULT_BUCKET, key_hash)
     }
 
+    /// The key directory for a write, created if absent: the two
+    /// partition levels and the key directory itself (9.1.2), each with a
+    /// plain `mkdir`, and nothing above them. The bucket and the objects
+    /// tree are made only by `initialise`, so a write can never rebuild a
+    /// device whose tree has gone: the `mkdir` finds no parent, and that
+    /// is the device being unavailable (5.6).
+    fn create_key_directory(&self, key_hash: &KeyHash) -> Result<PathBuf, DeviceError> {
+        let mut path = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
+        for component in key_hash.directory_components() {
+            path.push(component);
+            match fs::create_dir(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    return Err(DeviceError::Unavailable {
+                        path: self.root.clone(),
+                    })
+                }
+                Err(e) => return Err(io_error(&path, e)),
+            }
+        }
+        Ok(path)
+    }
+
+    /// The bucket's partition directories, in order. A bucket that cannot
+    /// be found is the device being unavailable (5.6); anything missing
+    /// below it was deleted meanwhile and reads as empty.
+    fn read_bucket(&self) -> Result<Vec<PathBuf>, DeviceError> {
+        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
+        match fs::read_dir(&bucket) {
+            Ok(_) => read_dir_sorted(&bucket),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeviceError::Unavailable {
+                path: self.root.clone(),
+            }),
+            Err(e) => Err(io_error(&bucket, e)),
+        }
+    }
+
     /// Every key directory on this device, in path order.
     pub fn key_directories(&self) -> Result<Vec<PathBuf>, DeviceError> {
-        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
         let mut out = Vec::new();
-        for first in read_dir_sorted(&bucket)? {
+        for first in self.read_bucket()? {
             for second in read_dir_sorted(&first)? {
                 for key_dir in read_dir_sorted(&second)? {
                     if key_dir.is_dir() {
@@ -381,8 +440,7 @@ impl Device {
     ) -> Result<ShardWrite, DeviceError> {
         let length = shard_file_length(header.scheme, header.block_length, object_size)
             .ok_or(DeviceError::BadObjectSize { object_size })?;
-        let dir = self.object_directory(key_hash);
-        fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+        let dir = self.create_key_directory(key_hash)?;
         let final_path = dir.join(shard_file_name(&header.version_id, header.shard_index));
         let temp_path = temporary_path(&final_path);
         let writer = ShardFileWriter::create_with_reservation(&temp_path, header, Some(length))?;
@@ -404,7 +462,7 @@ impl Device {
             path: dir.clone(),
             source,
         })?;
-        fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+        self.create_key_directory(&record.key_hash)?;
         let path = dir.join(record_file_name(&record.version));
         if path.exists() {
             let existing = self.read_record(&record.key_hash, &record.version)?;
@@ -552,8 +610,7 @@ impl Device {
                 .to_string_lossy()
                 .into_owned()
         };
-        let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
-        for first in read_dir_sorted(&bucket)? {
+        for first in self.read_bucket()? {
             let first_name = name_of(&first);
             // Whether this directory is the one the cursor is in: only
             // then does the next level need comparing; before it, skip.

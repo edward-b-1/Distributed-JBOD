@@ -227,26 +227,54 @@ reservations currently in flight on that device (if reservation is used,
 10.6).
 
 5.6 [D] **An unavailable device.** A device the node cannot read is
-*unavailable*: at startup, a device the cluster document lists for this
-node that no configured path opened (5.4), because the disk failed or
-was never mounted. A disk failure is a device failure, not a node
-failure: the node starts and serves its other devices, so that the
-cluster keeps every copy they hold and the administrator can retire the
-lost device while the node is up. `LocalStatus` and `Status` (19.1.3)
-report the device with `available` false and no space; the document's
-state (`active`, `draining`) is unchanged, because availability is what
-the node observes and state is what the administrator decided.
-`djbod status` prints `active, unavailable`. Placement (10.4),
-re-placement (18.8.2), and repair (18.3) leave an unavailable device
-out as they leave out a full one: a write goes ahead on the others if
-k+m of them have room, and is refused with `InsufficientDevices`,
-naming the unavailable devices, if not. A write that went around an
-unavailable device says so in its response, as a read says what it
-reconstructed (11.7): the client libraries return the list beside the
-version, the Python client raises a `DegradedWrite` warning, and `djbod
-put` prints the devices on standard error and exits 2, the object being
-stored and the cluster not whole. A request naming the device is
-refused with `DeviceUnavailable`.
+*unavailable*: the disk failed, was never mounted, or its directory was
+destroyed. Two ways a device becomes so. At startup, a device the
+cluster document lists for this node that no configured path opened
+(5.4). At run time, a device whose identity file (5.2) can no longer be
+read, which is what the space report and the scrub look for, one
+`stat`, since it is the only thing that tells an empty mount point from
+a disk. A write or a listing does not check first: a write makes the
+partition and key directories with a plain `mkdir` and never anything
+above them, so on a device whose tree has gone it finds no parent, and
+a listing finds no bucket; each reports that as the device being
+unavailable. There is no window between a check and the act, and no
+write ever recreates a device's tree on whatever filesystem is at its
+path. A disk failure is a device failure, not a node failure: the node
+starts and serves its other devices, so that the cluster keeps every
+copy they hold and the administrator can retire the lost device while
+the node is up. The consequences:
+
+- `LocalStatus` and `Status` (19.1.3) report the device with `available`
+  false and no space; the document's state (`active`, `draining`) is
+  unchanged, because availability is what the node observes and state is
+  what the administrator decided. `djbod status` prints
+  `active, unavailable`.
+- Placement (10.4), re-placement (18.8.2), and repair (18.3) leave an
+  unavailable device out as they leave out a full one: a write goes
+  ahead on the others if k+m of them have room, and is refused with
+  `InsufficientDevices`, naming the unavailable devices, if not. A write
+  that went around an unavailable device says so in its response, as a
+  read says what it reconstructed (11.7): the client libraries return
+  the list beside the version, the Python client raises a
+  `DegradedWrite` warning, and `djbod put` prints the devices on
+  standard error and exits 2, the object being stored and the cluster
+  not whole.
+- A request naming the device is refused with `DeviceUnavailable`: a
+  write to it, and a listing of its records (`LocalRecords`, and through
+  it `contents`, `drain`, and the removal scan of 18.5). `djbod
+  contents` says so for that device and goes on with the others.
+- The scrub (20.1.2) reports it once, `DeviceUnavailable`, reads
+  nothing more from it, and, in the cross-node checks, does not expect
+  a record copy from it, so the versions that name it are not each
+  reported inconsistent for the copy they lost there. Its contents were
+  not checked, so the run is incomplete (20.1.2.3): exit 3, or 4 if
+  damage was found elsewhere, and `--repair` cannot help it; the remedy
+  is to restore the device or retire it, then run again.
+- The node logs the loss once when first seen and once when the device
+  is readable again.
+
+Retiring an unavailable device is the forced removal of 6.2.6.3 at
+node level today; the device-level equivalent is proposed.
 
 ## 6. Configuration
 
@@ -2031,7 +2059,10 @@ every shard file, opens it (header, footer, trailer, geometry), checks the
 header against the file name, the directory, and the record, and reads
 every block against its checksum. It also reports a record whose shard is
 not on the device, a shard with no record, a record that does not list
-the device, and temporaries older than the configured age. Every finding
+the device, and temporaries older than the configured age. A device it
+cannot read at all is reported once, `DeviceUnavailable`, and nothing
+more is read from it (5.6); that is not damage found but data not
+checked, and it makes the run incomplete (20.1.2.3). Every finding
 names the path and, where a record was readable, the key. A rate limit
 caps bytes read per second. It never contacts another node. Because files
 are immutable once renamed and temporaries carry a suffix it is safe
@@ -2049,7 +2080,9 @@ coordinator merges the streams into one report. It then performs the
 checks no single node can: for every version, that k+m record copies
 exist and agree, that no stale copy remains, and that every listed
 device has its shard file (the scan of 18.5, which catches a device that
-lost both record and shard for a version). With `--repair` it runs
+lost both record and shard for a version). A copy on an unavailable
+device (5.6) is not expected: that device was reported once, and is not
+reported again for every version that names it. With `--repair` it runs
 `RepairObject` once for each damaged key from the merged set, so repairs
 are never issued concurrently for one object. Detection therefore moves
 no data over the network; only repair does, and only for damaged objects.
@@ -2125,7 +2158,11 @@ it, so an incomplete `--repair` run exits 3 or 4 even if every repair it
 attempted succeeded. A complete run with a failed repair exits 2; an
 incomplete run with a failed repair exits 4. "Incomplete" is a run whose
 stream ended naming a node that could not be scrubbed or checks that
-stopped; a stream that ends only because repairs failed is complete.
+stopped, or one in which a device could not be read (5.6), since its
+contents were not checked and no repair can reach them; a stream that
+ends only because repairs failed is complete. Damage, codes 2 and 4,
+is what a checksum or a cross-node check found wrong in data that was
+read, which is what `--repair` acts on.
 The last line of the human output states the outcome in these words;
 `--json` prints the events alone, and the exit code carries the verdict.
 

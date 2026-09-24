@@ -557,6 +557,7 @@ fn describe_finding(finding: &djbod_core::scrub::Finding) -> String {
         StaleTemporary { path, age_secs } => {
             format!("stale temporary     {}  {age_secs}s old", path.display())
         }
+        DeviceUnavailable { reason } => format!("device unavailable  {reason}"),
     }
 }
 

@@ -104,6 +104,9 @@ pub struct Node {
     /// Becomes true when an adopted document no longer lists this node
     /// (18.2.1, 6.2.6.3); the server stops accepting connections.
     removed: tokio::sync::watch::Sender<bool>,
+    /// Devices found unavailable at run time (5.6), so the loss is logged
+    /// once and its end once, not on every status request.
+    unavailable_reported: Mutex<HashSet<DeviceId>>,
     /// Loaded from the configured paths at startup (19.1.6.2).
     tls: Option<Arc<TlsMaterial>>,
     /// Connections accepted since startup, by transport, for status and
@@ -198,6 +201,17 @@ impl Node {
             })
             .map(|d| d.id)
             .collect()
+    }
+
+    /// Record that `device` was found unavailable, or available again.
+    /// Returns true when that is a change, so the caller logs it once.
+    pub fn note_availability(&self, device: DeviceId, available: bool) -> bool {
+        let mut reported = self.unavailable_reported.lock().expect("availability lock");
+        if available {
+            reported.remove(&device)
+        } else {
+            reported.insert(device)
+        }
     }
 
     fn document_path(config: &NodeConfig) -> PathBuf {
@@ -376,6 +390,7 @@ impl Node {
             versions: VersionGenerator::new(),
             writes_in_flight: Mutex::new(HashSet::new()),
             removed: tokio::sync::watch::Sender::new(false),
+            unavailable_reported: Mutex::new(HashSet::new()),
             tls,
             accepted_plain: AtomicU64::new(0),
             accepted_tls: AtomicU64::new(0),
