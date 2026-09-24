@@ -1108,34 +1108,19 @@ struct ShardWriter {
 }
 
 /// Choose k+m distinct active devices with room for a shard file, most
-/// free space first, ties by device id (10.4, 10.5). A client write is
-/// refused while any active device is unavailable (5.6): the refusal,
-/// naming the device, is how the operator learns of the failure. Repair
-/// and re-placement, which put it right, choose among the rest instead.
+/// free space first, ties by device id (10.4, 10.5). A device its node
+/// cannot read (5.6) is left out like a full one; the write goes ahead
+/// on the rest if k+m remain, and is refused, naming what is missing,
+/// if not. The snapshot may be stale by the time the shards are written;
+/// that is the write's failure to report (10.7), not a reason to check.
 fn place(
     statuses: &[DeviceStatus],
     scheme: Scheme,
     shard_bytes: u64,
 ) -> Result<Vec<DeviceStatus>, Failure> {
-    if let Some(d) = statuses
-        .iter()
-        .find(|d| d.state == DeviceState::Active && !d.available)
-    {
-        return Err(Failure::Error(ErrorDetail {
-            node: Some(d.node),
-            device: Some(d.device),
-            ..ErrorDetail::new(
-                ErrorCode::DeviceUnavailable,
-                format!(
-                    "device {} on node {} is unavailable: the disk failed or is not mounted; writes are refused until it is repaired or removed (SPEC 5.6)",
-                    d.device.0, d.node.0
-                ),
-            )
-        }));
-    }
     let mut eligible: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active && d.free_bytes >= shard_bytes)
+        .filter(|d| d.state == DeviceState::Active && d.available && d.free_bytes >= shard_bytes)
         .collect();
     eligible.sort_by(|a, b| {
         b.free_bytes
@@ -1143,10 +1128,24 @@ fn place(
             .then(a.device.cmp(&b.device))
     });
     if eligible.len() < scheme.total_shards() {
+        let unavailable: Vec<String> = statuses
+            .iter()
+            .filter(|d| d.state == DeviceState::Active && !d.available)
+            .map(|d| d.device.0.to_string())
+            .collect();
+        let missing = if unavailable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} active device(s) unavailable: {}",
+                unavailable.len(),
+                unavailable.join(", ")
+            )
+        };
         return Err(error(
             ErrorCode::InsufficientDevices,
             format!(
-                "{} active devices have {shard_bytes} bytes free; {} are needed",
+                "{} active devices have {shard_bytes} bytes free; {} are needed{missing}",
                 eligible.len(),
                 scheme.total_shards()
             ),
@@ -3694,10 +3693,11 @@ mod tests {
         }
     }
 
-    /// SPEC 5.6: a client write is refused while an active device is
-    /// unavailable, naming it; the refusal is the alarm.
+    /// SPEC 5.6: an unavailable device is left out of placement like a
+    /// full one; the write goes ahead if k+m remain and is refused,
+    /// naming the unavailable device, if not.
     #[test]
-    fn placement_refuses_while_an_active_device_is_unavailable() {
+    fn placement_leaves_out_an_unavailable_device() {
         let status = |n: u128, available: bool| DeviceStatus {
             device: device(n),
             node: node(1),
@@ -3719,19 +3719,33 @@ mod tests {
             Ok(chosen) => assert_eq!(chosen.len(), 3),
             Err(_) => panic!("a full set of available devices was refused"),
         }
-        let one_gone = [
+        let one_gone_of_four = [
             status(1, true),
             status(2, true),
             status(3, true),
             status(4, false),
         ];
-        match place(&one_gone, scheme, 1000) {
+        match place(&one_gone_of_four, scheme, 1000) {
+            Ok(chosen) => assert!(chosen.iter().all(|d| d.device != device(4))),
+            Err(_) => panic!("three available devices are enough for 2+1"),
+        }
+        let one_gone_of_three = [status(1, true), status(2, true), status(3, false)];
+        match place(&one_gone_of_three, scheme, 1000) {
             Err(Failure::Error(detail)) => {
-                assert_eq!(detail.code, ErrorCode::DeviceUnavailable);
-                assert_eq!(detail.device, Some(device(4)));
+                assert_eq!(detail.code, ErrorCode::InsufficientDevices);
+                assert!(
+                    detail.message.contains("1 active device(s) unavailable"),
+                    "{}",
+                    detail.message
+                );
+                assert!(
+                    detail.message.contains(&device(3).0.to_string()),
+                    "{}",
+                    detail.message
+                );
             }
             Err(_) => panic!("refused for another reason"),
-            Ok(_) => panic!("placed despite an unavailable device"),
+            Ok(_) => panic!("placed on an unavailable device"),
         }
     }
 

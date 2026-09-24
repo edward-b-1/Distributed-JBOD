@@ -236,13 +236,12 @@ lost device while the node is up. `LocalStatus` and `Status` (19.1.3)
 report the device with `available` false and no space; the document's
 state (`active`, `draining`) is unchanged, because availability is what
 the node observes and state is what the administrator decided.
-`djbod status` prints `active, unavailable`. A client write is refused
-with `DeviceUnavailable` while any active device is unavailable, naming
-it: there is no alerting subsystem, and the refusal is how the operator
-learns of the failure (the README says why). Re-placement (18.8.2) and
-repair (18.3), which are how it is put right, choose among the
-available devices. A request naming the device is refused with
-`DeviceUnavailable`.
+`djbod status` prints `active, unavailable`. Placement (10.4),
+re-placement (18.8.2), and repair (18.3) leave an unavailable device
+out as they leave out a full one: a write goes ahead on the others if
+k+m of them have room, and is refused with `InsufficientDevices`,
+naming the unavailable devices, if not. A request naming the device is
+refused with `DeviceUnavailable`.
 
 ## 6. Configuration
 
@@ -947,9 +946,15 @@ trade).
 
 10.7 [D] For each chosen device, the coordinator opens a shard transfer.
 If the receiving node cannot create or reserve the shard file (for
-example `ENOSPC`), it refuses the shard and the coordinator chooses the
-next-most-free eligible device. If none exists the write fails and
-everything written so far is removed.
+example `ENOSPC`, or a device that became unavailable since the space
+report, 5.6), it refuses the shard, the write fails with that refusal,
+and everything written so far is removed. The coordinator does not try
+another device: placement is one choice from the space report, the
+write is one attempt, and a failure is an error for the client to act
+on, as a read that cannot be served is (11.4). Trying the next device
+would mean a second placement, and a third, until the combinations ran
+out; the space report is stale the moment it is taken, and that is
+accepted rather than chased.
 
 10.8 [D] The coordinator (or the client, section 17) reads the body one
 stripe at a time, splits it into k data blocks, computes m parity blocks,
