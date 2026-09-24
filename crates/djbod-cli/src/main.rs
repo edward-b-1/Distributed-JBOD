@@ -594,6 +594,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices, &nodes));
+                        let unavailable = devices.iter().filter(|d| !d.available).count();
+                        if unavailable > 0 {
+                            eprintln!(
+                                "{unavailable} device(s) unavailable: their node cannot read them (disk failed or not mounted)"
+                            );
+                        }
                     }
                 }
             }
@@ -604,7 +610,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             content_type,
         } => {
             let mut client = connect(&cli).await?;
-            let version = if file.as_os_str() == "-" {
+            let write = if file.as_os_str() == "-" {
                 let mut body = Vec::new();
                 tokio::io::stdin()
                     .read_to_end(&mut body)
@@ -630,13 +636,30 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .await
                     .map_err(client_err)?
             };
+            let version = write.version;
             if cli.json {
                 println!(
                     "{}",
-                    serde_json::json!({ "key": key, "version": version.to_text() })
+                    serde_json::json!({ "key": key, "version": version.to_text(), "unavailable": write.unavailable })
                 );
             } else {
                 println!("stored {key} as version {version}");
+            }
+            // The write went around devices the cluster cannot read (SPEC
+            // 5.6): the object is safe on the others, but say so, and exit
+            // 2 so a pipeline notices.
+            if !write.unavailable.is_empty() {
+                let devices: Vec<String> = write
+                    .unavailable
+                    .iter()
+                    .map(|u| format!("{} on node {}", u.device.0, u.node.0))
+                    .collect();
+                eprintln!(
+                    "{key}: placed around {} unavailable device(s): {}; run `djbod status`",
+                    devices.len(),
+                    devices.join(", ")
+                );
+                std::process::exit(2);
             }
         }
         Command::Get { key, file } => {
@@ -1570,7 +1593,7 @@ async fn reencode_one(
         .await;
     let got = get.await.context("the read task failed")?;
     match (got, put) {
-        (Ok(read), Ok(version)) => {
+        (Ok(read), Ok(write)) => {
             if read.record.version != record.version {
                 bail!(
                     "the object changed while being re-encoded (read version {}, expected {}); rerun",
@@ -1578,7 +1601,7 @@ async fn reencode_one(
                     record.version
                 );
             }
-            Ok(version)
+            Ok(write.version)
         }
         (Err(e), _) => Err(anyhow::anyhow!("read failed: {}", client_err(e))),
         (Ok(_), Err(e)) => Err(anyhow::anyhow!("write failed: {}", client_err(e))),

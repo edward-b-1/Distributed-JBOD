@@ -31,7 +31,7 @@ use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
     ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, NodeStatus,
     Reconstruction, RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem,
-    ShardCondition, ShardRepair, StreamEnd,
+    ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -1108,7 +1108,11 @@ struct ShardWriter {
 }
 
 /// Choose k+m distinct active devices with room for a shard file, most
-/// free space first, ties by device id (10.4, 10.5).
+/// free space first, ties by device id (10.4, 10.5). A device its node
+/// cannot read (5.6) is left out like a full one; the write goes ahead
+/// on the rest if k+m remain, and is refused, naming what is missing,
+/// if not. The snapshot may be stale by the time the shards are written;
+/// that is the write's failure to report (10.7), not a reason to check.
 fn place(
     statuses: &[DeviceStatus],
     scheme: Scheme,
@@ -1116,7 +1120,7 @@ fn place(
 ) -> Result<Vec<DeviceStatus>, Failure> {
     let mut eligible: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active && d.free_bytes >= shard_bytes)
+        .filter(|d| d.state == DeviceState::Active && d.available && d.free_bytes >= shard_bytes)
         .collect();
     eligible.sort_by(|a, b| {
         b.free_bytes
@@ -1124,10 +1128,24 @@ fn place(
             .then(a.device.cmp(&b.device))
     });
     if eligible.len() < scheme.total_shards() {
+        let unavailable: Vec<String> = statuses
+            .iter()
+            .filter(|d| d.state == DeviceState::Active && !d.available)
+            .map(|d| d.device.0.to_string())
+            .collect();
+        let missing = if unavailable.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; {} active device(s) unavailable: {}",
+                unavailable.len(),
+                unavailable.join(", ")
+            )
+        };
         return Err(error(
             ErrorCode::InsufficientDevices,
             format!(
-                "{} active devices have {shard_bytes} bytes free; {} are needed",
+                "{} active devices have {shard_bytes} bytes free; {} are needed{missing}",
                 eligible.len(),
                 scheme.total_shards()
             ),
@@ -1166,7 +1184,12 @@ async fn put_object(
     // The client streams the body right behind the request, so from here
     // on any refusal must also close the connection (fail_and_close).
     let prepared = prepare_put(node, versions, &params).await;
-    let (scheme, record_template, mut writers) = match prepared {
+    let PreparedPut {
+        scheme,
+        record: record_template,
+        mut writers,
+        unavailable,
+    } = match prepared {
         Ok(p) => p,
         Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
         Err(other) => return Err(other),
@@ -1225,7 +1248,24 @@ async fn put_object(
             };
         }
     }
-    respond(writer, id, Ok(Response::PutObject { version })).await
+    respond(
+        writer,
+        id,
+        Ok(Response::PutObject {
+            version,
+            unavailable,
+        }),
+    )
+    .await
+}
+
+/// A write ready for its body: the scheme, the record to complete, a
+/// writer per chosen device, and the devices placement went around (5.6).
+struct PreparedPut {
+    scheme: Scheme,
+    record: MetadataRecord,
+    writers: Vec<ShardWriter>,
+    unavailable: Vec<UnavailableDevice>,
 }
 
 /// Everything before the first body byte is consumed: checks, placement,
@@ -1234,7 +1274,7 @@ async fn prepare_put(
     node: &Arc<Node>,
     versions: &VersionGenerator,
     params: &PutParams,
-) -> Result<(Scheme, MetadataRecord, Vec<ShardWriter>), Failure> {
+) -> Result<PreparedPut, Failure> {
     check_key(node, &params.key)?;
     if let Some(content_type) = &params.content_type {
         if content_type.len() > MAX_CONTENT_TYPE_BYTES {
@@ -1301,6 +1341,14 @@ async fn prepare_put(
             .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
     };
     let chosen = place(&statuses, scheme, shard_bytes)?;
+    let unavailable: Vec<UnavailableDevice> = statuses
+        .iter()
+        .filter(|d| d.state == DeviceState::Active && !d.available)
+        .map(|d| UnavailableDevice {
+            device: d.device,
+            node: d.node,
+        })
+        .collect();
     let version = versions.next();
 
     let mut writers = Vec::with_capacity(chosen.len());
@@ -1365,7 +1413,12 @@ async fn prepare_put(
         user_metadata: params.user_metadata.clone(),
         revision: 0,
     };
-    Ok((scheme, record, writers))
+    Ok(PreparedPut {
+        scheme,
+        record,
+        writers,
+        unavailable,
+    })
 }
 
 /// Read the client's body stream, encode it stripe by stripe, fan the
@@ -2010,6 +2063,7 @@ async fn relocate_lost_shards(
         .into_iter()
         .filter(|d| {
             d.state == DeviceState::Active
+                && d.available
                 && d.free_bytes >= shard_bytes
                 && !devices.contains(&d.device)
         })
@@ -2343,6 +2397,7 @@ async fn move_shard_of_record(
     let devices: Vec<DeviceId> = record.shards.iter().map(|s| s.device).collect();
     let eligible = |d: &DeviceStatus| {
         d.state == DeviceState::Active
+            && d.available
             && d.free_bytes >= shard_bytes
             && !devices.contains(&d.device)
     };
@@ -2522,7 +2577,7 @@ async fn drain(
     let required_devices = document.k as u64 + document.m as u64;
     let active: Vec<&DeviceStatus> = statuses
         .iter()
-        .filter(|d| d.state == DeviceState::Active)
+        .filter(|d| d.state == DeviceState::Active && d.available)
         .collect();
     let target_free_bytes: u64 = active.iter().map(|d| d.free_bytes).sum();
     let mut shard_bytes: u64 = 0;
@@ -3670,6 +3725,62 @@ mod tests {
             device: device(device_number),
             record: record.clone(),
             shard_present,
+        }
+    }
+
+    /// SPEC 5.6: an unavailable device is left out of placement like a
+    /// full one; the write goes ahead if k+m remain and is refused,
+    /// naming the unavailable device, if not.
+    #[test]
+    fn placement_leaves_out_an_unavailable_device() {
+        let status = |n: u128, available: bool| DeviceStatus {
+            device: device(n),
+            node: node(1),
+            state: DeviceState::Active,
+            available,
+            label: None,
+            node_label: None,
+            total_bytes: 1 << 40,
+            free_bytes: 1 << 40,
+        };
+        let scheme = Scheme::new(2, 1).expect("scheme");
+        let all_present = [
+            status(1, true),
+            status(2, true),
+            status(3, true),
+            status(4, true),
+        ];
+        match place(&all_present, scheme, 1000) {
+            Ok(chosen) => assert_eq!(chosen.len(), 3),
+            Err(_) => panic!("a full set of available devices was refused"),
+        }
+        let one_gone_of_four = [
+            status(1, true),
+            status(2, true),
+            status(3, true),
+            status(4, false),
+        ];
+        match place(&one_gone_of_four, scheme, 1000) {
+            Ok(chosen) => assert!(chosen.iter().all(|d| d.device != device(4))),
+            Err(_) => panic!("three available devices are enough for 2+1"),
+        }
+        let one_gone_of_three = [status(1, true), status(2, true), status(3, false)];
+        match place(&one_gone_of_three, scheme, 1000) {
+            Err(Failure::Error(detail)) => {
+                assert_eq!(detail.code, ErrorCode::InsufficientDevices);
+                assert!(
+                    detail.message.contains("1 active device(s) unavailable"),
+                    "{}",
+                    detail.message
+                );
+                assert!(
+                    detail.message.contains(&device(3).0.to_string()),
+                    "{}",
+                    detail.message
+                );
+            }
+            Err(_) => panic!("refused for another reason"),
+            Ok(_) => panic!("placed on an unavailable device"),
         }
     }
 
