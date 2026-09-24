@@ -3620,7 +3620,10 @@ mod tests {
             status(3, true),
             status(4, true),
         ];
-        assert_eq!(place(&all_present, scheme, 1000).expect("placed").len(), 3);
+        match place(&all_present, scheme, 1000) {
+            Ok(chosen) => assert_eq!(chosen.len(), 3),
+            Err(_) => panic!("a full set of available devices was refused"),
+        }
         let one_gone = [
             status(1, true),
             status(2, true),
@@ -3632,7 +3635,8 @@ mod tests {
                 assert_eq!(detail.code, ErrorCode::DeviceUnavailable);
                 assert_eq!(detail.device, Some(device(4)));
             }
-            other => panic!("expected a refusal, got {other:?}"),
+            Err(_) => panic!("refused for another reason"),
+            Ok(_) => panic!("placed despite an unavailable device"),
         }
     }
 
