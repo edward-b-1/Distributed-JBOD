@@ -161,8 +161,14 @@ does not pretend to more.
 Reads and writes both do what they can. A read that meets a bad block,
 a shard whose file is missing, or a shard on a disk or machine that
 cannot be reached rebuilds the data from parity and hands it back, and
-says on the way out what it had to rebuild and where. Only damage
-beyond `m`, or record copies that disagree, fails the read. A write is
+says on the way out what it had to rebuild and where. Expect such a
+read to be slower: from the first damaged stripe on, the node fetches
+the parity shards as well as the data and decodes every stripe, so a
+read that would have touched `k` disks touches `k + m` and spends CPU
+it otherwise would not, and it does so on every read of that object
+until a repair puts the disk right. The warning that comes back with
+the data is the cue to run one. Only damage beyond `m`, or record
+copies that disagree, fails the read. A write is
 placed on the emptiest disks the cluster can read, skipping ones it
 cannot, is attempted once, and fails with the node's own words if a
 disk refuses it; there is no second guess at another disk. When a write
