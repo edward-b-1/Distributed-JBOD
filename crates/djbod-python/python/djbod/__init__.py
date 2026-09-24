@@ -21,11 +21,12 @@ from ._native import (
     ObjectInfo,
     Status,
 )
-from .errors import Error, NodeError, NotFound, Unreachable
+from .errors import DegradedRead, Error, NodeError, NotFound, Unreachable
 
 __version__ = BUILD.split("+", 1)[0]
 
 __all__ = [
+    "DegradedRead",
     "BUILD",
     "Client",
     "Error",
