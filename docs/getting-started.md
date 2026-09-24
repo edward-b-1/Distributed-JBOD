@@ -148,6 +148,15 @@ target/release/djbod delete notes/hello.txt
 target/release/djbod head notes/hello.txt         # NotFound, exit code 1
 ```
 
+A `get` whose data had to be reconstructed from parity, because a block on
+some disk failed its checksum, still writes the correct bytes, then says
+on standard error which block was bad and exits 2: the data is right, the
+disk is not, and every read of that object pays again until `djbod repair
+<key>` fixes it.
+
+```sh
+```
+
 Add `--json` before the subcommand for machine-readable output, for
 example `djbod --json head photos/cat.jpg`.
 

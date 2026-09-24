@@ -1006,11 +1006,22 @@ one version is present (9.2.4) it selects the newest.
 11.3 [D] For each stripe in order, the coordinator requests shard blocks
 `0 .. k-1` (the data blocks) from their devices, verifies each block against
 its checksum, and delivers the stripe to the client. Parity blocks are not
-read.
+read until one is needed.
 
-11.4 [D] If any block fails its checksum, or any device's node is unreachable, the
-request fails with an error identifying the device UUID, key, version,
-shard index, and stripe number. No reconstruction is attempted in v1.
+11.4 [D] **A damaged block is reconstructed, reported, and not repaired.**
+If a data block fails its checksum, the coordinator opens the parity
+shards from that stripe on, decodes the stripe from any k good blocks,
+and delivers it; it keeps reading all k+m shards to the end of the
+object. Nothing is written to any device: the damage stays until `djbod
+repair` (18.4), so every read of the object pays the reconstruction
+again, which is why the read says what it did. Every reconstructed
+block is listed in the stream's terminating status (11.7): stripe, shard
+index, device, and the fault (checksum mismatch, wrong length, missing).
+A stripe with more than m unusable blocks is an error identifying the
+device, key, version, shard index, and stripe number, delivered as the
+terminating status, and the client must treat the body as invalid. A
+device whose node is unreachable is refused before any block is served
+(16.1); there is no reconstruction around an absent node.
 
 11.5 [D] Reads stream. The coordinator holds a bounded number of stripes in
 memory at once.
@@ -1023,7 +1034,13 @@ checksum and, after the last stripe, compares it with the record's
 `object_checksum` (8.3.6). A mismatch is an error (16.1). Because the
 body has by then been streamed to the client, the error is delivered as
 the stream's terminating status (19.1.2), and the client must treat the
-body as invalid.
+body as invalid. The same status carries the list of blocks
+reconstructed on the way (11.4), so a client reads one frame to learn
+both whether the body is good and what it cost. The client libraries
+return the list beside the record; the Python client also raises a
+`DegradedRead` warning; `djbod get` prints each reconstructed block on
+standard error and exits 2, the data being correct but the damage
+unrepaired, so that a pipeline notices.
 
 ## 12. Placement summary
 
@@ -1261,7 +1278,8 @@ to the client:
 
 - Any node in the cluster document does not respond to a broadcast.
 - Any device holding a shard needed for a read is unreachable.
-- Any shard block fails its checksum.
+- More than m blocks of a stripe are unusable (11.4); fewer are
+  reconstructed from parity, served, and reported.
 - The whole-object checksum of a completed read does not match the record
   (11.7).
 - Metadata record copies for a version disagree, or fewer than k+m are
@@ -1641,7 +1659,8 @@ a block costs its own length plus 16 on the wire. For shard streams the
 sequence is the stripe number (10.8); for object body streams it counts
 chunks from zero. A streaming operation is one request, then Data frames
 sharing its request id, then one EndOfStream carrying a status and, for
-`PutShard`, the object size and whole-object checksum. Implemented in
+`PutShard`, the object size and whole-object checksum, and, for
+`GetObject`, the blocks reconstructed from parity (11.4). Implemented in
 `crates/djbod-proto`, which is runtime-agnostic: it converts messages to
 and from bytes and nothing else.
 
@@ -1673,8 +1692,9 @@ coordinator, and those nodes send to each other. Every response is either
 
 `GetObject`
 : Request: key. Response: the metadata record, then a stream of body
-  bytes in stripe-sized frames, then end-of-stream. Coordinator performs
-  lookup, block fetch, and checksum verification.
+  bytes in stripe-sized frames, then end-of-stream carrying the blocks
+  reconstructed from parity (11.4), if any. Coordinator performs lookup,
+  block fetch, checksum verification, and reconstruction.
 
 `HeadObject`
 : Request: key. Response: the metadata record, no body. Implemented by

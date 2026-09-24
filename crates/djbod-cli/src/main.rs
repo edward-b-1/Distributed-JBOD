@@ -31,7 +31,8 @@ use djbod_client::transport::Connector;
 use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
-use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery};
+use djbod_core::stripe::FaultKind;
+use djbod_proto::message::{DrainEvent, ErrorDetail, ListQuery, Reconstruction};
 
 mod tables;
 
@@ -646,30 +647,32 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Get { key, file } => {
             let mut client = connect(&cli).await?;
-            if file.as_os_str() == "-" {
+            let read = if file.as_os_str() == "-" {
                 let mut stdout = tokio::io::stdout();
-                client
+                let read = client
                     .get_to_writer(key, &mut stdout)
                     .await
                     .map_err(client_err)?;
                 stdout.flush().await?;
+                read
             } else {
                 let mut sink = tokio::fs::File::create(file)
                     .await
                     .with_context(|| format!("creating {}", file.display()))?;
                 let result = client.get_to_writer(key, &mut sink).await;
                 match result {
-                    Ok(record) => {
+                    Ok(read) => {
                         sink.sync_all().await?;
                         if cli.json {
-                            println!("{}", serde_json::to_string_pretty(&record)?);
+                            println!("{}", serde_json::to_string_pretty(&read.record)?);
                         } else {
                             eprintln!(
                                 "fetched {key} ({} bytes) to {}",
-                                record.size,
+                                read.record.size,
                                 file.display()
                             );
                         }
+                        read
                     }
                     Err(e) => {
                         drop(sink);
@@ -679,6 +682,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         });
                     }
                 }
+            };
+            // The data is correct, but only by reconstruction (SPEC 11.4):
+            // say so, and exit 2 so a pipeline notices.
+            if !read.reconstructed.is_empty() {
+                eprintln!("{}", describe_reconstruction(key, &read.reconstructed));
+                std::process::exit(2);
             }
         }
         Command::Head { key } => {
@@ -1568,10 +1577,10 @@ async fn reencode_one(
     let got = get.await.context("the read task failed")?;
     match (got, put) {
         (Ok(read), Ok(version)) => {
-            if read.version != record.version {
+            if read.record.version != record.version {
                 bail!(
                     "the object changed while being re-encoded (read version {}, expected {}); rerun",
-                    read.version,
+                    read.record.version,
                     record.version
                 );
             }
@@ -1771,6 +1780,30 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
 
 fn short(id: &Uuid) -> String {
     id.to_string()[..8].to_string()
+}
+
+/// What a read had to reconstruct (SPEC 11.4): the bytes returned are
+/// correct, the damage on disk is not fixed, and every read pays again
+/// until it is.
+fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> String {
+    let mut lines = vec![format!(
+        "{key}: {} block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair {key}` runs",
+        reconstructed.len()
+    )];
+    for r in reconstructed {
+        let fault = match &r.fault {
+            FaultKind::Missing => "block missing".to_string(),
+            FaultKind::WrongLength { expected, actual } => {
+                format!("wrong length: {actual} bytes, {expected} expected")
+            }
+            FaultKind::ChecksumMismatch { .. } => "checksum mismatch".to_string(),
+        };
+        lines.push(format!(
+            "  stripe {}  shard {}  device {}  {fault}",
+            r.stripe, r.shard_index, r.device.0
+        ));
+    }
+    lines.join("\n")
 }
 
 fn describe_scrub_finding(finding: &djbod_core::scrub::Finding) -> String {

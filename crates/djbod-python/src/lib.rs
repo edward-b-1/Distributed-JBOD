@@ -20,7 +20,9 @@ use djbod_client::blocking::Client as Inner;
 use djbod_client::transport::Connector;
 use djbod_client::{ClientError, ClientOptions};
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_proto::message::{ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery};
+use djbod_proto::message::{
+    ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery, ObjectRead, Reconstruction,
+};
 
 /// An object's record without its body.
 #[pyclass(frozen, get_all)]
@@ -35,11 +37,21 @@ struct ObjectInfo {
     k: u8,
     m: u8,
     block_size: u64,
+    /// Blocks the read reconstructed from parity (SPEC 11.4), each with
+    /// stripe, shard_index, device and fault; empty when none, and for
+    /// `head`. The data was correct; the damage on disk is not repaired.
+    reconstructed: Py<PyAny>,
 }
 
 impl ObjectInfo {
-    fn from_record(record: MetadataRecord) -> ObjectInfo {
-        ObjectInfo {
+    fn from_read(py: Python<'_>, read: ObjectRead) -> PyResult<ObjectInfo> {
+        let mut info = ObjectInfo::from_record(py, read.record)?;
+        info.reconstructed = pythonize(py, &read.reconstructed)?.unbind();
+        Ok(info)
+    }
+
+    fn from_record(py: Python<'_>, record: MetadataRecord) -> PyResult<ObjectInfo> {
+        Ok(ObjectInfo {
             key: record.key,
             size: record.size,
             version: record.version.to_text(),
@@ -52,8 +64,32 @@ impl ObjectInfo {
             k: record.k,
             m: record.m,
             block_size: record.block_size,
-        }
+            reconstructed: pythonize(py, &Vec::<Reconstruction>::new())?.unbind(),
+        })
     }
+}
+
+/// A `DegradedRead` warning (SPEC 11.4) when a read had to reconstruct,
+/// so a notebook sees it once per object without the call failing.
+fn warn_if_reconstructed(
+    py: Python<'_>,
+    key: &str,
+    reconstructed: &[Reconstruction],
+) -> PyResult<()> {
+    if reconstructed.is_empty() {
+        return Ok(());
+    }
+    let message = format!(
+        "{key}: {} block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until repair runs",
+        reconstructed.len()
+    );
+    let warning = py.import("djbod.errors")?.getattr("DegradedRead")?.call1((
+        message,
+        key,
+        pythonize(py, reconstructed)?,
+    ))?;
+    py.import("warnings")?.call_method1("warn", (warning,))?;
+    Ok(())
 }
 
 #[pymethods]
@@ -291,7 +327,8 @@ impl Client {
 
     /// Fetch an object's bytes.
     fn get<'py>(&self, py: Python<'py>, key: &str) -> PyResult<Bound<'py, PyBytes>> {
-        let (_, body) = self.call(py, |inner| inner.get(key))?;
+        let (read, body) = self.call(py, |inner| inner.get(key))?;
+        warn_if_reconstructed(py, key, &read.reconstructed)?;
         Ok(PyBytes::new(py, &body))
     }
 
@@ -299,13 +336,14 @@ impl Client {
     /// part way leaves the file with what arrived, and raises.
     fn get_to_file(&self, py: Python<'_>, key: &str, path: &str) -> PyResult<ObjectInfo> {
         let file = File::create(path)?;
-        self.call(py, |inner| inner.get_to_writer(key, file))
-            .map(ObjectInfo::from_record)
+        let read = self.call(py, |inner| inner.get_to_writer(key, file))?;
+        warn_if_reconstructed(py, key, &read.reconstructed)?;
+        ObjectInfo::from_read(py, read)
     }
 
     fn head(&self, py: Python<'_>, key: &str) -> PyResult<ObjectInfo> {
-        self.call(py, |inner| inner.head(key))
-            .map(ObjectInfo::from_record)
+        let record = self.call(py, |inner| inner.head(key))?;
+        ObjectInfo::from_record(py, record)
     }
 
     fn delete(&self, py: Python<'_>, key: &str) -> PyResult<()> {
