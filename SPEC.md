@@ -263,10 +263,13 @@ the node is up. The consequences:
   write to it, and a listing of its records (`LocalRecords`, and through
   it `contents`, `drain`, and the removal scan of 18.5). `djbod
   contents` says so for that device and goes on with the others.
-- The scrub (20.1.2) reports it as one finding, `DeviceUnavailable`,
-  reads nothing more from it, and, in the cross-node checks, does not
-  expect a record copy from it, so the versions that name it are not
-  each reported inconsistent for the copy they lost there.
+- The scrub (20.1.2) reports it once, `DeviceUnavailable`, reads
+  nothing more from it, and, in the cross-node checks, does not expect
+  a record copy from it, so the versions that name it are not each
+  reported inconsistent for the copy they lost there. Its contents were
+  not checked, so the run is incomplete (20.1.2.3): exit 3, or 4 if
+  damage was found elsewhere, and `--repair` cannot help it; the remedy
+  is to restore the device or retire it, then run again.
 - The node logs the loss once when first seen and once when the device
   is readable again.
 
@@ -2057,8 +2060,9 @@ header against the file name, the directory, and the record, and reads
 every block against its checksum. It also reports a record whose shard is
 not on the device, a shard with no record, a record that does not list
 the device, and temporaries older than the configured age. A device it
-cannot read at all is one finding, `DeviceUnavailable`, and nothing
-more is read from it (5.6). Every finding
+cannot read at all is reported once, `DeviceUnavailable`, and nothing
+more is read from it (5.6); that is not damage found but data not
+checked, and it makes the run incomplete (20.1.2.3). Every finding
 names the path and, where a record was readable, the key. A rate limit
 caps bytes read per second. It never contacts another node. Because files
 are immutable once renamed and temporaries carry a suffix it is safe
@@ -2154,7 +2158,11 @@ it, so an incomplete `--repair` run exits 3 or 4 even if every repair it
 attempted succeeded. A complete run with a failed repair exits 2; an
 incomplete run with a failed repair exits 4. "Incomplete" is a run whose
 stream ended naming a node that could not be scrubbed or checks that
-stopped; a stream that ends only because repairs failed is complete.
+stopped, or one in which a device could not be read (5.6), since its
+contents were not checked and no repair can reach them; a stream that
+ends only because repairs failed is complete. Damage, codes 2 and 4,
+is what a checksum or a cross-node check found wrong in data that was
+read, which is what `--repair` acts on.
 The last line of the human output states the outcome in these words;
 `--json` prints the events alone, and the exit code carries the verdict.
 

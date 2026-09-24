@@ -1309,11 +1309,30 @@ async fn a_destroyed_device_is_reported_unavailable() {
     assert_eq!(out.lines().count(), 4, "{out}");
     assert!(err.contains(&format!("{} unavailable", dead.id())), "{err}");
 
-    let (ok, out, err) = djbod(&test, &["scrub"]);
-    assert!(!ok, "{out}{err}");
+    // The device's contents were not checked: not damage, an incomplete
+    // run, exit 3, and no per-key noise for the copies it held.
+    let scrub = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "scrub",
+        ])
+        .output()
+        .expect("run djbod");
+    let out = String::from_utf8_lossy(&scrub.stdout);
+    let err = String::from_utf8_lossy(&scrub.stderr);
+    assert_eq!(scrub.status.code(), Some(3), "{out}{err}");
     assert!(out.contains("device unavailable"), "{out}");
     assert!(!out.contains("RecordsInconsistent"), "{out}");
     assert!(!out.contains("ShardMissingOnDevice"), "{out}");
+    assert!(err.contains("0 finding(s)"), "{err}");
+    assert!(err.contains("incomplete"), "{err}");
+    assert!(
+        err.contains("1 device(s) unavailable, not checked"),
+        "{err}"
+    );
 
     // A write goes around the device, says so, and exits 2 (SPEC 5.6);
     // nothing is recreated at the dead path.

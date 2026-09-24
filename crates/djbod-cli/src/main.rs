@@ -801,12 +801,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut findings = 0usize;
             let mut repairs = 0usize;
             let mut repair_failures = 0usize;
+            let mut unavailable_devices = 0usize;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
                         // Counted whatever the output mode: the exit code
-                        // depends on it (SPEC 20.1.2.3).
+                        // depends on it (SPEC 20.1.2.3). A device that could
+                        // not be read is not damage found but data not
+                        // checked: it makes the run incomplete (5.6).
                         match &event {
+                            ScrubEvent::NodeFinding {
+                                finding: djbod_core::scrub::Finding::DeviceUnavailable { .. },
+                                ..
+                            } => unavailable_devices += 1,
                             ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_) => {
                                 findings += 1
                             }
@@ -893,19 +900,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     Err(end) => break end,
                 }
             };
-            // Incomplete means a node could not be scrubbed or the checks
-            // stopped; failed repairs end the stream with WriteFailed and
-            // the run is still complete.
-            let incomplete = end
-                .error
-                .as_ref()
-                .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
+            // Incomplete means a node could not be scrubbed, the checks
+            // stopped, or a device could not be read; failed repairs end
+            // the stream with WriteFailed and the run is still complete.
+            let incomplete = unavailable_devices > 0
+                || end
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
             let code = scrub_exit_code(*repair, incomplete, findings, repair_failures);
             if !cli.json {
                 eprintln!(
                     "{findings} finding(s), {repairs} repair(s), {repair_failures} failed repair(s): {}",
                     scrub_outcome(*repair, incomplete, findings, repair_failures)
                 );
+                if unavailable_devices > 0 {
+                    eprintln!(
+                        "{unavailable_devices} device(s) unavailable, not checked: restore or retire them, then run again"
+                    );
+                }
                 if let Some(error) = &end.error {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
                 }
