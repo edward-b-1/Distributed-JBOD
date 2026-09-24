@@ -16,7 +16,8 @@ use djbod_core::cluster::ClusterDocument;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DeviceContents, DrainEvent, KeyEntry, ListQuery, RepairReport, ScrubEvent, StreamEnd,
+    DeviceContents, DrainEvent, KeyEntry, ListQuery, ObjectRead, RepairReport, ScrubEvent,
+    StreamEnd,
 };
 
 pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, MoveShardReport, Status};
@@ -87,7 +88,7 @@ impl Client {
         ))
     }
 
-    pub fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
+    pub fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         self.runtime.block_on(self.inner.get(key))
     }
 
@@ -96,7 +97,7 @@ impl Client {
         &mut self,
         key: &str,
         sink: W,
-    ) -> Result<MetadataRecord, ClientError> {
+    ) -> Result<ObjectRead, ClientError> {
         let mut sink = BlockingWriter(sink);
         self.runtime
             .block_on(self.inner.get_to_writer(key, &mut sink))
