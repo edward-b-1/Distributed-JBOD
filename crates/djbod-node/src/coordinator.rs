@@ -25,7 +25,7 @@ use djbod_core::record::{
     SYSTEM_NAME,
 };
 use djbod_core::shardfile::{shard_file_length, shard_geometry};
-use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
+use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
@@ -851,6 +851,114 @@ async fn read_stripe_blocks(
     Ok(received)
 }
 
+/// A shard a read could not open and will reconstruct around from the
+/// first stripe (11.4), and why. `Unavailable` may be temporary; the
+/// others will not mend themselves.
+struct UnreadableShard {
+    index: ShardIndex,
+    device: DeviceId,
+    fault: FaultKind,
+    /// The stripe from which the shard was reconstructed around: 0 for a
+    /// data shard, or the damaged stripe at which parity was first wanted.
+    first_stripe: u64,
+}
+
+/// Open the shards of `indices` from `first_block` on. One that cannot be
+/// opened is returned separately, to be reconstructed around, rather than
+/// failing the read (11.4): a missing or unreadable file, a device that
+/// is unavailable, or a node that cannot be reached. A node that answers
+/// wrongly is still an error.
+async fn open_shards(
+    node: &Arc<Node>,
+    document: &ClusterDocument,
+    record: &MetadataRecord,
+    key: &str,
+    indices: &[ShardIndex],
+    first_block: u64,
+    block_count: u64,
+) -> Result<(Vec<ShardSource>, Vec<UnreadableShard>), Failure> {
+    let mut sources = Vec::with_capacity(indices.len());
+    let mut unreadable = Vec::new();
+    for &index in indices {
+        let device = record
+            .device_for(index)
+            .expect("validated record lists every index");
+        match open_shard_sources(
+            node,
+            document,
+            record,
+            key,
+            &[index],
+            first_block,
+            block_count,
+        )
+        .await
+        {
+            Ok(opened) => sources.extend(opened),
+            Err(Failure::Error(detail)) => {
+                let fault = match detail.code {
+                    ErrorCode::NotFound => FaultKind::Missing,
+                    ErrorCode::DeviceUnavailable | ErrorCode::NodeUnreachable => {
+                        FaultKind::Unavailable {
+                            reason: detail.message,
+                        }
+                    }
+                    ErrorCode::ProtocolViolation | ErrorCode::Internal => {
+                        return Err(Failure::Error(detail))
+                    }
+                    _ => FaultKind::Unreadable {
+                        reason: detail.message,
+                    },
+                };
+                unreadable.push(UnreadableShard {
+                    index,
+                    device,
+                    fault,
+                    first_stripe: first_block,
+                });
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    Ok((sources, unreadable))
+}
+
+/// The refusal when more than m shards cannot be read (11.4, 16.1): the
+/// first shard's own code, since a node down and a file gone call for
+/// different actions, and the whole list in the message.
+fn too_many_unreadable(
+    key: &str,
+    record: &MetadataRecord,
+    unreadable: &[UnreadableShard],
+) -> ErrorDetail {
+    let first = &unreadable[0];
+    let code = match &first.fault {
+        FaultKind::Missing => ErrorCode::NotFound,
+        FaultKind::Unavailable { .. } => ErrorCode::DeviceUnavailable,
+        _ => ErrorCode::BlockChecksumMismatch,
+    };
+    let list: Vec<String> = unreadable
+        .iter()
+        .map(|e| format!("shard {} on {}: {:?}", e.index.0, e.device, e.fault))
+        .collect();
+    ErrorDetail {
+        device: Some(first.device),
+        key: Some(key.to_string()),
+        version: Some(record.version),
+        shard_index: Some(first.index.0),
+        ..ErrorDetail::new(
+            code,
+            format!(
+                "{} of {} shards cannot be read and at most {} may be: {}",
+                unreadable.len(),
+                record.k as usize + record.m as usize,
+                record.m,
+                list.join("; ")
+            ),
+        )
+    }
+}
+
 async fn get_object(
     node: &Arc<Node>,
     id: u32,
@@ -890,14 +998,23 @@ async fn get_object(
         }
     };
 
-    // Open one connection per data shard and start every block streaming
-    // before answering the client, so a missing device fails the request
-    // cleanly rather than mid-body (11.4). Parity is not read unless a
-    // block turns out damaged.
+    // Open one block stream per data shard before answering the client.
+    // A shard that cannot be opened is reconstructed around from the
+    // first stripe and parity is opened at once; more than m such shards
+    // is the refusal (11.4).
+    // Parity is otherwise not read unless a block turns out damaged.
     let data_indices = scheme.data_shard_indices();
+    let all_indices = scheme.shard_indices();
+    let parity_indices: Vec<ShardIndex> = all_indices
+        .iter()
+        .copied()
+        .filter(|i| !data_indices.contains(i))
+        .collect();
     let mut sources: Vec<ShardSource> = Vec::new();
+    let mut unreadable: Vec<UnreadableShard> = Vec::new();
+    let mut parity_open = false;
     if record.size > 0 {
-        sources = match open_shard_sources(
+        let opened = open_shards(
             node,
             &document,
             &record,
@@ -906,11 +1023,38 @@ async fn get_object(
             0,
             geometry.block_count,
         )
-        .await
-        {
-            Ok(sources) => sources,
+        .await;
+        match opened {
+            Ok((opened, missing)) => {
+                sources.extend(opened);
+                unreadable.extend(missing);
+            }
             Err(f) => return respond(writer, id, Err(f)).await,
-        };
+        }
+        if !unreadable.is_empty() {
+            let opened = open_shards(
+                node,
+                &document,
+                &record,
+                key,
+                &parity_indices,
+                0,
+                geometry.block_count,
+            )
+            .await;
+            match opened {
+                Ok((opened, missing)) => {
+                    sources.extend(opened);
+                    unreadable.extend(missing);
+                }
+                Err(f) => return respond(writer, id, Err(f)).await,
+            }
+            parity_open = true;
+        }
+        if unreadable.len() > scheme.parity_shards() {
+            let detail = too_many_unreadable(key, &record, &unreadable);
+            return respond(writer, id, Err(Failure::Error(detail))).await;
+        }
     }
 
     respond(
@@ -923,17 +1067,8 @@ async fn get_object(
     .await?;
 
     let code = ReedSolomonCode::new(scheme);
-    let all_indices = scheme.shard_indices();
-    let parity_indices: Vec<ShardIndex> = all_indices
-        .iter()
-        .copied()
-        .filter(|i| !data_indices.contains(i))
-        .collect();
     let stripe_size = scheme.data_shards() as u64 * record.block_size;
     let stripe_count = record.size.div_ceil(stripe_size.max(1));
-    // Opened at the first damaged stripe and read from there to the end
-    // (11.4); empty until then.
-    let mut parity: Vec<ShardSource> = Vec::new();
     let mut reconstructed: Vec<Reconstruction> = Vec::new();
     let mut hasher = Xxh3::new();
     let mut delivered: u64 = 0;
@@ -943,33 +1078,26 @@ async fn get_object(
             Ok(blocks) => blocks,
             Err(detail) => return Err(fail_and_close(writer, id, detail).await),
         };
-        if !parity.is_empty() {
-            match read_stripe_blocks(&mut parity, stripe, key, &record).await {
-                Ok(blocks) => received.extend(blocks),
-                Err(detail) => return Err(fail_and_close(writer, id, detail).await),
-            }
-        }
         let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
-        let requested: &[ShardIndex] = if parity.is_empty() {
-            &data_indices
-        } else {
-            &all_indices
-        };
+        // Only the shards with a stream are asked for; one that could not
+        // be opened is simply not among them, and the decoder rebuilds the
+        // data from whatever k it has.
+        let requested: Vec<ShardIndex> = sources.iter().map(|s| s.index).collect();
         let internal = |e: djbod_core::stripe::StripeError| ErrorDetail {
             key: Some(key.to_string()),
             version: Some(record.version),
             stripe: Some(stripe),
             ..ErrorDetail::new(ErrorCode::Internal, e.to_string())
         };
-        let mut decoded = match decode_stripe(&code, requested, &received, stripe_len) {
+        let mut decoded = match decode_stripe(&code, &requested, &received, stripe_len) {
             Ok(decoded) => decoded,
             Err(e) => return Err(fail_and_close(writer, id, internal(e)).await),
         };
-        if parity.is_empty() && !matches!(decoded, DecodedStripe::Intact { .. }) {
+        if !parity_open && !matches!(decoded, DecodedStripe::Intact { .. }) {
             // A damaged block: fetch the parity shards from this stripe
             // on and decode again from every block (11.4). Nothing is
             // written to any device; the damage is reported at the end.
-            parity = match open_shard_sources(
+            let opened = open_shards(
                 node,
                 &document,
                 &record,
@@ -978,17 +1106,23 @@ async fn get_object(
                 stripe,
                 geometry.block_count - stripe,
             )
-            .await
-            {
-                Ok(sources) => sources,
+            .await;
+            let mut parity = match opened {
+                Ok((opened, missing)) => {
+                    unreadable.extend(missing);
+                    opened
+                }
                 Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
                 Err(other) => return Err(other),
             };
+            parity_open = true;
             match read_stripe_blocks(&mut parity, stripe, key, &record).await {
                 Ok(blocks) => received.extend(blocks),
                 Err(detail) => return Err(fail_and_close(writer, id, detail).await),
             }
-            decoded = match decode_stripe(&code, &all_indices, &received, stripe_len) {
+            sources.extend(parity);
+            let requested: Vec<ShardIndex> = sources.iter().map(|s| s.index).collect();
+            decoded = match decode_stripe(&code, &requested, &received, stripe_len) {
                 Ok(decoded) => decoded,
                 Err(e) => return Err(fail_and_close(writer, id, internal(e)).await),
             };
@@ -997,13 +1131,17 @@ async fn get_object(
             DecodedStripe::Intact { data } => data,
             DecodedStripe::Repaired { data, faults } => {
                 for fault in faults {
+                    if unreadable.iter().any(|u| u.index == fault.index) {
+                        continue; // reported once for every stripe below
+                    }
                     reconstructed.push(Reconstruction {
-                        stripe,
                         shard_index: fault.index.0,
                         device: record
                             .device_for(fault.index)
                             .expect("validated record lists every index"),
                         fault: fault.kind,
+                        first_stripe: stripe,
+                        stripes: 1,
                     });
                 }
                 data
@@ -1052,11 +1190,22 @@ async fn get_object(
             sequence += 1;
         }
     }
+    // A shard that could not be opened was reconstructed around in every
+    // stripe from the one where it was first wanted.
+    for shard in unreadable {
+        reconstructed.push(Reconstruction {
+            shard_index: shard.index.0,
+            device: shard.device,
+            fault: shard.fault,
+            first_stripe: shard.first_stripe,
+            stripes: stripe_count - shard.first_stripe,
+        });
+    }
 
     // Every node ends its stream; a node reporting an error here means
     // the data above was served from a stream that then failed, which
     // cannot happen after all blocks arrived, but check anyway.
-    for source in sources.iter_mut().chain(parity.iter_mut()) {
+    for source in sources.iter_mut() {
         match source.connection.read_stream_item(source.request_id).await {
             Ok(StreamItem::End(end)) if end.error.is_none() => {}
             other => {

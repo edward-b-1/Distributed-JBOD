@@ -30,13 +30,24 @@ pub struct ShardBlock {
     pub checksum: BlockChecksum,
 }
 
-/// Why a received block could not be used. Travels with a read's
-/// terminating status when the block was reconstructed (SPEC 11.4).
+/// Why a block could not be used, or was never received. Travels with a
+/// read's terminating status when the block was reconstructed (SPEC
+/// 11.4). The decoder produces the first three; a read that could not
+/// open a shard at all reports the rest, for every stripe at once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultKind {
-    /// No block with this index was received.
+    /// No block with this index was received, or the shard file is not
+    /// there at all. It will not come back on its own; repair rewrites it.
     Missing,
+    /// The shard file could not be opened: truncated, a bad header, or
+    /// otherwise unreadable. It will not mend itself; repair rewrites it.
+    Unreadable { reason: String },
+    /// The shard's device is unavailable or its node unreachable (5.6),
+    /// which may be temporary. Nothing is known to be wrong with the
+    /// shard itself, and repair does nothing about it until the device
+    /// has left the document (18.3).
+    Unavailable { reason: String },
     /// The block's length is not the length every block in this stripe
     /// must have.
     WrongLength { expected: usize, actual: usize },

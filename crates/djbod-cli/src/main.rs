@@ -1836,15 +1836,28 @@ fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> Strin
     )];
     for r in reconstructed {
         let fault = match &r.fault {
-            FaultKind::Missing => "block missing".to_string(),
+            FaultKind::Missing => "missing".to_string(),
             FaultKind::WrongLength { expected, actual } => {
                 format!("wrong length: {actual} bytes, {expected} expected")
             }
             FaultKind::ChecksumMismatch { .. } => "checksum mismatch".to_string(),
+            FaultKind::Unreadable { reason } => format!("unreadable: {reason}"),
+            FaultKind::Unavailable { reason } => {
+                format!("unavailable, perhaps for now: {reason}")
+            }
+        };
+        let where_ = if r.stripes == 1 {
+            format!("stripe {}", r.first_stripe)
+        } else {
+            format!(
+                "stripes {}..{}",
+                r.first_stripe,
+                r.first_stripe + r.stripes - 1
+            )
         };
         lines.push(format!(
-            "  stripe {}  shard {}  device {}  {fault}",
-            r.stripe, r.shard_index, r.device.0
+            "  {where_}  shard {}  device {}  {fault}",
+            r.shard_index, r.device.0
         ));
     }
     lines.join("\n")

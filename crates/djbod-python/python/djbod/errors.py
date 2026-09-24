@@ -46,8 +46,11 @@ class DegradedWrite(Warning):
 class DegradedRead(Warning):
     """A read returned correct data only by reconstructing blocks from
     parity (SPEC 11.4). `key` names the object; `reconstructed` lists each
-    block as a dict: stripe, shard_index, device, fault. The damage on disk
-    stays until `repair` runs, and every read of the object pays again."""
+    entry as a dict: shard_index, device, fault, first_stripe, stripes (a
+    bad block is one stripe; a shard that could not be opened is every
+    stripe of the object). A fault of kind `unavailable` may be temporary,
+    a device or node that could not be reached; the others are damage on
+    disk that stays until `repair` runs, and every read pays again."""
 
     def __init__(self, message: str, key: str, reconstructed: list):
         super().__init__(message)
