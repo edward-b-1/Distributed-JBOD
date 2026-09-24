@@ -19,7 +19,8 @@ use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
     DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
     LocatedRecord, LookupCursor, Message, MessageError, NodeStatus, Reconstruction, RecordCursor,
-    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
+    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
+    DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -491,6 +492,10 @@ fn every_response_round_trips() {
         },
         Response::PutObject {
             version: VersionId([1u8; 16]),
+            unavailable: vec![UnavailableDevice {
+                device: device(2),
+                node: node(1),
+            }],
         },
         Response::GetObject {
             record: sample_record(),

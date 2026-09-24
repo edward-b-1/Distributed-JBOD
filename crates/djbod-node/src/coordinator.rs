@@ -31,7 +31,7 @@ use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
     ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, NodeStatus,
     Reconstruction, RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem,
-    ShardCondition, ShardRepair, StreamEnd,
+    ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -1184,7 +1184,12 @@ async fn put_object(
     // The client streams the body right behind the request, so from here
     // on any refusal must also close the connection (fail_and_close).
     let prepared = prepare_put(node, versions, &params).await;
-    let (scheme, record_template, mut writers) = match prepared {
+    let PreparedPut {
+        scheme,
+        record: record_template,
+        mut writers,
+        unavailable,
+    } = match prepared {
         Ok(p) => p,
         Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
         Err(other) => return Err(other),
@@ -1243,7 +1248,24 @@ async fn put_object(
             };
         }
     }
-    respond(writer, id, Ok(Response::PutObject { version })).await
+    respond(
+        writer,
+        id,
+        Ok(Response::PutObject {
+            version,
+            unavailable,
+        }),
+    )
+    .await
+}
+
+/// A write ready for its body: the scheme, the record to complete, a
+/// writer per chosen device, and the devices placement went around (5.6).
+struct PreparedPut {
+    scheme: Scheme,
+    record: MetadataRecord,
+    writers: Vec<ShardWriter>,
+    unavailable: Vec<UnavailableDevice>,
 }
 
 /// Everything before the first body byte is consumed: checks, placement,
@@ -1252,7 +1274,7 @@ async fn prepare_put(
     node: &Arc<Node>,
     versions: &VersionGenerator,
     params: &PutParams,
-) -> Result<(Scheme, MetadataRecord, Vec<ShardWriter>), Failure> {
+) -> Result<PreparedPut, Failure> {
     check_key(node, &params.key)?;
     if let Some(content_type) = &params.content_type {
         if content_type.len() > MAX_CONTENT_TYPE_BYTES {
@@ -1319,6 +1341,14 @@ async fn prepare_put(
             .ok_or_else(|| error(ErrorCode::Internal, "cannot size shard file"))?
     };
     let chosen = place(&statuses, scheme, shard_bytes)?;
+    let unavailable: Vec<UnavailableDevice> = statuses
+        .iter()
+        .filter(|d| d.state == DeviceState::Active && !d.available)
+        .map(|d| UnavailableDevice {
+            device: d.device,
+            node: d.node,
+        })
+        .collect();
     let version = versions.next();
 
     let mut writers = Vec::with_capacity(chosen.len());
@@ -1383,7 +1413,12 @@ async fn prepare_put(
         user_metadata: params.user_metadata.clone(),
         revision: 0,
     };
-    Ok((scheme, record, writers))
+    Ok(PreparedPut {
+        scheme,
+        record,
+        writers,
+        unavailable,
+    })
 }
 
 /// Read the client's body stream, encode it stripe by stripe, fan the

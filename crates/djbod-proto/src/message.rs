@@ -426,8 +426,11 @@ pub enum Response {
         devices: Vec<DeviceStatus>,
     },
     DeviceContents(DeviceContents),
+    /// The version written, and the devices the write went around
+    /// because their node could not read them (5.6).
     PutObject {
         version: VersionId,
+        unavailable: Vec<UnavailableDevice>,
     },
     /// Followed by a body stream.
     GetObject {
@@ -698,6 +701,23 @@ pub struct Reconstruction {
     pub shard_index: u8,
     pub device: DeviceId,
     pub fault: FaultKind,
+}
+
+/// A device left out of a write's placement because its node could not
+/// read it (SPEC 5.6), reported with the version so the client knows
+/// the write went around it. Nothing is wrong with the object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableDevice {
+    pub device: DeviceId,
+    pub node: NodeId,
+}
+
+/// What a write returns: the version, and the devices it went around
+/// (5.6), empty when none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectWrite {
+    pub version: VersionId,
+    pub unavailable: Vec<UnavailableDevice>,
 }
 
 /// What a read returns beside the body: the record, and every block that

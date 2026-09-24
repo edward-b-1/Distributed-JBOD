@@ -740,8 +740,8 @@ async fn put_object(
     let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
         .await;
-    let version = match result {
-        Ok(version) => version,
+    let write = match result {
+        Ok(write) => write,
         Err(e) => {
             // The node has refused, but the browser may still be sending
             // the body. A response on a connection whose request body was
@@ -752,7 +752,13 @@ async fn put_object(
             return Err(e.into());
         }
     };
-    Ok(Json(json!({ "key": key, "version": version.to_text() })))
+    Ok(Json(json!({
+        "key": key,
+        "version": write.version.to_text(),
+        // Devices the write went around because their node cannot read
+        // them (SPEC 5.6).
+        "unavailable": write.unavailable,
+    })))
 }
 
 #[derive(Deserialize)]

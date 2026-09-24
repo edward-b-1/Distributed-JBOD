@@ -13,10 +13,9 @@ use uuid::Uuid;
 
 use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    NodeStatus, ObjectRead, RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    NodeStatus, ObjectRead, ObjectWrite, RepairReport, Request, Response, ScrubEvent, StreamEnd,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -310,13 +309,15 @@ impl Client {
 
     // ---------------------------------------------------------- objects
 
-    /// Store `body` under `key`. Returns the version id.
+    /// Store `body` under `key`. Returns the version id and the devices
+    /// the write went around because their node could not read them
+    /// (SPEC 5.6), empty when none.
     pub async fn put(
         &mut self,
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let mut cursor = body;
         self.put_from_reader(
             key,
@@ -338,7 +339,7 @@ impl Client {
         source: &mut R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let chunk = self.options.body_chunk;
         let result = self
             .connection()

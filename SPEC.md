@@ -240,7 +240,12 @@ the node observes and state is what the administrator decided.
 re-placement (18.8.2), and repair (18.3) leave an unavailable device
 out as they leave out a full one: a write goes ahead on the others if
 k+m of them have room, and is refused with `InsufficientDevices`,
-naming the unavailable devices, if not. A request naming the device is
+naming the unavailable devices, if not. A write that went around an
+unavailable device says so in its response, as a read says what it
+reconstructed (11.7): the client libraries return the list beside the
+version, the Python client raises a `DegradedWrite` warning, and `djbod
+put` prints the devices on standard error and exits 2, the object being
+stored and the cluster not whole. A request naming the device is
 refused with `DeviceUnavailable`.
 
 ## 6. Configuration
@@ -1693,7 +1698,8 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: key, size, optional content type, optional user metadata.
   Followed by a stream of `size` body bytes in frames of any length.
   Coordinator performs placement, encoding, and shard transfer. Response:
-  version id. Fails per section 16.
+  version id, and the devices placement went around because their node
+  could not read them (5.6), empty when none. Fails per section 16.
 
 `GetObject`
 : Request: key. Response: the metadata record, then a stream of body
