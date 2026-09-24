@@ -37,9 +37,9 @@ struct ObjectInfo {
     k: u8,
     m: u8,
     block_size: u64,
-    /// Blocks the read reconstructed from parity (SPEC 11.4), each with
-    /// stripe, shard_index, device and fault; empty when none, and for
-    /// `head`. The data was correct; the damage on disk is not repaired.
+    /// What the read reconstructed from parity (SPEC 11.4), each entry a
+    /// shard_index, device, fault, first_stripe and stripes; empty when
+    /// none, and for `head`. The data was correct; nothing was repaired.
     reconstructed: Py<PyAny>,
 }
 

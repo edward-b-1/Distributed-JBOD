@@ -353,7 +353,7 @@ async fn a_corrupt_block_is_reconstructed_from_parity_and_named() {
     assert_eq!(got, body);
     assert_eq!(read.reconstructed.len(), 1, "{:?}", read.reconstructed);
     let block = &read.reconstructed[0];
-    assert_eq!(block.stripe, 2);
+    assert_eq!((block.first_stripe, block.stripes), (2, 1));
     assert_eq!(block.shard_index, 1);
     assert_eq!(block.device, device);
     assert!(matches!(
@@ -585,7 +585,7 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
     // The read reconstructs both stripes from parity and says so (11.4).
     let (read, got) = client.get_object("k").await.expect("get");
     assert_eq!(got, body);
-    let stripes: Vec<u64> = read.reconstructed.iter().map(|r| r.stripe).collect();
+    let stripes: Vec<u64> = read.reconstructed.iter().map(|r| r.first_stripe).collect();
     assert_eq!(stripes, vec![1, 4], "{:?}", read.reconstructed);
 
     let report = repair(&mut client, "k").await;
@@ -1637,4 +1637,79 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
     // Everything that walks the whole key space still sees all of it.
     let events = run_scrub(&mut client, false).await;
     assert!(no_findings(&events), "{events:?}");
+}
+
+/// SPEC 11.4: a shard whose file is gone is reconstructed around from
+/// the first stripe and reported once, for every stripe; a second one
+/// beyond m refuses the read with the first shard's own code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
+    let test = start_node(4, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(5 * 3 * BLOCK as usize + 17, 13);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record } => record,
+        other => panic!("{other:?}"),
+    };
+    let device = record
+        .device_for(djbod_core::erasure::ShardIndex(2))
+        .expect("device");
+    let path = test.shard_path(device, "k", &record);
+    std::fs::remove_file(&path).expect("delete the shard file");
+
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.reconstructed.len(), 1, "{:?}", read.reconstructed);
+    let shard = &read.reconstructed[0];
+    assert_eq!(shard.shard_index, 2);
+    assert_eq!(shard.device, device);
+    assert_eq!(shard.fault, djbod_core::stripe::FaultKind::Missing);
+    assert_eq!((shard.first_stripe, shard.stripes), (0, 5));
+    assert!(!path.exists(), "the read recreated the shard file");
+
+    // A bad block elsewhere on top is one more entry, for its stripe.
+    let other = record
+        .device_for(djbod_core::erasure::ShardIndex(0))
+        .expect("device");
+    let other_path = test.shard_path(other, "k", &record);
+    let mut bytes = std::fs::read(&other_path).expect("read");
+    bytes[4096 + 3 * BLOCK as usize + 1] ^= 0x01;
+    std::fs::write(&other_path, &bytes).expect("write");
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let mut summary: Vec<(u8, u64, u64)> = read
+        .reconstructed
+        .iter()
+        .map(|r| (r.shard_index, r.first_stripe, r.stripes))
+        .collect();
+    summary.sort();
+    assert_eq!(
+        summary,
+        vec![(0, 3, 1), (2, 0, 5)],
+        "{:?}",
+        read.reconstructed
+    );
+
+    // Two shards gone with m = 1: refused before any body, as NotFound.
+    std::fs::remove_file(&other_path).expect("delete a second shard file");
+    match client.get_object("k").await {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::NotFound, "{detail:?}");
+            assert!(
+                detail.message.contains("2 of 4 shards cannot be read"),
+                "{detail:?}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }

@@ -768,7 +768,8 @@ async fn verify_names_the_damage_a_download_would_meet() {
     assert_eq!(done["verified"], true);
     assert!(done["error"].is_null(), "{done}");
     assert_eq!(done["reconstructed"][0]["shard_index"], 0, "{done}");
-    assert_eq!(done["reconstructed"][0]["stripe"], 0, "{done}");
+    assert_eq!(done["reconstructed"][0]["first_stripe"], 0, "{done}");
+    assert_eq!(done["reconstructed"][0]["stripes"], 1, "{done}");
     assert!(done["reconstructed"][0]["device"].is_string());
 
     let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;

@@ -989,16 +989,26 @@ read until one is needed.
 If a data block fails its checksum, the coordinator opens the parity
 shards from that stripe on, decodes the stripe from any k good blocks,
 and delivers it; it keeps reading all k+m shards to the end of the
-object. Nothing is written to any device: the damage stays until `djbod
-repair` (18.4), so every read of the object pays the reconstruction
-again, which is why the read says what it did. Every reconstructed
-block is listed in the stream's terminating status (11.7): stripe, shard
-index, device, and the fault (checksum mismatch, wrong length, missing).
-A stripe with more than m unusable blocks is an error identifying the
-device, key, version, shard index, and stripe number, delivered as the
-terminating status, and the client must treat the body as invalid. A
-device whose node is unreachable is refused before any block is served
-(16.1); there is no reconstruction around an absent node.
+object. A data shard that cannot be opened at all is treated the same
+way from the first stripe: its file is missing or unreadable, or its
+device is unavailable (5.6), or its node cannot be reached. Deletion,
+corruption, and absence are one kind of failure to a read, one shard's
+share of a stripe that k others can supply, and the read succeeds
+whenever at most m shards are out. Nothing is written to any device:
+the damage stays until `djbod repair` (18.4), so every read of the
+object pays the reconstruction again, which is why the read says what
+it did. Everything reconstructed is listed in the stream's terminating
+status (11.7), one entry per shard and fault over a range of stripes: a
+single bad block is one stripe, a shard that could not be opened is
+every stripe of the object in one entry. The fault says which: a
+checksum mismatch, a wrong length, a missing file, an unreadable file,
+or a device or node that was unavailable. The last may be temporary and
+nothing is known to be wrong with the shard; the others will not mend
+themselves, and `repair` rewrites them. More than m shards out is an
+error identifying the device, key, version and shard index, refused
+before any block when the shards could not be opened, or delivered as
+the terminating status when a stripe turned out to have too many bad
+blocks; either way the client must treat the body as invalid.
 
 11.5 [D] Reads stream. The coordinator holds a bounded number of stripes in
 memory at once.
@@ -1254,7 +1264,9 @@ the rule.
 to the client:
 
 - Any node in the cluster document does not respond to a broadcast.
-- Any device holding a shard needed for a read is unreachable.
+- More than m of an object's shards cannot be read at all, whether
+  missing, unreadable, or on a device or node that cannot be reached
+  (11.4); fewer are reconstructed around, served, and reported.
 - More than m blocks of a stripe are unusable (11.4); fewer are
   reconstructed from parity, served, and reported.
 - The whole-object checksum of a completed read does not match the record

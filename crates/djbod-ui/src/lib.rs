@@ -169,7 +169,7 @@ impl App {
         ErrorDetail {
             device: Some(first.device),
             shard_index: Some(first.shard_index),
-            stripe: Some(first.stripe),
+            stripe: Some(first.first_stripe),
             ..ErrorDetail::new(
                 ErrorCode::BlockChecksumMismatch,
                 format!(

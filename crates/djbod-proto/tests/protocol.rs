@@ -620,15 +620,27 @@ fn stream_end_round_trips_in_all_three_shapes() {
             error: None,
             object_size: Some(10 << 20),
             object_checksum: Some(BlockChecksum(5)),
-            reconstructed: vec![Reconstruction {
-                stripe: 7,
-                shard_index: 2,
-                device: device(1),
-                fault: FaultKind::ChecksumMismatch {
-                    stored: BlockChecksum(1),
-                    computed: BlockChecksum(2),
+            reconstructed: vec![
+                Reconstruction {
+                    shard_index: 2,
+                    device: device(1),
+                    fault: FaultKind::ChecksumMismatch {
+                        stored: BlockChecksum(1),
+                        computed: BlockChecksum(2),
+                    },
+                    first_stripe: 7,
+                    stripes: 1,
                 },
-            }],
+                Reconstruction {
+                    shard_index: 0,
+                    device: device(2),
+                    fault: FaultKind::Unavailable {
+                        reason: "node unreachable".to_string(),
+                    },
+                    first_stripe: 0,
+                    stripes: 40,
+                },
+            ],
         },
     });
     // The success case is tiny: one map with an empty `reconstructed`.

@@ -685,15 +685,19 @@ impl DataFrame {
     }
 }
 
-/// A block a read reconstructed from parity (SPEC 11.4): the data served
-/// was correct, and this is what was wrong on disk, for the client to
-/// report and `repair` to fix. Nothing was written.
+/// Blocks a read reconstructed from parity (SPEC 11.4): the data served
+/// was correct, and this is what was wrong, for the client to report
+/// and `repair` to fix. Nothing was written. One entry is one shard and
+/// one fault over `stripes` consecutive stripes from `first_stripe`: a
+/// single bad block is one stripe; a shard that could not be opened at
+/// all is every stripe of the object in one entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reconstruction {
-    pub stripe: u64,
     pub shard_index: u8,
     pub device: DeviceId,
     pub fault: FaultKind,
+    pub first_stripe: u64,
+    pub stripes: u64,
 }
 
 /// What a read returns beside the body: the record, and every block that
