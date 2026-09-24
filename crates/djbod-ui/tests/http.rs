@@ -283,9 +283,9 @@ async fn repair_rebuilds_a_shard_damaged_on_disk() {
     }
     assert!(damaged.is_some(), "no shard file written");
 
-    // The headers go out before the damage is met, so the response
-    // carries the full length but its body is cut short with an error
-    // rather than delivering wrong bytes.
+    // The damaged block is reconstructed from parity on the way (SPEC
+    // 11.4), so the download is complete and correct; the disk is not
+    // repaired until the repair below.
     let response = app(&test)
         .oneshot(
             Request::get("/api/download/a/b")
@@ -299,14 +299,8 @@ async fn repair_rebuilds_a_shard_damaged_on_disk() {
         response.headers()[header::CONTENT_LENGTH],
         body.len().to_string()
     );
-    let outcome = response.into_body().collect().await;
-    match outcome {
-        Err(e) => assert!(e.to_string().contains("BlockChecksumMismatch"), "{e}"),
-        Ok(collected) => assert!(
-            collected.to_bytes().len() < body.len(),
-            "a damaged read must not deliver the whole body"
-        ),
-    }
+    let collected = response.into_body().collect().await.expect("body");
+    assert_eq!(collected.to_bytes().as_ref(), body.as_slice());
 
     let (status, report) = post_json(&test, "/api/repair/a/b", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "{report}");
@@ -765,20 +759,28 @@ async fn verify_names_the_damage_a_download_would_meet() {
     }
     assert!(damaged.is_some());
 
+    // The body verifies, by reconstruction (SPEC 11.4): the verdict says
+    // which block was bad, and the key is noted as damaged until repaired.
     let (status, lines) = verify_lines(&test, "v/file").await;
     assert_eq!(status, StatusCode::OK, "{lines:?}");
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done", "{lines:?}");
-    assert_eq!(done["verified"], false);
-    assert_eq!(done["error"]["code"], "block_checksum_mismatch");
-    assert_eq!(done["error"]["shard_index"], 0);
-    assert_eq!(done["error"]["stripe"], 0);
-    assert!(done["error"]["device"].is_string());
+    assert_eq!(done["verified"], true);
+    assert!(done["error"].is_null(), "{done}");
+    assert_eq!(done["reconstructed"][0]["shard_index"], 0, "{done}");
+    assert_eq!(done["reconstructed"][0]["stripe"], 0, "{done}");
+    assert!(done["reconstructed"][0]["device"].is_string());
 
     let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "{report}");
     let (_, lines) = verify_lines(&test, "v/file").await;
-    assert_eq!(lines.last().unwrap()["verified"], true, "{lines:?}");
+    let done = lines.last().unwrap();
+    assert_eq!(done["verified"], true, "{lines:?}");
+    assert_eq!(
+        done["reconstructed"].as_array().map(Vec::len),
+        Some(0),
+        "{done}"
+    );
 
     let (status, lines) = verify_lines(&test, "v/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{lines:?}");
@@ -961,9 +963,11 @@ async fn a_read_the_node_stopped_is_remembered_until_something_succeeds() {
         }
     }
 
+    // The download is complete, by reconstruction (SPEC 11.4), and the
+    // damage it met is noted against the key.
     let (status, collected) = get("/api/download/f/one").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(collected.is_err(), "the damaged download must be cut short");
+    assert!(collected.is_ok(), "the reconstructed download completes");
     let listed = failures().await;
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["key"], "f/one");

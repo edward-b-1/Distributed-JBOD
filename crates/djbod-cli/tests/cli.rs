@@ -186,7 +186,7 @@ async fn put_get_head_list_delete_from_the_command_line() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_get_removes_the_partial_output_file() {
+async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_its_output() {
     let test = start_node(2, 1, 1).await;
     let work = tempfile::tempdir().expect("temp dir");
     let body = xorshift64_bytes(4 * 64 * 1024, 2);
@@ -217,7 +217,45 @@ async fn a_failed_get_removes_the_partial_output_file() {
     bytes[4096 + 3 * 64 * 1024 + 5] ^= 0x01;
     std::fs::write(&shard, &bytes).expect("write shard");
 
+    // One bad block is reconstructed from the parity shard and served
+    // (SPEC 11.4): the file is complete and correct, standard error names
+    // the block, and the exit code is 2 so a pipeline notices.
     let output = work.path().join("output.bin");
+    let run = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "get",
+            "k",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run djbod");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("1 block(s) reconstructed from parity"),
+        "{err}"
+    );
+    assert!(err.contains("stripe 3  shard 0"), "{err}");
+    assert_eq!(std::fs::read(&output).expect("output"), body);
+
+    // Damage the parity shard's copy of the same block too: beyond m,
+    // the read fails and the partial output is removed.
+    let other = test
+        .node
+        .devices()
+        .into_iter()
+        .find(|d| d.id().0.to_string() != device0)
+        .expect("the other device");
+    let parity = other
+        .object_directory(&djbod_core::keyhash::hash_key(b"k"))
+        .join(format!("{version}.1.shard"));
+    let mut bytes = std::fs::read(&parity).expect("read parity shard");
+    bytes[4096 + 3 * 64 * 1024 + 9] ^= 0x01;
+    std::fs::write(&parity, &bytes).expect("write parity shard");
     let (ok, _, err) = djbod(&test, &["get", "k", output.to_str().unwrap()]);
     assert!(!ok);
     assert!(err.contains("BlockChecksumMismatch"), "{err}");

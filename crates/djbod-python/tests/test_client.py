@@ -104,3 +104,32 @@ def test_device_contents_are_counted(client):
     with pytest.raises(ValueError):
         client.device_contents("not a uuid")
     client.delete("counted")
+
+
+def test_a_reconstructed_read_warns_and_returns_correct_data(client):
+    import warnings
+
+    from conftest import DEVICE_DIRS
+
+    body = bytes(range(256)) * 300
+    client.put("damaged", body)
+    # 1+1: shard 0 is the data, shard 1 the parity. Flip a byte of block 0.
+    shard = next(p for d in DEVICE_DIRS for p in d.rglob("*.0.shard"))
+    raw = bytearray(shard.read_bytes())
+    raw[4096 + 3] ^= 0x01
+    shard.write_bytes(raw)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert client.get("damaged") == body
+    degraded = [w.message for w in caught if isinstance(w.message, djbod.DegradedRead)]
+    assert len(degraded) == 1, [str(w.message) for w in caught]
+    assert degraded[0].key == "damaged"
+    assert degraded[0].reconstructed[0]["stripe"] == 0
+    assert degraded[0].reconstructed[0]["shard_index"] == 0
+    assert degraded[0].reconstructed[0]["fault"]["kind"] == "checksum_mismatch"
+    # Nothing was repaired: the next read reconstructs again.
+    with warnings.catch_warnings(record=True) as again:
+        warnings.simplefilter("always")
+        info = client.get_to_file("damaged", str(shard.parent / "out.bin"))
+    assert any(isinstance(w.message, djbod.DegradedRead) for w in again)
+    assert info.reconstructed[0]["stripe"] == 0

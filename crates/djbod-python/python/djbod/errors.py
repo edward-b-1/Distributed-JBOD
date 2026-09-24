@@ -28,3 +28,15 @@ class NodeError(Error):
 
 class NotFound(NodeError):
     """No object under that key."""
+
+
+class DegradedRead(Warning):
+    """A read returned correct data only by reconstructing blocks from
+    parity (SPEC 11.4). `key` names the object; `reconstructed` lists each
+    block as a dict: stripe, shard_index, device, fault. The damage on disk
+    stays until `repair` runs, and every read of the object pays again."""
+
+    def __init__(self, message: str, key: str, reconstructed: list):
+        super().__init__(message)
+        self.key = key
+        self.reconstructed = reconstructed

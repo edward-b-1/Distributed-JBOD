@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use xxhash_rust::xxh3::Xxh3;
 
 use djbod_core::checksum::{checksum_block, BlockChecksum};
-use djbod_core::cluster::{DeviceState, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
 use djbod_core::record::{
@@ -30,8 +30,8 @@ use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
     ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, NodeStatus,
-    RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem, ShardCondition,
-    ShardRepair, StreamEnd,
+    Reconstruction, RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem,
+    ShardCondition, ShardRepair, StreamEnd,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -711,6 +711,127 @@ struct ShardSource {
     request_id: u32,
 }
 
+/// Open a block stream for each of `indices` from `first_block` on, so
+/// that a device that cannot serve fails the request before any block is
+/// read (11.4).
+async fn open_shard_sources(
+    node: &Arc<Node>,
+    document: &ClusterDocument,
+    record: &MetadataRecord,
+    key: &str,
+    indices: &[ShardIndex],
+    first_block: u64,
+    block_count: u64,
+) -> Result<Vec<ShardSource>, Failure> {
+    let scheme = record
+        .scheme()
+        .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
+    let mut sources: Vec<ShardSource> = Vec::with_capacity(indices.len());
+    for &index in indices {
+        let device = record
+            .device_for(index)
+            .expect("validated record lists every index");
+        let owner = document.device(device).map(|d| d.node).ok_or_else(|| {
+            Failure::Error(ErrorDetail {
+                device: Some(device),
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                shard_index: Some(index.0),
+                ..ErrorDetail::new(
+                    ErrorCode::DeviceUnavailable,
+                    format!("{device} is not in the cluster document"),
+                )
+            })
+        })?;
+        let mut connection = connect_to(node, owner).await?;
+        let request_id = connection
+            .send_request(Request::GetShard {
+                device,
+                key_hash: record.key_hash,
+                version: record.version,
+                shard_index: index.0,
+                first_block,
+                block_count,
+            })
+            .await
+            .map_err(|e| remote_failure(owner, e))?;
+        match connection.read_response(request_id).await {
+            Ok(Response::GetShard { .. }) => {}
+            Ok(other) => {
+                return Err(error(
+                    ErrorCode::ProtocolViolation,
+                    format!("{owner} answered GetShard with {other:?}"),
+                ))
+            }
+            Err(e) => return Err(remote_failure(owner, e)),
+        }
+        sources.push(ShardSource {
+            index,
+            device,
+            owner,
+            connection,
+            request_id,
+        });
+    }
+    debug_assert!(indices.len() <= scheme.total_shards());
+    Ok(sources)
+}
+
+/// One block for `stripe` from each source, in source order. A stream
+/// that ends early, or out of order, is the error it names.
+async fn read_stripe_blocks(
+    sources: &mut [ShardSource],
+    stripe: u64,
+    key: &str,
+    record: &MetadataRecord,
+) -> Result<Vec<ShardBlock>, ErrorDetail> {
+    let mut received: Vec<ShardBlock> = Vec::with_capacity(sources.len());
+    for source in sources.iter_mut() {
+        let context = |detail: ErrorDetail| ErrorDetail {
+            node: Some(source.owner),
+            device: Some(source.device),
+            key: Some(key.to_string()),
+            version: Some(record.version),
+            shard_index: Some(source.index.0),
+            stripe: Some(stripe),
+            ..detail
+        };
+        match source.connection.read_stream_item(source.request_id).await {
+            Ok(StreamItem::Data(data)) => {
+                if data.sequence != stripe {
+                    return Err(context(ErrorDetail::new(
+                        ErrorCode::ProtocolViolation,
+                        format!(
+                            "node sent block {} when {stripe} was expected",
+                            data.sequence
+                        ),
+                    )));
+                }
+                received.push(ShardBlock {
+                    index: source.index,
+                    bytes: data.bytes,
+                    checksum: data.checksum,
+                });
+            }
+            Ok(StreamItem::End(end)) => {
+                return Err(context(end.error.unwrap_or_else(|| {
+                    ErrorDetail::new(
+                        ErrorCode::ProtocolViolation,
+                        "node ended its stream early".to_string(),
+                    )
+                })));
+            }
+            Err(e) => {
+                let Failure::Error(detail) = remote_failure(source.owner, e) else {
+                    unreachable!("remote_failure always yields an error detail")
+                };
+                return Err(detail);
+            }
+        }
+    }
+    Ok(received)
+}
+
 async fn get_object(
     node: &Arc<Node>,
     id: u32,
@@ -733,91 +854,44 @@ async fn get_object(
         }
     };
     let document = node.document();
+    // An empty object has no stripes and reads no shard; its geometry is
+    // never used, so any valid one will do.
+    let geometry = match shard_geometry(scheme, record.block_size, record.size.max(1)) {
+        Some(g) => g,
+        None => {
+            return respond(
+                writer,
+                id,
+                Err(error(
+                    ErrorCode::RecordsInconsistent,
+                    "record has an impossible size",
+                )),
+            )
+            .await
+        }
+    };
 
     // Open one connection per data shard and start every block streaming
     // before answering the client, so a missing device fails the request
-    // cleanly rather than mid-body (11.4).
-    let mut sources: Vec<ShardSource> = Vec::with_capacity(scheme.data_shards());
+    // cleanly rather than mid-body (11.4). Parity is not read unless a
+    // block turns out damaged.
+    let data_indices = scheme.data_shard_indices();
+    let mut sources: Vec<ShardSource> = Vec::new();
     if record.size > 0 {
-        let geometry = match shard_geometry(scheme, record.block_size, record.size) {
-            Some(g) => g,
-            None => {
-                return respond(
-                    writer,
-                    id,
-                    Err(error(
-                        ErrorCode::RecordsInconsistent,
-                        "record has an impossible size",
-                    )),
-                )
-                .await
-            }
+        sources = match open_shard_sources(
+            node,
+            &document,
+            &record,
+            key,
+            &data_indices,
+            0,
+            geometry.block_count,
+        )
+        .await
+        {
+            Ok(sources) => sources,
+            Err(f) => return respond(writer, id, Err(f)).await,
         };
-        for index in scheme.data_shard_indices() {
-            let device = record
-                .device_for(index)
-                .expect("validated record lists every index");
-            let owner = match document.device(device).map(|d| d.node) {
-                Some(owner) => owner,
-                None => {
-                    return respond(
-                        writer,
-                        id,
-                        Err(Failure::Error(ErrorDetail {
-                            device: Some(device),
-                            key: Some(key.to_string()),
-                            version: Some(record.version),
-                            shard_index: Some(index.0),
-                            ..ErrorDetail::new(
-                                ErrorCode::DeviceUnavailable,
-                                format!("{device} is not in the cluster document"),
-                            )
-                        })),
-                    )
-                    .await
-                }
-            };
-            let mut connection = match connect_to(node, owner).await {
-                Ok(c) => c,
-                Err(f) => return respond(writer, id, Err(f)).await,
-            };
-            let request_id = match connection
-                .send_request(Request::GetShard {
-                    device,
-                    key_hash: record.key_hash,
-                    version: record.version,
-                    shard_index: index.0,
-                    first_block: 0,
-                    block_count: geometry.block_count,
-                })
-                .await
-            {
-                Ok(id) => id,
-                Err(e) => return respond(writer, id, Err(remote_failure(owner, e))).await,
-            };
-            match connection.read_response(request_id).await {
-                Ok(Response::GetShard { .. }) => {}
-                Ok(other) => {
-                    return respond(
-                        writer,
-                        id,
-                        Err(error(
-                            ErrorCode::ProtocolViolation,
-                            format!("{owner} answered GetShard with {other:?}"),
-                        )),
-                    )
-                    .await
-                }
-                Err(e) => return respond(writer, id, Err(remote_failure(owner, e))).await,
-            }
-            sources.push(ShardSource {
-                index,
-                device,
-                owner,
-                connection,
-                request_id,
-            });
-        }
     }
 
     respond(
@@ -830,88 +904,99 @@ async fn get_object(
     .await?;
 
     let code = ReedSolomonCode::new(scheme);
-    let data_indices = scheme.data_shard_indices();
+    let all_indices = scheme.shard_indices();
+    let parity_indices: Vec<ShardIndex> = all_indices
+        .iter()
+        .copied()
+        .filter(|i| !data_indices.contains(i))
+        .collect();
     let stripe_size = scheme.data_shards() as u64 * record.block_size;
     let stripe_count = record.size.div_ceil(stripe_size.max(1));
+    // Opened at the first damaged stripe and read from there to the end
+    // (11.4); empty until then.
+    let mut parity: Vec<ShardSource> = Vec::new();
+    let mut reconstructed: Vec<Reconstruction> = Vec::new();
     let mut hasher = Xxh3::new();
     let mut delivered: u64 = 0;
     let mut sequence: u64 = 0;
     for stripe in 0..stripe_count {
-        let mut received: Vec<ShardBlock> = Vec::with_capacity(sources.len());
-        for source in sources.iter_mut() {
-            match source.connection.read_stream_item(source.request_id).await {
-                Ok(StreamItem::Data(data)) => {
-                    if data.sequence != stripe {
-                        let detail = ErrorDetail {
-                            node: Some(source.owner),
-                            device: Some(source.device),
-                            key: Some(key.to_string()),
-                            version: Some(record.version),
-                            shard_index: Some(source.index.0),
-                            stripe: Some(stripe),
-                            ..ErrorDetail::new(
-                                ErrorCode::ProtocolViolation,
-                                format!(
-                                    "node sent block {} when {stripe} was expected",
-                                    data.sequence
-                                ),
-                            )
-                        };
-                        return Err(fail_and_close(writer, id, detail).await);
-                    }
-                    received.push(ShardBlock {
-                        index: source.index,
-                        bytes: data.bytes,
-                        checksum: data.checksum,
-                    });
-                }
-                Ok(StreamItem::End(end)) => {
-                    let detail = ErrorDetail {
-                        node: Some(source.owner),
-                        device: Some(source.device),
-                        key: Some(key.to_string()),
-                        version: Some(record.version),
-                        shard_index: Some(source.index.0),
-                        stripe: Some(stripe),
-                        ..end.error.unwrap_or_else(|| {
-                            ErrorDetail::new(
-                                ErrorCode::ProtocolViolation,
-                                "node ended its stream early".to_string(),
-                            )
-                        })
-                    };
-                    return Err(fail_and_close(writer, id, detail).await);
-                }
-                Err(e) => {
-                    let Failure::Error(detail) = remote_failure(source.owner, e) else {
-                        unreachable!("remote_failure always yields an error detail")
-                    };
-                    return Err(fail_and_close(writer, id, detail).await);
-                }
+        let mut received = match read_stripe_blocks(&mut sources, stripe, key, &record).await {
+            Ok(blocks) => blocks,
+            Err(detail) => return Err(fail_and_close(writer, id, detail).await),
+        };
+        if !parity.is_empty() {
+            match read_stripe_blocks(&mut parity, stripe, key, &record).await {
+                Ok(blocks) => received.extend(blocks),
+                Err(detail) => return Err(fail_and_close(writer, id, detail).await),
             }
         }
         let stripe_len = (record.size - stripe * stripe_size).min(stripe_size) as usize;
-        let decoded = match decode_stripe(&code, &data_indices, &received, stripe_len) {
-            Ok(decoded) => decoded,
-            Err(e) => {
-                let detail = ErrorDetail {
-                    key: Some(key.to_string()),
-                    version: Some(record.version),
-                    stripe: Some(stripe),
-                    ..ErrorDetail::new(ErrorCode::Internal, e.to_string())
-                };
-                return Err(fail_and_close(writer, id, detail).await);
-            }
+        let requested: &[ShardIndex] = if parity.is_empty() {
+            &data_indices
+        } else {
+            &all_indices
         };
+        let internal = |e: djbod_core::stripe::StripeError| ErrorDetail {
+            key: Some(key.to_string()),
+            version: Some(record.version),
+            stripe: Some(stripe),
+            ..ErrorDetail::new(ErrorCode::Internal, e.to_string())
+        };
+        let mut decoded = match decode_stripe(&code, requested, &received, stripe_len) {
+            Ok(decoded) => decoded,
+            Err(e) => return Err(fail_and_close(writer, id, internal(e)).await),
+        };
+        if parity.is_empty() && !matches!(decoded, DecodedStripe::Intact { .. }) {
+            // A damaged block: fetch the parity shards from this stripe
+            // on and decode again from every block (11.4). Nothing is
+            // written to any device; the damage is reported at the end.
+            parity = match open_shard_sources(
+                node,
+                &document,
+                &record,
+                key,
+                &parity_indices,
+                stripe,
+                geometry.block_count - stripe,
+            )
+            .await
+            {
+                Ok(sources) => sources,
+                Err(Failure::Error(detail)) => return Err(fail_and_close(writer, id, detail).await),
+                Err(other) => return Err(other),
+            };
+            match read_stripe_blocks(&mut parity, stripe, key, &record).await {
+                Ok(blocks) => received.extend(blocks),
+                Err(detail) => return Err(fail_and_close(writer, id, detail).await),
+            }
+            decoded = match decode_stripe(&code, &all_indices, &received, stripe_len) {
+                Ok(decoded) => decoded,
+                Err(e) => return Err(fail_and_close(writer, id, internal(e)).await),
+            };
+        }
         let data = match decoded {
             DecodedStripe::Intact { data } => data,
-            DecodedStripe::Repaired { faults, .. }
-            | DecodedStripe::Unrecoverable { faults, .. } => {
-                // Fail-stop (11.4): no reconstruction is served in v1.
+            DecodedStripe::Repaired { data, faults } => {
+                for fault in faults {
+                    reconstructed.push(Reconstruction {
+                        stripe,
+                        shard_index: fault.index.0,
+                        device: record
+                            .device_for(fault.index)
+                            .expect("validated record lists every index"),
+                        fault: fault.kind,
+                    });
+                }
+                data
+            }
+            DecodedStripe::Unrecoverable {
+                usable,
+                needed,
+                faults,
+            } => {
                 let first = &faults[0];
-                let device = record.device_for(first.index);
                 let detail = ErrorDetail {
-                    device,
+                    device: record.device_for(first.index),
                     key: Some(key.to_string()),
                     version: Some(record.version),
                     shard_index: Some(first.index.0),
@@ -919,7 +1004,7 @@ async fn get_object(
                     ..ErrorDetail::new(
                         ErrorCode::BlockChecksumMismatch,
                         format!(
-                            "{} damaged block(s) in stripe {stripe}; first: {:?}",
+                            "{} damaged block(s) in stripe {stripe}, {usable} usable of {needed} needed; first: {:?}",
                             faults.len(),
                             first.kind
                         ),
@@ -952,7 +1037,7 @@ async fn get_object(
     // Every node ends its stream; a node reporting an error here means
     // the data above was served from a stream that then failed, which
     // cannot happen after all blocks arrived, but check anyway.
-    for source in sources.iter_mut() {
+    for source in sources.iter_mut().chain(parity.iter_mut()) {
         match source.connection.read_stream_item(source.request_id).await {
             Ok(StreamItem::End(end)) if end.error.is_none() => {}
             other => {
@@ -972,7 +1057,8 @@ async fn get_object(
         }
     }
 
-    // The whole-object check (11.7), delivered as the stream's status.
+    // The whole-object check (11.7), delivered as the stream's status,
+    // with what was reconstructed on the way (11.4).
     let computed = BlockChecksum(hasher.digest());
     if delivered != record.size || computed != record.object_checksum {
         let detail = ErrorDetail {
@@ -992,7 +1078,12 @@ async fn get_object(
         writer,
         &Message::EndOfStream {
             id,
-            end: StreamEnd::ok(),
+            end: StreamEnd {
+                error: None,
+                object_size: None,
+                object_checksum: None,
+                reconstructed,
+            },
         },
     )
     .await?;
@@ -1382,6 +1473,7 @@ async fn stream_body_to_writers(
                         error: None,
                         object_size: Some(record.size),
                         object_checksum: Some(object_checksum),
+                        reconstructed: Vec::new(),
                     },
                 )
                 .await
@@ -2157,6 +2249,7 @@ async fn rebuild_shards(
                     error: None,
                     object_size: Some(record.size),
                     object_checksum: Some(record.object_checksum),
+                    reconstructed: Vec::new(),
                 },
             )
             .await
@@ -2749,6 +2842,7 @@ async fn copy_shard(
                     error: Some(detail),
                     object_size: None,
                     object_checksum: None,
+                    reconstructed: Vec::new(),
                 },
             )
             .await;
@@ -2832,6 +2926,7 @@ async fn relay_shard_blocks(
             error: None,
             object_size: Some(record.size),
             object_checksum: Some(record.object_checksum),
+            reconstructed: Vec::new(),
         },
     )
     .await

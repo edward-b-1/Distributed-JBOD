@@ -936,7 +936,7 @@ async function list(page = 1) {
 function renderListing() {
   const { keys, truncated } = state.listing;
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object was stopped by the node; open it for details' }) : null),
+    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
     el('td', { class: 'key', text: k.key }),
     el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
   if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));

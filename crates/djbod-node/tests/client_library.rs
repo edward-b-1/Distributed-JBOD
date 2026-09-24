@@ -131,11 +131,12 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
         .put("k", &body, Some("application/octet-stream".to_string()))
         .await
         .expect("put");
-    let (record, got) = client.get("k").await.expect("get");
+    let (read, got) = client.get("k").await.expect("get");
     assert_eq!(got, body);
-    assert_eq!(record.version, version);
+    assert_eq!(read.record.version, version);
+    assert!(read.reconstructed.is_empty());
     assert_eq!(
-        record.content_type.as_deref(),
+        read.record.content_type.as_deref(),
         Some("application/octet-stream")
     );
     let head = client.head("k").await.expect("head");
@@ -219,7 +220,7 @@ async fn the_blocking_client_does_the_same_without_async() {
             Default::default(),
         )?;
         let mut sink = Vec::new();
-        let record = client.get_to_writer("two", &mut sink)?;
+        let record = client.get_to_writer("two", &mut sink)?.record;
         assert_eq!(sink, body);
         let keys = client.list_all(None)?;
         let status = client.status()?;

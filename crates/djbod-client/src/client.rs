@@ -16,7 +16,7 @@ use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    NodeStatus, RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    NodeStatus, ObjectRead, RepairReport, Request, Response, ScrubEvent, StreamEnd,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -350,22 +350,26 @@ impl Client {
         result
     }
 
-    /// Fetch an object and its record.
-    pub async fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
+    /// Fetch an object: its record, what the read had to reconstruct
+    /// from parity (SPEC 11.4; empty when nothing), and the body.
+    pub async fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         let mut body = Vec::new();
-        let record = self.get_to_writer(key, &mut body).await?;
-        Ok((record, body))
+        let read = self.get_to_writer(key, &mut body).await?;
+        Ok((read, body))
     }
 
     /// Fetch an object, writing the body to `sink` as it arrives. Every
     /// block is checked against its checksum by the node before it is
     /// sent, and the whole object's checksum at the end; a failure part
-    /// way leaves `sink` with what arrived so far, and says so.
+    /// way leaves `sink` with what arrived so far, and says so. A block
+    /// the node reconstructed from parity is listed in the result: the
+    /// bytes are correct, the damage on disk is not repaired, and every
+    /// read pays again until it is (11.4).
     pub async fn get_to_writer<W: AsyncWrite + Unpin>(
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<MetadataRecord, ClientError> {
+    ) -> Result<ObjectRead, ClientError> {
         let result = self
             .connection()
             .await?

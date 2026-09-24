@@ -10,6 +10,7 @@ use djbod_core::keyhash::hash_key;
 use djbod_core::record::{
     DeviceId, MetadataRecord, ShardLocation, RECORD_FORMAT_VERSION, SYSTEM_NAME,
 };
+use djbod_core::stripe::FaultKind;
 use djbod_core::version::VersionId;
 use djbod_proto::frame::{
     Frame, FrameError, FrameHeader, MessageType, HEADER_LEN, MAX_PAYLOAD_LEN,
@@ -17,8 +18,8 @@ use djbod_proto::frame::{
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
     DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    LocatedRecord, LookupCursor, Message, MessageError, NodeStatus, RecordCursor, RepairReport,
-    Request, Response, ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
+    LocatedRecord, LookupCursor, Message, MessageError, NodeStatus, Reconstruction, RecordCursor,
+    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -619,9 +620,18 @@ fn stream_end_round_trips_in_all_three_shapes() {
             error: None,
             object_size: Some(10 << 20),
             object_checksum: Some(BlockChecksum(5)),
+            reconstructed: vec![Reconstruction {
+                stripe: 7,
+                shard_index: 2,
+                device: device(1),
+                fault: FaultKind::ChecksumMismatch {
+                    stored: BlockChecksum(1),
+                    computed: BlockChecksum(2),
+                },
+            }],
         },
     });
-    // The success case is tiny.
+    // The success case is tiny: one map with an empty `reconstructed`.
     let ok = Message::EndOfStream {
         id: 1,
         end: StreamEnd::ok(),
@@ -629,7 +639,7 @@ fn stream_end_round_trips_in_all_three_shapes() {
     .encode()
     .expect("encode");
     assert!(
-        ok.len() <= HEADER_LEN + 4,
+        ok.len() <= HEADER_LEN + 4 + "reconstructed".len(),
         "StreamEnd::ok is {} bytes",
         ok.len()
     );

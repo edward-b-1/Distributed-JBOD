@@ -14,7 +14,9 @@ use djbod_core::erasure::ShardIndex;
 use djbod_core::record::DeviceId;
 use djbod_core::stripe::ShardBlock;
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{DataFrame, ErrorDetail, Message, Request, Response, StreamEnd};
+use djbod_proto::message::{
+    DataFrame, ErrorDetail, Message, ObjectRead, Request, Response, StreamEnd,
+};
 
 use crate::transport::{Connector, Stream};
 use crate::wire::{read_message, write_message, WireError};
@@ -234,6 +236,7 @@ impl Connection {
                 error: None,
                 object_size: Some(object_size),
                 object_checksum: Some(object_checksum),
+                reconstructed: Vec::new(),
             },
         )
         .await?;
@@ -414,10 +417,10 @@ impl Connection {
     pub async fn get_object(
         &mut self,
         key: &str,
-    ) -> Result<(djbod_core::record::MetadataRecord, Vec<u8>), ConnectionError> {
+    ) -> Result<(ObjectRead, Vec<u8>), ConnectionError> {
         let mut body = Vec::new();
-        let record = self.get_object_to_writer(key, &mut body).await?;
-        Ok((record, body))
+        let read = self.get_object_to_writer(key, &mut body).await?;
+        Ok((read, body))
     }
 
     /// Download an object, writing its body to `sink` as it arrives while
@@ -429,7 +432,7 @@ impl Connection {
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<djbod_core::record::MetadataRecord, ConnectionError> {
+    ) -> Result<ObjectRead, ConnectionError> {
         let id = self
             .send_request(Request::GetObject {
                 key: key.to_string(),
@@ -467,7 +470,10 @@ impl Connection {
                         return Err(ConnectionError::StreamFailed(error));
                     }
                     sink.flush().await.map_err(WireError::Io)?;
-                    return Ok(record);
+                    return Ok(ObjectRead {
+                        record,
+                        reconstructed: end.reconstructed,
+                    });
                 }
             }
         }
