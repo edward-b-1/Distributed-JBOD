@@ -142,8 +142,48 @@ What none of them offer is the recovery story: each object here is a
 plain JSON record beside a shard file on each disk, in a layout you can
 read, and `djbod-recover` reads the objects back from bare disks with
 nothing running. Where they win, they win clearly: S3 compatibility,
-scale, and years of production use. Distributed-JBOD is young, as the
-[Status](#status) section says.
+scale, years of production use, and high availability, which this
+project does not aim at, as the next section says. Distributed-JBOD is
+young, as the [Status](#status) section says.
+
+## When something fails
+
+Distributed-JBOD is built for one person's data on a few machines: a
+researcher who is also the administrator, a dataset of many terabytes,
+and consumer hardware that is probably aging. That sets the priorities.
+Durability first: erasure coding across every disk, and a checksum on
+every block, every record, and every object. Detection second: nothing
+wrong is ever read past. Availability third: the cluster need not stay
+up through a failure, but it must never be quiet about one.
+
+There is no alerting subsystem, no notification hook, no health daemon,
+and none is planned. The alarm is the operation. A read that meets a
+bad block, a corrupt record, or record copies that disagree fails and
+says what it found and where: the disk, the shard, the stripe. A write
+fails while any disk the cluster expects is unreadable, and names it.
+Your notebook or batch job stops with that error, which is how you find
+out, at the moment you would want to. `djbod status` and the web UI
+show the same facts on demand. `djbod scrub`, run by hand or from cron,
+checks every disk and every object and exits non-zero when it finds
+damage, so a scheduled scrub is one line of crontab and its exit code
+is the whole integration.
+
+Repair is a command, not a background process. `djbod repair <key>`
+rebuilds one object; `djbod scrub --repair` rebuilds everything the
+checks found; `djbod cluster remove-node --force` retires a machine
+that will never come back and rebuilds what it held elsewhere, and a
+device-level equivalent is planned. Each says what it will cost before
+it acts, and nothing moves data on its own.
+
+This is the opposite of high availability, and deliberately so. A
+system that keeps serving through failures with nobody watching needs a
+quorum service for its configuration, failure detectors, automatic
+rebalancing, and retries around every transient error, and those are
+the parts that make Ceph a job to run. Here one person can read the
+whole design, every piece of state is a file you can inspect, and a
+failure is loud at the point of use. If you need writes to keep flowing
+while a disk is dead and nobody is looking, you need one of the systems
+above.
 
 ## The tools
 
