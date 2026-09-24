@@ -1367,12 +1367,18 @@ async fn repair_rebuilds_the_shards_of_a_device_that_left_the_document() {
     next.version += 1;
     next.devices.retain(|d| d.id != lost);
     test.node.apply_document(next).expect("apply");
-    match client.get_object("k").await {
-        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
-            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
-        }
-        other => panic!("expected DeviceUnavailable, got {other:?}"),
-    }
+    // The read reconstructs around the lost shard and says so (11.4).
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert!(
+        matches!(
+            read.reconstructed.as_slice(),
+            [r] if r.shard_index == 2
+                && matches!(r.fault, djbod_core::stripe::FaultKind::Unavailable { .. })
+        ),
+        "{:?}",
+        read.reconstructed
+    );
 
     // Repair rebuilds the lost shard onto the spare device and moves the
     // record on by one revision (18.3).
@@ -1644,7 +1650,8 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
 /// beyond m refuses the read with the first shard's own code.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
-    let test = start_node(4, 3, 1).await;
+    // 3+2: room for a missing shard and a bad block in the same stripe.
+    let test = start_node(5, 3, 2).await;
     let mut client = test.client().await;
     let body = xorshift64_bytes(5 * 3 * BLOCK as usize + 17, 13);
     client
@@ -1674,7 +1681,8 @@ async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
     assert_eq!(shard.shard_index, 2);
     assert_eq!(shard.device, device);
     assert_eq!(shard.fault, djbod_core::stripe::FaultKind::Missing);
-    assert_eq!((shard.first_stripe, shard.stripes), (0, 5));
+    let stripe_count = (body.len() as u64).div_ceil(3 * BLOCK);
+    assert_eq!((shard.first_stripe, shard.stripes), (0, stripe_count));
     assert!(!path.exists(), "the read recreated the shard file");
 
     // A bad block elsewhere on top is one more entry, for its stripe.
@@ -1695,18 +1703,23 @@ async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
     summary.sort();
     assert_eq!(
         summary,
-        vec![(0, 3, 1), (2, 0, 5)],
+        vec![(0, 3, 1), (2, 0, stripe_count)],
         "{:?}",
         read.reconstructed
     );
 
-    // Two shards gone with m = 1: refused before any body, as NotFound.
+    // Three shards gone with m = 2: refused before any body, as NotFound,
+    // the message listing every shard that could not be read.
     std::fs::remove_file(&other_path).expect("delete a second shard file");
+    let third = record
+        .device_for(djbod_core::erasure::ShardIndex(1))
+        .expect("device");
+    std::fs::remove_file(test.shard_path(third, "k", &record)).expect("delete a third");
     match client.get_object("k").await {
         Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::NotFound, "{detail:?}");
             assert!(
-                detail.message.contains("2 of 4 shards cannot be read"),
+                detail.message.contains("3 of 5 shards cannot be read"),
                 "{detail:?}"
             );
         }
