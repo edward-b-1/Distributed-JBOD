@@ -21,7 +21,7 @@ use djbod_client::transport::Connector;
 use djbod_client::{ClientError, ClientOptions};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_proto::message::{
-    ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery, ObjectRead, Reconstruction,
+    ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery, ObjectRead, ObjectWrite, Reconstruction,
 };
 
 /// An object's record without its body.
@@ -67,6 +67,29 @@ impl ObjectInfo {
             reconstructed: pythonize(py, &Vec::<Reconstruction>::new())?.unbind(),
         })
     }
+}
+
+/// A `DegradedWrite` warning (SPEC 5.6) when a write went around devices
+/// the cluster cannot read: the object is safe, the cluster is not whole.
+fn warn_if_placed_around(py: Python<'_>, key: &str, write: &ObjectWrite) -> PyResult<()> {
+    if write.unavailable.is_empty() {
+        return Ok(());
+    }
+    let message = format!(
+        "{key}: placed around {} unavailable device(s); the object is stored on the others, and the cluster needs attention",
+        write.unavailable.len()
+    );
+    let warning = py
+        .import("djbod.errors")?
+        .getattr("DegradedWrite")?
+        .call1((
+            message,
+            key,
+            write.version.to_text(),
+            pythonize(py, &write.unavailable)?,
+        ))?;
+    py.import("warnings")?.call_method1("warn", (warning,))?;
+    Ok(())
 }
 
 /// A `DegradedRead` warning (SPEC 11.4) when a read had to reconstruct,
@@ -299,10 +322,11 @@ impl Client {
     ) -> PyResult<String> {
         let metadata: BTreeMap<String, String> = metadata.unwrap_or_default().into_iter().collect();
         let size = data.len() as u64;
-        self.call(py, |inner| {
+        let write = self.call(py, |inner| {
             inner.put_from_reader(key, size, data, content_type, metadata)
-        })
-        .map(|version| version.to_text())
+        })?;
+        warn_if_placed_around(py, key, &write)?;
+        Ok(write.version.to_text())
     }
 
     /// Store the file at `path` under `key`, streaming it; returns the
@@ -319,10 +343,11 @@ impl Client {
         let metadata: BTreeMap<String, String> = metadata.unwrap_or_default().into_iter().collect();
         let file = File::open(path)?;
         let size = file.metadata()?.len();
-        self.call(py, |inner| {
+        let write = self.call(py, |inner| {
             inner.put_from_reader(key, size, file, content_type, metadata)
-        })
-        .map(|version| version.to_text())
+        })?;
+        warn_if_placed_around(py, key, &write)?;
+        Ok(write.version.to_text())
     }
 
     /// Fetch an object's bytes.

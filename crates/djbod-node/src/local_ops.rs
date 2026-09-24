@@ -254,14 +254,19 @@ fn with_device(detail: ErrorDetail, device: DeviceId) -> ErrorDetail {
     }
 }
 
-/// The device named in a request, which must be one of ours.
+/// The device named in a request, which must be one of ours and opened.
 fn own_device(node: &Node, id: DeviceId) -> Result<Arc<Device>, Failure> {
     node.device(id).ok_or_else(|| {
+        let message = if node.unavailable_devices().contains(&id) {
+            format!(
+                "device {id:?} is unavailable on node {:?}: it was not opened at startup (SPEC 5.6)",
+                node.id()
+            )
+        } else {
+            format!("device {id:?} is not attached to node {:?}", node.id())
+        };
         Failure::Error(with_device(
-            ErrorDetail::new(
-                ErrorCode::DeviceUnavailable,
-                format!("device {id:?} is not attached to node {:?}", node.id()),
-            ),
+            ErrorDetail::new(ErrorCode::DeviceUnavailable, message),
             id,
         ))
     })
@@ -283,13 +288,16 @@ async fn blocking<T: Send + 'static>(
 
 async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
     let document = node.document();
+    let node_label = document.node(node.id()).and_then(|n| n.label.clone());
+    let state_of = |id: DeviceId| {
+        document
+            .device(id)
+            .map(|d| d.state)
+            .unwrap_or(DeviceState::Removed)
+    };
     let mut devices = Vec::new();
     for device in node.devices() {
         let headroom = document.headroom;
-        let state = document
-            .device(device.id())
-            .map(|d| d.state)
-            .unwrap_or(DeviceState::Removed);
         let id = device.id();
         let space = blocking(move || device.space(headroom))
             .await
@@ -300,11 +308,25 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
         devices.push(DeviceStatus {
             device: id,
             node: node.id(),
-            state,
+            state: state_of(id),
+            available: true,
             label: document.device(id).and_then(|d| d.label.clone()),
-            node_label: document.node(node.id()).and_then(|n| n.label.clone()),
+            node_label: node_label.clone(),
             total_bytes: space.total_bytes,
             free_bytes: space.free_bytes,
+        });
+    }
+    // Listed for this node but not opened (5.6): shown, with nothing free.
+    for id in node.unavailable_devices() {
+        devices.push(DeviceStatus {
+            device: id,
+            node: node.id(),
+            state: state_of(id),
+            available: false,
+            label: document.device(id).and_then(|d| d.label.clone()),
+            node_label: node_label.clone(),
+            total_bytes: 0,
+            free_bytes: 0,
         });
     }
     Ok(Response::LocalStatus {
@@ -375,15 +397,7 @@ async fn local_records(
     device: DeviceId,
     after: Option<RecordCursor>,
 ) -> Result<Response, Failure> {
-    let Some(device) = node.device(device) else {
-        return Err(Failure::Error(ErrorDetail {
-            device: Some(device),
-            ..ErrorDetail::new(
-                ErrorCode::DeviceUnavailable,
-                format!("{device} is not a device of this node"),
-            )
-        }));
-    };
+    let device = own_device(node, device)?;
     let id = device.id();
     // One page: as many records as fit in a frame with room to spare,
     // read from the cursor onwards and no further (SPEC 15.2.2).

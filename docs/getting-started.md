@@ -152,7 +152,9 @@ A `get` whose data had to be reconstructed from parity, because a block on
 some disk failed its checksum, still writes the correct bytes, then says
 on standard error which block was bad and exits 2: the data is right, the
 disk is not, and every read of that object pays again until `djbod repair
-<key>` fixes it.
+<key>` fixes it. A `put` that had to go around a disk the cluster cannot
+read stores the object on the others, names the disk on standard error,
+and exits 2 for the same reason.
 
 ```sh
 ```
