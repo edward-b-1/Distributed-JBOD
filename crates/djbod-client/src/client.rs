@@ -13,10 +13,9 @@ use uuid::Uuid;
 
 use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    NodeStatus, RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    NodeStatus, ObjectRead, ObjectWrite, RepairReport, Request, Response, ScrubEvent, StreamEnd,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -310,13 +309,15 @@ impl Client {
 
     // ---------------------------------------------------------- objects
 
-    /// Store `body` under `key`. Returns the version id.
+    /// Store `body` under `key`. Returns the version id and the devices
+    /// the write went around because their node could not read them
+    /// (SPEC 5.6), empty when none.
     pub async fn put(
         &mut self,
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let mut cursor = body;
         self.put_from_reader(
             key,
@@ -338,7 +339,7 @@ impl Client {
         source: &mut R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let chunk = self.options.body_chunk;
         let result = self
             .connection()
@@ -350,22 +351,26 @@ impl Client {
         result
     }
 
-    /// Fetch an object and its record.
-    pub async fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
+    /// Fetch an object: its record, what the read had to reconstruct
+    /// from parity (SPEC 11.4; empty when nothing), and the body.
+    pub async fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         let mut body = Vec::new();
-        let record = self.get_to_writer(key, &mut body).await?;
-        Ok((record, body))
+        let read = self.get_to_writer(key, &mut body).await?;
+        Ok((read, body))
     }
 
     /// Fetch an object, writing the body to `sink` as it arrives. Every
     /// block is checked against its checksum by the node before it is
     /// sent, and the whole object's checksum at the end; a failure part
-    /// way leaves `sink` with what arrived so far, and says so.
+    /// way leaves `sink` with what arrived so far, and says so. A block
+    /// the node reconstructed from parity is listed in the result: the
+    /// bytes are correct, the damage on disk is not repaired, and every
+    /// read pays again until it is (11.4).
     pub async fn get_to_writer<W: AsyncWrite + Unpin>(
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<MetadataRecord, ClientError> {
+    ) -> Result<ObjectRead, ClientError> {
         let result = self
             .connection()
             .await?

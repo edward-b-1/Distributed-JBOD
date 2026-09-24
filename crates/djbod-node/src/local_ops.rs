@@ -332,6 +332,7 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
             free_bytes: space.free_bytes,
         });
     }
+    // Listed for this node but not opened (5.6): shown, with nothing free.
     for id in node.unavailable_devices() {
         devices.push(DeviceStatus {
             device: id,

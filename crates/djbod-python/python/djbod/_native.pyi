@@ -12,6 +12,7 @@ class ObjectInfo:
     k: int
     m: int
     block_size: int
+    reconstructed: list[dict[str, Any]]
 
 class KeyEntry:
     key: str

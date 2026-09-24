@@ -76,7 +76,9 @@ use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
-use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response as Reply};
+use djbod_proto::message::{
+    ErrorCode, ErrorDetail, ListQuery, Reconstruction, Request, Response as Reply,
+};
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
@@ -158,6 +160,24 @@ impl App {
                 error,
             },
         );
+    }
+
+    /// The note a read that reconstructed from parity leaves (SPEC 11.4):
+    /// the bytes were right, the disk is not, and repair fixes it.
+    fn reconstruction_detail(reconstructed: &[Reconstruction]) -> ErrorDetail {
+        let first = &reconstructed[0];
+        ErrorDetail {
+            device: Some(first.device),
+            shard_index: Some(first.shard_index),
+            stripe: Some(first.stripe),
+            ..ErrorDetail::new(
+                ErrorCode::BlockChecksumMismatch,
+                format!(
+                    "{} block(s) reconstructed from parity; the data was correct, the damage on disk is not repaired",
+                    reconstructed.len()
+                ),
+            )
+        }
     }
 
     fn clear_failure(&self, key: &str) {
@@ -720,8 +740,8 @@ async fn put_object(
     let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
         .await;
-    let version = match result {
-        Ok(version) => version,
+    let write = match result {
+        Ok(write) => write,
         Err(e) => {
             // The node has refused, but the browser may still be sending
             // the body. A response on a connection whose request body was
@@ -732,7 +752,13 @@ async fn put_object(
             return Err(e.into());
         }
     };
-    Ok(Json(json!({ "key": key, "version": version.to_text() })))
+    Ok(Json(json!({
+        "key": key,
+        "version": write.version.to_text(),
+        // Devices the write went around because their node cannot read
+        // them (SPEC 5.6).
+        "unavailable": write.unavailable,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -886,8 +912,19 @@ async fn download_object(
                     // It also proves every shard read intact, so any note
                     // of an earlier failure on this key is dropped.
                     StreamItem::End(end) => match end.error {
-                        None => {
+                        None if end.reconstructed.is_empty() => {
                             app.clear_failure(&key);
+                            None
+                        }
+                        // Correct bytes, damaged disk (SPEC 11.4): noted
+                        // so the page shows it until a repair.
+                        None => {
+                            app.record_failure(
+                                &key,
+                                "download",
+                                delivered,
+                                App::reconstruction_detail(&end.reconstructed),
+                            );
                             None
                         }
                         Some(detail) => {
@@ -988,14 +1025,29 @@ async fn verify_object(
         app: app.clone(),
         key: key.clone(),
     };
-    /// The last line: the verdict, remembered or cleared for the key.
-    fn done(app: &App, key: &str, verified: bool, error: Option<ErrorDetail>, bytes: u64) -> Value {
+    /// The last line: the verdict, remembered or cleared for the key. A
+    /// verified body that needed reconstruction (SPEC 11.4) is damage on
+    /// disk, remembered as such.
+    fn done(
+        app: &App,
+        key: &str,
+        verified: bool,
+        error: Option<ErrorDetail>,
+        reconstructed: Vec<Reconstruction>,
+        bytes: u64,
+    ) -> Value {
         match &error {
-            None if verified => app.clear_failure(key),
+            None if verified && reconstructed.is_empty() => app.clear_failure(key),
+            None if verified => app.record_failure(
+                key,
+                "verify",
+                bytes,
+                App::reconstruction_detail(&reconstructed),
+            ),
             Some(detail) => app.record_failure(key, "verify", bytes, detail.clone()),
             None => {}
         }
-        json!({ "event": "done", "verified": verified, "error": error, "bytes": bytes })
+        json!({ "event": "done", "verified": verified, "error": error, "reconstructed": reconstructed, "bytes": bytes })
     }
     let lines = futures_util::stream::unfold(state, move |mut st| async move {
         if st.finished {
@@ -1015,7 +1067,7 @@ async fn verify_object(
                                 data.sequence
                             ),
                         );
-                        break done(&st.app, &st.key, false, Some(detail), st.bytes);
+                        break done(&st.app, &st.key, false, Some(detail), Vec::new(), st.bytes);
                     }
                     st.expected_sequence += 1;
                     st.bytes += data.bytes.len() as u64;
@@ -1028,7 +1080,14 @@ async fn verify_object(
                 }
                 Ok(StreamItem::End(end)) => {
                     st.finished = true;
-                    break done(&st.app, &st.key, end.error.is_none(), end.error, st.bytes);
+                    break done(
+                        &st.app,
+                        &st.key,
+                        end.error.is_none(),
+                        end.error,
+                        end.reconstructed,
+                        st.bytes,
+                    );
                 }
                 Err(e) => {
                     st.finished = true;
@@ -1036,7 +1095,7 @@ async fn verify_object(
                         ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
-                    break done(&st.app, &st.key, false, Some(detail), st.bytes);
+                    break done(&st.app, &st.key, false, Some(detail), Vec::new(), st.bytes);
                 }
             }
         };

@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 use djbod_core::cluster::ClusterDocument;
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DeviceContents, DrainEvent, KeyEntry, ListQuery, RepairReport, ScrubEvent, StreamEnd,
+    DeviceContents, DrainEvent, KeyEntry, ListQuery, ObjectRead, ObjectWrite, RepairReport,
+    ScrubEvent, StreamEnd,
 };
 
 pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, MoveShardReport, Status};
@@ -62,7 +62,7 @@ impl Client {
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         self.runtime
             .block_on(self.inner.put(key, body, content_type))
     }
@@ -76,7 +76,7 @@ impl Client {
         source: R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let mut source = BlockingReader(source);
         self.runtime.block_on(self.inner.put_from_reader(
             key,
@@ -87,7 +87,7 @@ impl Client {
         ))
     }
 
-    pub fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
+    pub fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         self.runtime.block_on(self.inner.get(key))
     }
 
@@ -96,7 +96,7 @@ impl Client {
         &mut self,
         key: &str,
         sink: W,
-    ) -> Result<MetadataRecord, ClientError> {
+    ) -> Result<ObjectRead, ClientError> {
         let mut sink = BlockingWriter(sink);
         self.runtime
             .block_on(self.inner.get_to_writer(key, &mut sink))

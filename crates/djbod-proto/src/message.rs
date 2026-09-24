@@ -30,6 +30,7 @@ use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, Transport};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::scrub::{Finding, ScrubSummary};
+use djbod_core::stripe::FaultKind;
 use djbod_core::version::VersionId;
 
 use crate::codec::{decode_cbor, encode_cbor, CodecError};
@@ -425,8 +426,11 @@ pub enum Response {
         devices: Vec<DeviceStatus>,
     },
     DeviceContents(DeviceContents),
+    /// The version written, and the devices the write went around
+    /// because their node could not read them (5.6).
     PutObject {
         version: VersionId,
+        unavailable: Vec<UnavailableDevice>,
     },
     /// Followed by a body stream.
     GetObject {
@@ -688,11 +692,48 @@ impl DataFrame {
     }
 }
 
+/// A block a read reconstructed from parity (SPEC 11.4): the data served
+/// was correct, and this is what was wrong on disk, for the client to
+/// report and `repair` to fix. Nothing was written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reconstruction {
+    pub stripe: u64,
+    pub shard_index: u8,
+    pub device: DeviceId,
+    pub fault: FaultKind,
+}
+
+/// A device left out of a write's placement because its node could not
+/// read it (SPEC 5.6), reported with the version so the client knows
+/// the write went around it. Nothing is wrong with the object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableDevice {
+    pub device: DeviceId,
+    pub node: NodeId,
+}
+
+/// What a write returns: the version, and the devices it went around
+/// (5.6), empty when none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectWrite {
+    pub version: VersionId,
+    pub unavailable: Vec<UnavailableDevice>,
+}
+
+/// What a read returns beside the body: the record, and every block that
+/// had to be reconstructed on the way (11.4), empty when none was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectRead {
+    pub record: MetadataRecord,
+    pub reconstructed: Vec<Reconstruction>,
+}
+
 /// Terminates a stream. `error` is `None` on success. For `PutShard` the
 /// sender supplies the object size and checksum here so the node can
 /// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
 /// coordinator reports the whole-object verification here (11.7), which
-/// is why a client must read this frame before trusting the body.
+/// is why a client must read this frame before trusting the body, and
+/// lists the blocks it reconstructed from parity on the way (11.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamEnd {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -701,6 +742,7 @@ pub struct StreamEnd {
     pub object_size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_checksum: Option<BlockChecksum>,
+    pub reconstructed: Vec<Reconstruction>,
 }
 
 impl StreamEnd {
@@ -709,6 +751,7 @@ impl StreamEnd {
             error: None,
             object_size: None,
             object_checksum: None,
+            reconstructed: Vec::new(),
         }
     }
 
@@ -717,6 +760,7 @@ impl StreamEnd {
             error: Some(error),
             object_size: None,
             object_checksum: None,
+            reconstructed: Vec::new(),
         }
     }
 }

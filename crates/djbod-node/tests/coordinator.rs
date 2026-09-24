@@ -143,7 +143,8 @@ async fn put_head_get_list_delete_round_trip() {
                 Some("application/octet-stream".to_string()),
             )
             .await
-            .expect("put");
+            .expect("put")
+            .version;
         objects.push((key, body, version));
     }
 
@@ -172,7 +173,7 @@ async fn put_head_get_list_delete_round_trip() {
             other => panic!("expected HeadObject, got {other:?}"),
         }
         let (record, got) = client.get_object(key).await.expect("get");
-        assert_eq!(record.version, *version);
+        assert_eq!(record.record.version, *version);
         assert_eq!(&got, body, "body mismatch for {key}");
     }
 
@@ -264,7 +265,8 @@ async fn put_replaces_the_previous_version_and_removes_it() {
     let v1 = client
         .put_object("k", &first, CHUNK, None)
         .await
-        .expect("put 1");
+        .expect("put 1")
+        .version;
     let record1 = match client
         .request(Request::HeadObject {
             key: "k".to_string(),
@@ -278,11 +280,12 @@ async fn put_replaces_the_previous_version_and_removes_it() {
     let v2 = client
         .put_object("k", &second, CHUNK, None)
         .await
-        .expect("put 2");
+        .expect("put 2")
+        .version;
     assert!(v2 > v1, "versions must increase");
 
     let (record2, body) = client.get_object("k").await.expect("get");
-    assert_eq!(record2.version, v2);
+    assert_eq!(record2.record.version, v2);
     assert_eq!(body, second);
 
     // The old version's files are gone from every device; only v2 remains.
@@ -317,7 +320,7 @@ async fn put_replaces_the_previous_version_and_removes_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_corrupt_block_fails_the_read_and_names_the_device() {
+async fn a_corrupt_block_is_reconstructed_from_parity_and_named() {
     let test = start_node(4, 3, 1).await;
     let mut client = test.client().await;
     let body = xorshift64_bytes(4 * 3 * BLOCK as usize, 9);
@@ -346,14 +349,38 @@ async fn a_corrupt_block_fails_the_read_and_names_the_device() {
     bytes[offset] ^= 0x01;
     std::fs::write(&path, &bytes).expect("write");
 
-    // Fail-stop: the stream ends with an error naming the device, shard,
-    // and stripe, and no reconstruction is served (11.4). The bytes for
-    // stripes 0 and 1 may have been delivered before the failure.
+    // The stripe is reconstructed from parity and served, and the read's
+    // terminating status names the block (11.4). Nothing is written.
+    let damaged = std::fs::read(&path).expect("read");
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.reconstructed.len(), 1, "{:?}", read.reconstructed);
+    let block = &read.reconstructed[0];
+    assert_eq!(block.stripe, 2);
+    assert_eq!(block.shard_index, 1);
+    assert_eq!(block.device, device);
+    assert!(matches!(
+        block.fault,
+        djbod_core::stripe::FaultKind::ChecksumMismatch { .. }
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        damaged,
+        "the read repaired the disk"
+    );
+
+    // Beyond m: damage the parity shard's block of the same stripe too,
+    // and the read fails naming the stripe.
+    let parity_device = record
+        .device_for(djbod_core::erasure::ShardIndex(3))
+        .expect("device");
+    let parity_path = test.shard_path(parity_device, "k", &record);
+    let mut parity = std::fs::read(&parity_path).expect("read");
+    parity[offset] ^= 0x01;
+    std::fs::write(&parity_path, &parity).expect("write");
     match client.get_object("k").await {
         Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch);
-            assert_eq!(detail.device, Some(device));
-            assert_eq!(detail.shard_index, Some(1));
             assert_eq!(detail.stripe, Some(2));
             assert_eq!(detail.key.as_deref(), Some("k"));
         }
@@ -502,8 +529,8 @@ async fn replication_and_jbod_schemes_work_too() {
             .expect("put");
         let (record, got) = client.get_object("k").await.expect("get");
         assert_eq!(got, body);
-        assert_eq!(record.k, k);
-        assert_eq!(record.m, m);
+        assert_eq!(record.record.k, k);
+        assert_eq!(record.record.m, m);
     }
 }
 
@@ -558,12 +585,11 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
     bytes[4096 + BLOCK as usize + 7] ^= 0x01; // stripe 1
     bytes[4096 + 4 * BLOCK as usize + 7] ^= 0x01; // stripe 4
     std::fs::write(&path, &bytes).expect("write");
-    assert!(matches!(
-        client.get_object("k").await,
-        Err(ConnectionError::StreamFailed(_))
-    ));
-    // A failed stream closes the connection; open another.
-    let mut client = test.client().await;
+    // The read reconstructs both stripes from parity and says so (11.4).
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let stripes: Vec<u64> = read.reconstructed.iter().map(|r| r.stripe).collect();
+    assert_eq!(stripes, vec![1, 4], "{:?}", read.reconstructed);
 
     let report = repair(&mut client, "k").await;
     let shard2 = report

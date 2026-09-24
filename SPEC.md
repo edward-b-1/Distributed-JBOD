@@ -239,18 +239,30 @@ above them, so on a device whose tree has gone it finds no parent, and
 a listing finds no bucket; each reports that as the device being
 unavailable. There is no window between a check and the act, and no
 write ever recreates a device's tree on whatever filesystem is at its
-path. The consequences:
+path. A disk failure is a device failure, not a node failure: the node
+starts and serves its other devices, so that the cluster keeps every
+copy they hold and the administrator can retire the lost device while
+the node is up. The consequences:
 
 - `LocalStatus` and `Status` (19.1.3) report the device with `available`
   false and no space; the document's state (`active`, `draining`) is
   unchanged, because availability is what the node observes and state is
   what the administrator decided. `djbod status` prints
-  `active, unavailable`. Placement (10.4), re-placement (18.8.2), and
-  repair (18.3) choose only available devices.
-- A write to it is refused with `DeviceUnavailable`; so is a listing of
-  its records (`LocalRecords`, and through it `contents`, `drain`, and
-  the removal scan of 18.5). `djbod contents` says so for that device
-  and goes on with the others.
+  `active, unavailable`.
+- Placement (10.4), re-placement (18.8.2), and repair (18.3) leave an
+  unavailable device out as they leave out a full one: a write goes
+  ahead on the others if k+m of them have room, and is refused with
+  `InsufficientDevices`, naming the unavailable devices, if not. A write
+  that went around an unavailable device says so in its response, as a
+  read says what it reconstructed (11.7): the client libraries return
+  the list beside the version, the Python client raises a
+  `DegradedWrite` warning, and `djbod put` prints the devices on
+  standard error and exits 2, the object being stored and the cluster
+  not whole.
+- A request naming the device is refused with `DeviceUnavailable`: a
+  write to it, and a listing of its records (`LocalRecords`, and through
+  it `contents`, `drain`, and the removal scan of 18.5). `djbod
+  contents` says so for that device and goes on with the others.
 - The scrub (20.1.2) reports it as one finding, `DeviceUnavailable`,
   reads nothing more from it, and, in the cross-node checks, does not
   expect a record copy from it, so the versions that name it are not
@@ -964,9 +976,15 @@ trade).
 
 10.7 [D] For each chosen device, the coordinator opens a shard transfer.
 If the receiving node cannot create or reserve the shard file (for
-example `ENOSPC`), it refuses the shard and the coordinator chooses the
-next-most-free eligible device. If none exists the write fails and
-everything written so far is removed.
+example `ENOSPC`, or a device that became unavailable since the space
+report, 5.6), it refuses the shard, the write fails with that refusal,
+and everything written so far is removed. The coordinator does not try
+another device: placement is one choice from the space report, the
+write is one attempt, and a failure is an error for the client to act
+on, as a read that cannot be served is (11.4). Trying the next device
+would mean a second placement, and a third, until the combinations ran
+out; the space report is stale the moment it is taken, and that is
+accepted rather than chased.
 
 10.8 [D] The coordinator (or the client, section 17) reads the body one
 stripe at a time, splits it into k data blocks, computes m parity blocks,
@@ -1023,11 +1041,22 @@ one version is present (9.2.4) it selects the newest.
 11.3 [D] For each stripe in order, the coordinator requests shard blocks
 `0 .. k-1` (the data blocks) from their devices, verifies each block against
 its checksum, and delivers the stripe to the client. Parity blocks are not
-read.
+read until one is needed.
 
-11.4 [D] If any block fails its checksum, or any device's node is unreachable, the
-request fails with an error identifying the device UUID, key, version,
-shard index, and stripe number. No reconstruction is attempted in v1.
+11.4 [D] **A damaged block is reconstructed, reported, and not repaired.**
+If a data block fails its checksum, the coordinator opens the parity
+shards from that stripe on, decodes the stripe from any k good blocks,
+and delivers it; it keeps reading all k+m shards to the end of the
+object. Nothing is written to any device: the damage stays until `djbod
+repair` (18.4), so every read of the object pays the reconstruction
+again, which is why the read says what it did. Every reconstructed
+block is listed in the stream's terminating status (11.7): stripe, shard
+index, device, and the fault (checksum mismatch, wrong length, missing).
+A stripe with more than m unusable blocks is an error identifying the
+device, key, version, shard index, and stripe number, delivered as the
+terminating status, and the client must treat the body as invalid. A
+device whose node is unreachable is refused before any block is served
+(16.1); there is no reconstruction around an absent node.
 
 11.5 [D] Reads stream. The coordinator holds a bounded number of stripes in
 memory at once.
@@ -1040,7 +1069,13 @@ checksum and, after the last stripe, compares it with the record's
 `object_checksum` (8.3.6). A mismatch is an error (16.1). Because the
 body has by then been streamed to the client, the error is delivered as
 the stream's terminating status (19.1.2), and the client must treat the
-body as invalid.
+body as invalid. The same status carries the list of blocks
+reconstructed on the way (11.4), so a client reads one frame to learn
+both whether the body is good and what it cost. The client libraries
+return the list beside the record; the Python client also raises a
+`DegradedRead` warning; `djbod get` prints each reconstructed block on
+standard error and exits 2, the data being correct but the damage
+unrepaired, so that a pipeline notices.
 
 ## 12. Placement summary
 
@@ -1278,7 +1313,8 @@ to the client:
 
 - Any node in the cluster document does not respond to a broadcast.
 - Any device holding a shard needed for a read is unreachable.
-- Any shard block fails its checksum.
+- More than m blocks of a stripe are unusable (11.4); fewer are
+  reconstructed from parity, served, and reported.
 - The whole-object checksum of a completed read does not match the record
   (11.7).
 - Metadata record copies for a version disagree, or fewer than k+m are
@@ -1658,7 +1694,8 @@ a block costs its own length plus 16 on the wire. For shard streams the
 sequence is the stripe number (10.8); for object body streams it counts
 chunks from zero. A streaming operation is one request, then Data frames
 sharing its request id, then one EndOfStream carrying a status and, for
-`PutShard`, the object size and whole-object checksum. Implemented in
+`PutShard`, the object size and whole-object checksum, and, for
+`GetObject`, the blocks reconstructed from parity (11.4). Implemented in
 `crates/djbod-proto`, which is runtime-agnostic: it converts messages to
 and from bytes and nothing else.
 
@@ -1686,12 +1723,14 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: key, size, optional content type, optional user metadata.
   Followed by a stream of `size` body bytes in frames of any length.
   Coordinator performs placement, encoding, and shard transfer. Response:
-  version id. Fails per section 16.
+  version id, and the devices placement went around because their node
+  could not read them (5.6), empty when none. Fails per section 16.
 
 `GetObject`
 : Request: key. Response: the metadata record, then a stream of body
-  bytes in stripe-sized frames, then end-of-stream. Coordinator performs
-  lookup, block fetch, and checksum verification.
+  bytes in stripe-sized frames, then end-of-stream carrying the blocks
+  reconstructed from parity (11.4), if any. Coordinator performs lookup,
+  block fetch, checksum verification, and reconstruction.
 
 `HeadObject`
 : Request: key. Response: the metadata record, no body. Implemented by

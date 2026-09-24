@@ -12,6 +12,7 @@
 
 use crate::checksum::{checksum_block, BlockChecksum};
 use crate::erasure::{CodingError, ReedSolomonCode, ShardIndex};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// One block of one shard: which shard it belongs to, its bytes, and the
@@ -29,8 +30,10 @@ pub struct ShardBlock {
     pub checksum: BlockChecksum,
 }
 
-/// Why a received block could not be used.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a received block could not be used. Travels with a read's
+/// terminating status when the block was reconstructed (SPEC 11.4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FaultKind {
     /// No block with this index was received.
     Missing,

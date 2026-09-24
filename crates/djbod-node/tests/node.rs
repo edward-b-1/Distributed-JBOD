@@ -985,26 +985,54 @@ async fn a_destroyed_device_is_unavailable_and_not_recreated() {
     }
 }
 
-/// SPEC 5.6: a node starts without a device whose path is gone, and
-/// reports that device unavailable rather than refusing to start.
+/// SPEC 5.6: a node starts without a device whose path is gone, reports
+/// that device unavailable rather than refusing to start, refuses a
+/// request naming it, and places a write around it, saying so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
-    let test = start_node(3, 2, 1).await;
-    let dead = test.devices()[2];
-    std::fs::remove_dir_all(test.device_root(dead)).expect("destroy the device directory");
-    let reopened = Arc::new(Node::open(test.node.config().clone()).expect("starts without it"));
-    assert_eq!(reopened.devices().len(), 2);
-    assert_eq!(reopened.unavailable_devices(), vec![dead]);
-
+    // Built by hand rather than with start_node, so that no server is
+    // running under the cluster's address while the node is reopened.
+    let dirs: Vec<tempfile::TempDir> = (0..4)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let state = tempfile::tempdir().expect("temp dir");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");
+    let config = NodeConfig {
+        node_id: Uuid::new_v4(),
+        listen: addr,
+        advertise: None,
+        state_dir: state.path().to_path_buf(),
+        devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
+        bootstrap_peers: vec![],
+        temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
+        allow_shared_filesystem: true,
+        tls: None,
+    };
+    let parameters = ClusterParameters {
+        k: 2,
+        m: 1,
+        block_size: BLOCK,
+        headroom: 0.0,
+        ..ClusterParameters::default()
+    };
+    let created = Node::init_cluster(config.clone(), parameters).expect("init cluster");
+    let dead = created.devices()[3].id();
+    let dead_root = created.device(dead).expect("device").root().to_path_buf();
+    drop(created);
+    std::fs::remove_dir_all(&dead_root).expect("destroy the device directory");
+
+    let reopened = Arc::new(Node::open(config).expect("starts without it"));
+    assert_eq!(reopened.devices().len(), 3);
+    assert_eq!(reopened.unavailable_devices(), vec![dead]);
     tokio::spawn(server::serve(reopened.clone(), listener));
     let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
         .await
         .expect("connect");
     match conn.request(Request::LocalStatus).await.expect("status") {
         Response::LocalStatus { devices, .. } => {
-            assert_eq!(devices.len(), 3);
+            assert_eq!(devices.len(), 4);
             let missing = devices.iter().find(|d| d.device == dead).expect("listed");
             assert!(!missing.available);
             assert_eq!(missing.state, DeviceState::Active);
@@ -1016,4 +1044,32 @@ async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
         }
         other => panic!("expected LocalStatus, got {other:?}"),
     }
+    // A request naming it is refused as unavailable, not as unknown.
+    match conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await
+    {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert!(detail.message.contains("unavailable"), "{detail:?}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // A write goes around the device and says so (5.6).
+    let write = conn
+        .put_object(
+            "k",
+            &xorshift64_bytes(3 * BLOCK as usize, 3),
+            64 * 1024,
+            None,
+        )
+        .await
+        .expect("put around the unavailable device");
+    assert_eq!(write.unavailable.len(), 1, "{:?}", write.unavailable);
+    assert_eq!(write.unavailable[0].device, dead);
+    assert_eq!(write.unavailable[0].node, reopened.id());
+    assert!(!dead_root.exists());
 }
