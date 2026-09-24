@@ -30,6 +30,19 @@ class NotFound(NodeError):
     """No object under that key."""
 
 
+class DegradedWrite(Warning):
+    """A write was placed around devices the cluster cannot read (SPEC
+    5.6). The object is stored, on the other devices; `key` and `version`
+    name it, and `unavailable` lists each device it went around as a dict:
+    device, node. The cluster needs attention, not the object."""
+
+    def __init__(self, message: str, key: str, version: str, unavailable: list):
+        super().__init__(message)
+        self.key = key
+        self.version = version
+        self.unavailable = unavailable
+
+
 class DegradedRead(Warning):
     """A read returned correct data only by reconstructing blocks from
     parity (SPEC 11.4). `key` names the object; `reconstructed` lists each

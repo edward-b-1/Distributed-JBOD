@@ -143,7 +143,8 @@ async fn put_head_get_list_delete_round_trip() {
                 Some("application/octet-stream".to_string()),
             )
             .await
-            .expect("put");
+            .expect("put")
+            .version;
         objects.push((key, body, version));
     }
 
@@ -264,7 +265,8 @@ async fn put_replaces_the_previous_version_and_removes_it() {
     let v1 = client
         .put_object("k", &first, CHUNK, None)
         .await
-        .expect("put 1");
+        .expect("put 1")
+        .version;
     let record1 = match client
         .request(Request::HeadObject {
             key: "k".to_string(),
@@ -278,7 +280,8 @@ async fn put_replaces_the_previous_version_and_removes_it() {
     let v2 = client
         .put_object("k", &second, CHUNK, None)
         .await
-        .expect("put 2");
+        .expect("put 2")
+        .version;
     assert!(v2 > v1, "versions must increase");
 
     let (record2, body) = client.get_object("k").await.expect("get");

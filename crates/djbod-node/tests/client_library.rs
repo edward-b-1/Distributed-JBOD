@@ -127,10 +127,12 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
     assert_eq!(client.node_address(), Some(via_a));
 
     let body: Vec<u8> = (0..(2 * BLOCK as usize)).map(|i| (i % 251) as u8).collect();
-    let version = client
+    let write = client
         .put("k", &body, Some("application/octet-stream".to_string()))
         .await
         .expect("put");
+    assert!(write.unavailable.is_empty());
+    let version = write.version;
     let (read, got) = client.get("k").await.expect("get");
     assert_eq!(got, body);
     assert_eq!(read.record.version, version);

@@ -214,12 +214,39 @@ redundancy guarantee wherever it is set.
 5.4 [P] At startup the node also refuses to start if a device identity file
 has a `system` field other than `distributed-jbod`, names a different
 cluster id, has an unsupported format version, or if the same device UUID
-is claimed by two paths.
+is claimed by two paths. A configured path whose directory is missing,
+or exists but holds neither identity file nor objects tree (a mount
+point with nothing mounted), is not a refusal: the node starts without
+it and the device it should have held is unavailable (5.6). A directory
+with an objects tree but no identity file is still refused, since it is
+either someone else's or a device whose identity was destroyed by hand.
 
 5.5 [D] A device reports free space as the filesystem's free bytes as
 returned by `statvfs`, minus a configured headroom, minus the sum of
 reservations currently in flight on that device (if reservation is used,
 10.6).
+
+5.6 [D] **An unavailable device.** A device the node cannot read is
+*unavailable*: at startup, a device the cluster document lists for this
+node that no configured path opened (5.4), because the disk failed or
+was never mounted. A disk failure is a device failure, not a node
+failure: the node starts and serves its other devices, so that the
+cluster keeps every copy they hold and the administrator can retire the
+lost device while the node is up. `LocalStatus` and `Status` (19.1.3)
+report the device with `available` false and no space; the document's
+state (`active`, `draining`) is unchanged, because availability is what
+the node observes and state is what the administrator decided.
+`djbod status` prints `active, unavailable`. Placement (10.4),
+re-placement (18.8.2), and repair (18.3) leave an unavailable device
+out as they leave out a full one: a write goes ahead on the others if
+k+m of them have room, and is refused with `InsufficientDevices`,
+naming the unavailable devices, if not. A write that went around an
+unavailable device says so in its response, as a read says what it
+reconstructed (11.7): the client libraries return the list beside the
+version, the Python client raises a `DegradedWrite` warning, and `djbod
+put` prints the devices on standard error and exits 2, the object being
+stored and the cluster not whole. A request naming the device is
+refused with `DeviceUnavailable`.
 
 ## 6. Configuration
 
@@ -924,9 +951,15 @@ trade).
 
 10.7 [D] For each chosen device, the coordinator opens a shard transfer.
 If the receiving node cannot create or reserve the shard file (for
-example `ENOSPC`), it refuses the shard and the coordinator chooses the
-next-most-free eligible device. If none exists the write fails and
-everything written so far is removed.
+example `ENOSPC`, or a device that became unavailable since the space
+report, 5.6), it refuses the shard, the write fails with that refusal,
+and everything written so far is removed. The coordinator does not try
+another device: placement is one choice from the space report, the
+write is one attempt, and a failure is an error for the client to act
+on, as a read that cannot be served is (11.4). Trying the next device
+would mean a second placement, and a third, until the combinations ran
+out; the space report is stale the moment it is taken, and that is
+accepted rather than chased.
 
 10.8 [D] The coordinator (or the client, section 17) reads the body one
 stripe at a time, splits it into k data blocks, computes m parity blocks,
@@ -1663,8 +1696,9 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: none. Response: cluster id, cluster name if set (6.2.5.3),
   document version, coordinator node
   UUID, every node asked with the build it reported (6.2.6.4), and for
-  every device in the cluster: UUID, owning node, state, total bytes,
-  free bytes. Implemented by broadcasting `LocalStatus`.
+  every device in the cluster: UUID, owning node, state, whether its
+  node can read it (5.6), total bytes, free bytes. Implemented by
+  broadcasting `LocalStatus`.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
@@ -1676,7 +1710,8 @@ coordinator, and those nodes send to each other. Every response is either
 : Request: key, size, optional content type, optional user metadata.
   Followed by a stream of `size` body bytes in frames of any length.
   Coordinator performs placement, encoding, and shard transfer. Response:
-  version id. Fails per section 16.
+  version id, and the devices placement went around because their node
+  could not read them (5.6), empty when none. Fails per section 16.
 
 `GetObject`
 : Request: key. Response: the metadata record, then a stream of body
@@ -1749,8 +1784,8 @@ coordinator, and those nodes send to each other. Every response is either
 
 `LocalStatus`
 : Request: none. Response: node UUID, document version, the node's
-  build (6.2.6.4), and for each local device: UUID, state, total bytes,
-  free bytes (5.5).
+  build (6.2.6.4), and for each local device: UUID, state, whether the
+  node can read it (5.6), total bytes, free bytes (5.5).
 
 `LocalLookup`
 : Request: key hash, optional cursor (the last version and device of the

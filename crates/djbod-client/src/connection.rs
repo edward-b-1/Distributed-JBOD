@@ -15,7 +15,7 @@ use djbod_core::record::DeviceId;
 use djbod_core::stripe::ShardBlock;
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DataFrame, ErrorDetail, Message, ObjectRead, Request, Response, StreamEnd,
+    DataFrame, ErrorDetail, Message, ObjectRead, ObjectWrite, Request, Response, StreamEnd,
 };
 
 use crate::transport::{Connector, Stream};
@@ -298,7 +298,7 @@ impl Connection {
         body: &[u8],
         chunk: usize,
         content_type: Option<String>,
-    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
+    ) -> Result<ObjectWrite, ConnectionError> {
         let mut cursor = body;
         self.put_object_from_reader(key, body.len() as u64, &mut cursor, chunk, content_type)
             .await
@@ -315,7 +315,7 @@ impl Connection {
         source: &mut R,
         chunk: usize,
         content_type: Option<String>,
-    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
+    ) -> Result<ObjectWrite, ConnectionError> {
         self.put_object_with_metadata(
             key,
             size,
@@ -337,7 +337,7 @@ impl Connection {
         chunk: usize,
         content_type: Option<String>,
         user_metadata: std::collections::BTreeMap<String, String>,
-    ) -> Result<djbod_core::version::VersionId, ConnectionError> {
+    ) -> Result<ObjectWrite, ConnectionError> {
         let id = self
             .send_request(Request::PutObject {
                 key: key.to_string(),
@@ -392,8 +392,15 @@ impl Connection {
         match read_message(&mut self.reader).await? {
             Message::Response {
                 id: got,
-                response: Response::PutObject { version },
-            } if got == id => Ok(version),
+                response:
+                    Response::PutObject {
+                        version,
+                        unavailable,
+                    },
+            } if got == id => Ok(ObjectWrite {
+                version,
+                unavailable,
+            }),
             Message::Response {
                 response: Response::Error(detail),
                 ..
