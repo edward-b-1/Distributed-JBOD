@@ -553,8 +553,10 @@ function fail(context, e) {
   }
   // The status says whose fault it is: a refusal by the store (409), a
   // name that does not exist (404), a bad request (400), or a node this
-  // server could not reach (502).
-  const kind = e && e.status === 409 ? 'refused' : e && e.status === 404 ? 'not found' : e && e.status === 400 ? 'bad request' : e && e.status >= 500 ? 'cannot reach the cluster' : null;
+  // server could not reach (502). A refusal because a node the object
+  // needs is down (SPEC 9.4.4, 11.4) is a 409 carrying node_unreachable.
+  const refused = e && e.error && e.error.code === 'node_unreachable' ? 'refused while a node is unreachable' : e && e.error && e.error.code === 'device_unavailable' ? 'refused while a device is unavailable' : 'refused';
+  const kind = e && e.status === 409 ? refused : e && e.status === 404 ? 'not found' : e && e.status === 400 ? 'bad request' : e && e.status >= 500 ? 'cannot reach the cluster' : null;
   if (e && e.error) toast(`${context}${kind ? ` ${kind}` : ''}: ${e.error.code}: ${e.error.message}`, describeError(e.error), true);
   else toast(`${context}: ${e?.message || e}`, '', true);
 }
