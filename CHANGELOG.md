@@ -1,3 +1,239 @@
+## [d0b8133] - 2026-09-25
+
+Pull request #211: Status reports an unreachable node instead of failing (SPEC 19.1.3, 5.6)
+
+### Fixed
+
+- `Status` reports a node it cannot reach with `reachable: false`, the reason, and no build, since there was no `Hello`, and lists that node's devices from the document as unavailable with no space, instead of failing the whole request on the first unreachable node. From the cluster's side that is what they are, so the same rows and the same rule apply as for a disk its node cannot read (SPEC 19.1.3, 5.6) (#209).
+- `djbod status` exits 0, marks those rows `active, unavailable` and prints the node and the reason on stderr, with `--json` carrying the fields. A node holding a different document version is still reported as `DocumentVersionMismatch` rather than as unreachable, and every other operation keeps the fail-stop broadcast.
+
+## [17dd946] - 2026-09-25
+
+Pull request #207: Web UI: take a list of bootstrap nodes and fall back to the cluster's other nodes
+
+### Added
+
+- `--bootstrap-node <ADDR[,ADDR...]>` with `DJBOD_BOOTSTRAP_NODE`, connection endpoints tried in order and never a filter on what an operation covers. `djbod-ui` accepted exactly one node address and used it for every request, so when that node stopped the whole page went dark although the other nodes were serving (#176).
+- A fallback order: the node that answered last, then the configured addresses in order, then every address the cluster document lists, each once. The learnt addresses are refreshed every time the document is fetched, which the page does on every refresh, so an interface started against one node keeps working when that node is stopped, restarted or retired.
+- `via` on `/api/status`, the address the answer came through, shown in the header's node tooltip, with the startup line listing every configured address and the 502 listing every address tried with its reason and an `addresses` field carrying them on their own.
+
+### Changed
+
+- `--node` and `DJBOD_NODE` remain as the deprecated spelling and print a notice on stderr, with the new spelling winning when both are given.
+
+## [0cb7a49] - 2026-09-25
+
+Pull request #208: Web UI: drop 'The page retries every 30 seconds' from the unreachable banner
+
+### Changed
+
+- The unreachable-node banner names the message and says to start the node or start `djbod-ui` against another node; the retry cadence is not the reader's concern.
+
+## [e9241a2] - 2026-09-25
+
+Pull request #206: Web UI: name the address and say why when the node cannot be reached
+
+### Added
+
+- `ApiError::Unreachable` for a failed connection attempt: the 502 keeps the code `node_unreachable` and carries a message naming the address and the reason in plain words, the address on its own, and the operating system's own text as detail. Connection refused, reset, aborted, timed out, host or network unreachable, network down, address not available and permission denied are worded plainly, and anything else keeps the system's text without its error number. The page had shown the wire layer's text verbatim as a toast on every failed call, without saying which address was tried (#177).
+- One critical banner for such an error, with the raw detail as its tooltip, no dismiss button, and clearing itself on the next successful call, while other errors still toast.
+
+### Fixed
+
+- The transport banners no longer assume `plain` before the first status has been fetched.
+
+## [79dac71] - 2026-09-25
+
+Pull request #204: remove-device --force: retire a device that cannot be drained (SPEC 18.2.1.1)
+
+### Added
+
+- `djbod cluster remove-device <device> --force [--yes]`, for a device the cluster cannot read or one the administrator has given up on. It reports the device's state and whether its node can read it, says what marking it removed means, warns when fewer than k+m active available devices would remain, asks for the device id to be typed back unless `--yes`, and proposes the document with the device removed. It is an ordinary unanimous proposal with no reference scan, because a scan of every record would take as long as the scrub that follows (#170).
+
+### Changed
+
+- Repair treats a shard or record copy on a device listed as removed exactly as one on a device dropped from the document, so the cross-node scrub finds every version that lost a copy and `scrub --repair` relocates each shard, with no second implementation of that logic in the command. A removed device is never written to or cleaned, and is no longer scrubbed or flagged unavailable, since it is retired (SPEC 18.3, 18.2.1).
+
+## [3668032] - 2026-09-24
+
+Pull request #200: A read reconstructs around a shard it cannot open, and reports ranges of stripes (SPEC 11.4)
+
+### Changed
+
+- A data shard that cannot be opened at all, because its file is missing, truncated or unreadable, or because its device is unavailable, has left the document, or its node cannot be reached, is treated as erased from the first stripe, so parity is opened at once and the read succeeds whenever at most m shards are out. To a read these are one kind of failure, one shard's share of a stripe that k others can supply, and a corrupted block in the same shard was already reconstructed. Nothing is written (#199).
+- More than m shards out is refused before any block of the body, with the first shard's own code, since a node that is down and a file that is gone call for different actions, and the message lists every shard that could not be read. A node that answers wrongly is still an error.
+- A `Reconstruction` entry is one shard, one fault and a range of stripes, so a shard that could not be opened is one entry however large the object, instead of one per stripe. `FaultKind` gains `Unreadable` for a file that will not mend itself and `Unavailable` for a device or node that could not be reached, which may be temporary, and `djbod get` says "unavailable, perhaps for now" for the transient kind. A read cannot tell a disk that died from one unmounted for a minute, so it does not try; repair already draws the same line.
+
+## [40b0938] - 2026-09-24
+
+Pull request #185: A device that becomes unreadable while the node runs is unavailable, and no write rebuilds it (SPEC 5.6)
+
+### Changed
+
+- A device whose identity file can no longer be read is unavailable. The space report behind `status` and the scrub look for it with one `stat`, since that is the only thing that tells an empty mount point from a disk, while writes and listings do not check first: a write makes the partition and key directories with a plain `mkdir` and treats a missing parent as the device being unavailable, and a listing treats a missing bucket the same. There is therefore no window between a check and the act, and no write ever recreates a device's tree on whatever filesystem sits at its path. The objects tree is made by `initialise` and by nothing else (#173).
+- A write to the device is refused with `DeviceUnavailable`, so a repair no longer recreates the dead path, and `contents`, `drain`, `remove-device` and the removal scan give a clear refusal instead of an I/O error.
+- The scrub reports an unavailable device once and does not expect a record copy from it in the cross-node checks, so the versions naming it are no longer each reported as `RecordsInconsistent`. It is not counted as damage, so the run is incomplete and the summary says how many devices went unchecked and that the remedy is to restore or retire them (SPEC 20.1.2.3).
+- The node logs the loss once when first seen and once more when the device is readable again.
+
+## [7da5ff6] - 2026-09-24
+
+Pull request #188: README: how failures show up, and where the line is drawn
+
+### Added
+
+- A `README.md` section stating the intended use, one person's data on a few aging machines, and the priorities that follow: durability, detection, then the availability the coding buys, up to m disks. It says how reads and writes behave now, and states plainly that there is no alerting subsystem and none is planned, since the result of the operation carries the warning or the error, `status` and the web interface show the same on demand, and a scrub from cron exits non-zero.
+
+### Changed
+
+- The line the `README.md` draws, in place of the earlier "opposite of high availability", which the reconstruction work made untrue: the operations are forgiving, the cluster is not self-managing, and nothing moves data or changes the cluster without a person deciding.
+
+## [028c4f2] - 2026-09-24
+
+Pull request #186: A node starts without a device whose path is missing or empty (SPEC 5.6)
+
+### Changed
+
+- A configured path whose directory is missing, or which holds neither identity file nor objects tree, no longer stops the node from starting. The node logs the path and the device it should have held and reports every device the document lists for it that no path opened as unavailable, because a disk failure is a device failure and not a node failure. A directory with an objects tree but no identity file is still refused (#173).
+- `LocalStatus` and `Status` carry `available` per device, `djbod status` prints `active, unavailable` with no space and counts them on stderr, and placement leaves an unavailable device out as it leaves out a full one, so a write goes ahead if k+m devices have room and is refused with `InsufficientDevices` naming the unavailable devices only if not. Re-placement, repair targets and the drain estimate do the same (SPEC 19.1.3).
+- A write is one placement from the space report and one attempt: a refusal fails it and is not retried on another device (SPEC 10.7).
+
+### Added
+
+- The devices placement went around, carried in the `PutObject` response beside the version, as a read's terminating status lists what it reconstructed. `put` and `put_from_reader` return an `ObjectWrite`, the Python client raises a `DegradedWrite` warning, `djbod put` prints them on stderr and exits 2, and the web interface's answer and `djbod put --json` carry them.
+
+## [31e8d23] - 2026-09-24
+
+Pull request #197: GET reconstructs a damaged block from parity, reports it, and repairs nothing (SPEC 11.4)
+
+### Changed
+
+- A read that meets a data block failing its checksum no longer fails: the coordinator opens the parity shards from that stripe on, decodes the stripe from any k good blocks with the decoder the repair path uses, verifies it, delivers it, and keeps reading to the end of the object. Nothing is written to any device. A stripe with more than m unusable blocks is still refused with `BlockChecksumMismatch` naming the stripe, and the whole-object checksum is verified over the delivered bytes as before (#196).
+- The terminating `StreamEnd` carries a required `reconstructed` list, each entry the stripe, shard index, device and fault. It is the frame a client must read before trusting the body, so there is no node state and no second request (SPEC 11.7).
+- `get` and `get_to_writer` in the Rust client return an `ObjectRead` holding the record and the list, the Python client raises a `DegradedRead` warning and carries the list on `ObjectInfo`, `djbod get` writes the correct bytes, prints each reconstructed block on stderr with the note that `djbod repair <key>` fixes it, and exits 2, and a download in the web interface completes instead of failing part way while the key is noted as damaged until a repair.
+
+## [1cb6d05] - 2026-09-23
+
+Pull request #179: djbod status: builds of the answering node and of every node; the build is required on the wire
+
+### Added
+
+- A header line in `djbod status` giving the build of the node that answered, from its `Hello`, which the client already holds for the connection that served the request, and naming the client's own build when it differs (SPEC 19.1.5) (#178).
+- A `NODE BUILD` column on every device row, since each node reports its build in `LocalStatus` and the coordinator passes them on in `Status` as a list of nodes, with `--json status` gaining the answering node's build and the node list, carried too by the Rust client's `Status`, the Python `Status` and `/api/status`.
+
+### Changed
+
+- `LocalStatus.build` and `NodeStatus.build` are plain strings and `Status.nodes` has no default (SPEC 19.1.5.2) (#180).
+
+## [e792d8e] - 2026-09-23
+
+Pull request #184: Fields that were optional only for older builds are required
+
+### Changed
+
+- `Status.transport` and `LocalStatus.tls_ready` are required on the wire, and `max_key_bytes`, `max_object_bytes`, `max_user_metadata_bytes` and `transport` are required in the cluster document; all were defaulted when absent only for documents and messages written before they existed. Every `init-cluster` since those fields were added has written them (SPEC 6.2, 19.1.5.2) (#181).
+- SPEC 6.2.2 no longer says a document without the limits or transport means the defaults, and 6.2.6.4's rolling-upgrade rule rests on every field being required rather than on absent fields meaning defaults.
+- The cluster name, node and device labels, `GetMeta.shard_present`, the paging cursors, `content_type`, `user_metadata`, `ErrorDetail`'s context, `ListQuery`, `MoveShard.to`, the scrub rate caps, `StreamEnd`, `ShardRepair.relocated_to`, `NodeDocument.build`, the `RepairReport` vectors and the `NodeConfig` defaults stay optional, because absence is a legitimate value for each.
+
+## [f5a98e2] - 2026-09-23
+
+Pull request #183: The build is a required field on the wire
+
+### Changed
+
+- `Hello.build` is a plain string. Every binary has a build and every node and client sends it; the option existed only so that a message from a build predating the field could be read, and there is no installed base to do that for. SPEC 19.1.5.2 states the rule: a field is optional only when its absence is a legitimate value (#180).
+- `NodeDocument.build` in the client library stays optional, since it is absent when the node could not be reached, and `cluster show` prints a dash for it as before.
+
+### Removed
+
+- The "older, unreported" wording in `cluster show` and in the web interface's node table and health banner, the option on `Identity.build` in the Rust and Python clients, and the command-line fallback that recovered a cluster id from an old node's refusal of the nil-id ask.
+
+## [3c3fd58] - 2026-09-23
+
+Pull request #134: Keep command-line tables aligned for long labels and values
+
+### Fixed
+
+- Command-line tables size every column across its header and all displayed rows before printing, so long labels, addresses, build strings, object sizes, recovery keys and revisions and certificate names no longer push later columns away from their headers. The fix covers `djbod status`, `djbod contents`, `djbod cluster show`, `djbod list`, `djbod-recover list` and `scripts/djbod-pki.sh list` (#132).
+
+### Changed
+
+- The Rust tools use `comfy-table` with its default features off, with a short `render` function in each tool applying the borderless style, two-space separators, right alignment for numeric columns and no trailing spaces, and the PKI helper collects its certificate fields before choosing widths. Full values, numeric alignment, JSON output and command behaviour are preserved, and the old minimum column widths go, since columns now size themselves.
+
+## [dd84671] - 2026-09-23
+
+Pull request #164: Scrub exit codes: four outcomes, four codes
+
+### Changed
+
+- `djbod scrub` has one exit code per outcome in place of the single code 2 for both damage and an unfinished run: 0 complete and nothing wrong, 2 complete with damage, 3 incomplete with no damage seen, and 4 incomplete with damage seen. Incomplete means a stream that ended naming a node that could not be scrubbed or checks that stopped; a stream that ends only because repairs failed is a complete run (SPEC 20.1.2.3) (#156).
+- The last line of the human output states the verdict in words after the counts, with `--json` printing the events alone and the exit code carrying the verdict. The mapping is one function with the table as a test.
+
+### Fixed
+
+- The events were not counted at all in JSON mode, so `--json scrub` always exited 0; they are counted now, whatever the output mode.
+
+## [d5b2333] - 2026-09-23
+
+Pull request #162: The cross-node scrub as a merge of per-device record streams
+
+### Changed
+
+- The cross-node phase is a merge of one paged record stream per device, opened all at once and held for the phase, with heads merged in key hash and version order and each group of equal heads judged as one version's copies across the cluster, giving the same findings as before. There is no lookup, no probe and no key list; memory is one page per device plus the current group, and connections are one per device rather than one per key (SPEC 15.2.2, 15.2.3) (#152).
+- A stream that cannot be opened, or that fails mid-way, stops the merge after the group in hand, and `CrossCheckStopped` carries the versions checked with no count of the remainder, which cannot be had without a second pass.
+
+### Added
+
+- `shard_present` on each streamed record, gathered with one `stat` as the page is built.
+- `CrossCheckProgress` every 10,000 versions, printed by the command on stderr and shown as a count in the web interface's progress text.
+
+### Removed
+
+- `DeviceForShardNotInClusterDocument`, which turns out to be unreachable: a device the document no longer lists has no stream, so its copy is absent and the version is `RecordsInconsistent` first, which is what it is, and repair rebuilds the shard elsewhere from that.
+
+## [50c559e] - 2026-09-23
+
+Pull request #163: LocalRecords pages in key hash order and reads only what it returns
+
+### Changed
+
+- `LocalRecords` pages by key hash and version, the order a device's directories are already in, and `Device::walk_records_from` starts its walk at the cursor's directory and stops when the page is full, so a page costs the records it returns. Before this, each page sorted by key text and so walked and parsed every record on the device: one with 250,000 records was walked about seventy times to be streamed once, which `contents`, the drain's estimate and the removal scan all paid for (#121).
+- SPEC 15.2.2 states that a page must cost no more than the items it returns, and 15.2.2.1 records why the page is 8 MiB with the arithmetic.
+
+### Added
+
+- A flag on each walked record saying whether the device has its shard file, carried within the device layer for the scrub merge to use.
+
+## [48eb00e] - 2026-09-23
+
+Pull request #159: Retire "holder": say device, or node, throughout
+
+### Changed
+
+- `SPEC.md` says device, or node, throughout. The word "holder" was used about forty times and never defined, meaning sometimes the device a record lists for a shard and sometimes that device's node, while "device" already means a disk everywhere in the project.
+- The coordinator's `Holder` struct, an open shard write to one device with its connection and request id, is `ShardWriter`, with `stream_body_to_holders`, `abort_holders` and `holders_new_first` following, and the scrub finding `ShardMissingOnHolder` is `ShardMissingOnDevice`, which changes that finding's JSON name in `--json` output and in the event stream.
+
+## [0815ec4] - 2026-09-23
+
+Pull request #158: Scrub: a node that cannot be asked is unchecked, not damage
+
+### Changed
+
+- A node that cannot be reached, or that refuses or answers out of protocol, no longer produces a finding in the cross-node phase. Every key needs every node, and so does listing the keys, so the first such node ends the phase with one `CrossCheckStopped` event naming the node and the reason and saying how many keys were checked and how many were not. Findings made before that point stand, and a key that could not be checked is never queued for repair (#153).
+- The run ends as incomplete with `NodeUnreachable` whenever a node could not be scrubbed or the checks stopped, whether or not damage was also found, and the message carries all three counts.
+- The first failure to reach a node is reported, with no retry.
+
+### Removed
+
+- `HolderUnavailable`, which mixed a node that could not be asked, now unchecked, with one real-damage case: a record naming a device that is no longer in the cluster document. That case becomes `HolderNotInDocument`, with the shard index.
+
+## [33ec9fd] - 2026-09-23
+
+Pull request #150: Keep the palette exploration under docs/brand
+
+### Added
+
+- `docs/brand/exploration`, the comparison sheets behind the current colours, kept because the files are cheap and the reasoning in them is expensive to reconstruct: the mark on the interface's own surfaces in four colour pairs, showing why `--serious` was rejected as too washed out to carry the parity diagonal; five yellows, showing why the brightest starts losing contrast against the light surface; flat against glow against a lit-dome gradient, which was dropped as too subtle for its complexity; the glow at 64, 48, 32 and 16 px; and the throwaway `stack()` variant the optional filter parameter grew from.
+
 ## [be4ed14] - 2026-09-23
 
 Pull request #149: Remove the stale device.json name; the identity file is DISTRIBUTED-JBOD-DEVICE.json
