@@ -1424,3 +1424,45 @@ async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
     assert_eq!(record["revision"], 1, "{record}");
     assert!(!root.exists(), "the repair recreated the removed device");
 }
+
+/// SPEC 19.1.3, 5.6: `status` works while a node is down, names it, and
+/// shows its devices as unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_names_an_unreachable_node_and_still_succeeds() {
+    let test = start_node(3, 2, 1).await;
+    let ghost = djbod_core::cluster::NodeId(Uuid::from_u128(0xdead));
+    let mut next = test.node.document();
+    next.version += 1;
+    next.nodes.push(djbod_core::cluster::NodeEntry {
+        id: ghost,
+        addresses: vec!["127.0.0.1:1".to_string()],
+        label: Some("ghost".to_string()),
+    });
+    next.devices.push(djbod_core::cluster::DeviceEntry {
+        id: djbod_core::record::DeviceId(Uuid::from_u128(0xbeef)),
+        node: ghost,
+        state: djbod_core::cluster::DeviceState::Active,
+        label: None,
+    });
+    test.node.apply_document(next).expect("apply");
+
+    let (ok, out, err) = djbod(&test, &["status"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
+    assert!(
+        err.contains(&format!("node {} unreachable", ghost.0)),
+        "{err}"
+    );
+    assert!(err.contains("127.0.0.1:1"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let nodes = json["nodes"].as_array().expect("nodes");
+    let gone = nodes
+        .iter()
+        .find(|n| n["node"] == ghost.0.to_string())
+        .expect("ghost listed");
+    assert_eq!(gone["reachable"], false, "{gone}");
+    assert!(gone["build"].is_null(), "{gone}");
+    assert!(gone["error"].is_string(), "{gone}");
+}

@@ -80,7 +80,7 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
         let build = nodes
             .iter()
             .find(|n| n.node == d.node)
-            .map(|n| n.build.as_str())
+            .and_then(|n| n.build.as_deref())
             .unwrap_or("-");
         // The document's state, and whether the node can read it (5.6);
         // a removed device is retired, and its readability is nobody's

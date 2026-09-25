@@ -625,7 +625,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .count();
                         if unavailable_count > 0 {
                             eprintln!(
-                                "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed)"
+                                "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed) or cannot be reached"
+                            );
+                        }
+                        // A node that could not be asked (5.6, 19.1.3): its
+                        // devices are the unavailable ones above.
+                        for n in nodes.iter().filter(|n| !n.reachable) {
+                            eprintln!(
+                                "node {} unreachable: {}",
+                                n.node.0,
+                                n.error.as_deref().unwrap_or("no answer")
                             );
                         }
                     }

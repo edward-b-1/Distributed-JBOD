@@ -1790,3 +1790,66 @@ async fn repair_rebuilds_the_shards_of_a_device_marked_removed() {
         .expect("put again");
     assert!(!root.exists());
 }
+
+/// SPEC 19.1.3, 5.6: a node the coordinator cannot reach does not fail
+/// `Status`. It is reported unreachable with the reason, and its devices
+/// are listed from the document as unavailable with no space.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_reports_an_unreachable_node_instead_of_failing() {
+    let test = start_node(3, 2, 1).await;
+    let mut client = test.client().await;
+    // A node nobody is listening for, with one device.
+    let ghost = djbod_core::cluster::NodeId(Uuid::from_u128(0xdead));
+    let ghost_device = DeviceId(Uuid::from_u128(0xbeef));
+    let mut next = test.node.document();
+    next.version += 1;
+    next.nodes.push(djbod_core::cluster::NodeEntry {
+        id: ghost,
+        addresses: vec!["127.0.0.1:1".to_string()],
+        label: Some("ghost".to_string()),
+    });
+    next.devices.push(djbod_core::cluster::DeviceEntry {
+        id: ghost_device,
+        node: ghost,
+        state: DeviceState::Active,
+        label: Some("ghost-d0".to_string()),
+    });
+    test.node.apply_document(next).expect("apply");
+
+    match client.request(Request::Status).await.expect("status") {
+        Response::Status { nodes, devices, .. } => {
+            assert_eq!(nodes.len(), 2, "{nodes:?}");
+            let here = nodes
+                .iter()
+                .find(|n| n.node == test.node.id())
+                .expect("this node");
+            assert!(here.reachable);
+            assert_eq!(here.build.as_deref(), Some(djbod_client::BUILD));
+            assert!(here.error.is_none());
+            let gone = nodes.iter().find(|n| n.node == ghost).expect("ghost");
+            assert!(!gone.reachable);
+            assert!(gone.build.is_none());
+            assert!(
+                gone.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("127.0.0.1:1")),
+                "{gone:?}"
+            );
+            assert_eq!(devices.len(), 4, "{devices:?}");
+            let listed = devices
+                .iter()
+                .find(|d| d.device == ghost_device)
+                .expect("ghost device");
+            assert!(!listed.available);
+            assert_eq!(listed.state, DeviceState::Active);
+            assert_eq!(listed.label.as_deref(), Some("ghost-d0"));
+            assert_eq!(listed.node_label.as_deref(), Some("ghost"));
+            assert_eq!((listed.total_bytes, listed.free_bytes), (0, 0));
+            assert!(devices
+                .iter()
+                .filter(|d| d.node != ghost)
+                .all(|d| d.available));
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+}

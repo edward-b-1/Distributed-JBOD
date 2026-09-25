@@ -322,12 +322,19 @@ pub struct DeviceContents {
     pub shard_bytes: u64,
 }
 
-/// One node as `Status` reports it: the build it gave in its
-/// `LocalStatus` (SPEC 6.2.6.4).
+/// One node as `Status` reports it (SPEC 19.1.3). A node that answered
+/// carries the build it gave in its `LocalStatus` (6.2.6.4); one the
+/// coordinator could not reach carries the reason instead, has no build,
+/// since there was no Hello, and its devices are listed as unavailable
+/// (5.6). Exactly one of `build` and `error` is present.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub node: NodeId,
-    pub build: String,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

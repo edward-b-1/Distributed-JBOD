@@ -484,10 +484,20 @@ fn every_response_round_trips() {
             document_version: 7,
             transport: djbod_core::cluster::Transport::Plain,
             coordinator: node(1),
-            nodes: vec![NodeStatus {
-                node: node(1),
-                build: "0.1.0+0123456789".to_string(),
-            }],
+            nodes: vec![
+                NodeStatus {
+                    node: node(1),
+                    reachable: true,
+                    build: Some("0.1.0+0123456789".to_string()),
+                    error: None,
+                },
+                NodeStatus {
+                    node: node(2),
+                    reachable: false,
+                    build: None,
+                    error: Some("connection refused".to_string()),
+                },
+            ],
             devices: vec![status.clone()],
         },
         Response::PutObject {

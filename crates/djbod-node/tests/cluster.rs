@@ -226,14 +226,28 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         .expect("put");
 
     b.stop();
-    // Every operation that must reach b fails, naming it (16.1, 16.2).
+    // Status is the one request that goes on without b (19.1.3, 5.6): it
+    // names b as unreachable and lists b's devices as unavailable.
     match client.request(Request::Status).await {
-        Err(ConnectionError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::NodeUnreachable);
-            assert_eq!(detail.node, Some(b.node.id()));
+        Ok(Response::Status { nodes, devices, .. }) => {
+            let gone = nodes
+                .iter()
+                .find(|n| n.node == b.node.id())
+                .expect("b listed");
+            assert!(!gone.reachable, "{gone:?}");
+            assert!(gone.error.is_some(), "{gone:?}");
+            assert!(devices
+                .iter()
+                .filter(|d| d.node == b.node.id())
+                .all(|d| !d.available && d.free_bytes == 0));
+            assert!(devices
+                .iter()
+                .filter(|d| d.node == a.node.id())
+                .all(|d| d.available));
         }
-        other => panic!("expected NodeUnreachable, got {other:?}"),
+        other => panic!("expected Status, got {other:?}"),
     }
+    // Every other operation that must reach b fails, naming it (16.1, 16.2).
     match client
         .request(Request::HeadObject {
             key: "k".to_string(),
