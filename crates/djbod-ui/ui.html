@@ -1250,6 +1250,7 @@ $('upload-cancel').addEventListener('click', () => {
 
 // ------------------------------------------------------------ maintenance
 
+function plural(n, one, many = one + 's') { return `${n.toLocaleString()} ${n === 1 ? one : many}`; }
 function describeFinding(f) {
   const skip = new Set(['kind', 'event']);
   return `${f.kind}: ${Object.entries(f).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')}`;
@@ -1295,6 +1296,11 @@ $('scrub-go').addEventListener('click', async () => {
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
         case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
+        case 'cross_check_availability': {
+          const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
+          logLine(log, `shards available: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
+          break;
+        }
         case 'cross_check_exposure': {
           // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
           const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${u.versions.toLocaleString()} version(s)`).join('; ');
@@ -1307,11 +1313,11 @@ $('scrub-go').addEventListener('click', async () => {
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':
           if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
-          else logLine(log, `scrub finished: ${findings} finding(s), ${repairs} repair(s)`, findings && !repairing ? 'finding' : 'repaired');
+          else logLine(log, `scrub finished: ${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`, findings && !repairing ? 'finding' : 'repaired');
           break;
         default: logLine(log, JSON.stringify(e));
       }
-      $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
+      $('scrub-summary').textContent = `${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`;
     });
   } catch (e) { fail('scrub', e); fill.classList.remove('working'); $('scrub-progress').hidden = true; }
   finally { $('scrub-go').disabled = false; refresh(); }

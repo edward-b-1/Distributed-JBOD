@@ -17,6 +17,7 @@
 //! writes as chunks arrive. A failed `get` leaves a partial output file
 //! and says so; it is removed when the output is a named file.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -456,6 +457,72 @@ fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failu
     }
 }
 
+/// A count in words: "1 finding", "3 findings".
+fn counted(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// What a scrub finding is, in the words of the last line (20.1.2.3),
+/// singular and plural. A device that could not be read is not damage
+/// and has its own line.
+fn scrub_finding_words(
+    event: &djbod_proto::message::ScrubEvent,
+) -> Option<(&'static str, &'static str)> {
+    use djbod_core::scrub::Finding as F;
+    use djbod_proto::message::{ClusterFinding as C, ScrubEvent as E};
+    match event {
+        E::NodeFinding { finding, .. } => Some(match finding {
+            F::RecordCorrupt { .. } => ("corrupt record", "corrupt records"),
+            F::ShardUnreadable { .. } => ("unreadable shard", "unreadable shards"),
+            F::ShardMisplaced { .. } => ("misplaced shard", "misplaced shards"),
+            F::ShardBlocksCorrupt { .. } => {
+                ("shard with corrupt blocks", "shards with corrupt blocks")
+            }
+            F::ShardWithoutRecord { .. } => ("shard without a record", "shards without a record"),
+            F::RecordWithoutShard { .. } => {
+                ("record without its shard", "records without their shard")
+            }
+            F::RecordNotForThisDevice { .. } => {
+                ("record on the wrong device", "records on the wrong device")
+            }
+            F::StaleTemporary { .. } => ("stale temporary file", "stale temporary files"),
+            F::DeviceUnavailable { .. } => return None,
+        }),
+        E::ClusterFinding(finding) => Some(match finding {
+            C::RecordsInconsistent { .. } => (
+                "version with inconsistent record copies",
+                "versions with inconsistent record copies",
+            ),
+            C::ShardMissingOnDevice { .. } => (
+                "shard missing from its device",
+                "shards missing from their device",
+            ),
+            C::ShardLost { .. } => ("shard on a removed device", "shards on a removed device"),
+            C::StaleCopy { .. } => ("stale record copy", "stale record copies"),
+        }),
+        _ => None,
+    }
+}
+
+/// The object a scrub finding is about, when it is about one.
+fn scrub_finding_key(event: &djbod_proto::message::ScrubEvent) -> Option<&str> {
+    use djbod_proto::message::{ClusterFinding as C, ScrubEvent as E};
+    match event {
+        E::NodeFinding { finding, .. } => finding.repair_key(),
+        E::ClusterFinding(
+            C::RecordsInconsistent { key, .. }
+            | C::ShardMissingOnDevice { key, .. }
+            | C::ShardLost { key, .. }
+            | C::StaleCopy { key, .. },
+        ) => Some(key),
+        _ => None,
+    }
+}
+
 /// The last line's verdict, in the words of SPEC 20.1.2.3.
 fn scrub_outcome(
     repair: bool,
@@ -853,8 +920,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut repairs = 0usize;
             let mut repair_failures = 0usize;
             let mut unavailable_devices = 0usize;
-            // Printed last, so that what the unavailable devices cost is
-            // the last thing read (SPEC 20.1.2.2).
+            // For the last line (SPEC 20.1.2.3): what was found, by kind,
+            // and in how many objects.
+            let mut by_kind: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
+            let mut damaged_objects: BTreeSet<String> = BTreeSet::new();
+            // Printed after the last line: every version by its shards
+            // available, and then what the unavailable devices cost, so
+            // that is the last thing read (SPEC 20.1.2.2).
+            let mut availability: Option<ScrubEvent> = None;
             let mut exposure: Option<ScrubEvent> = None;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
@@ -869,7 +942,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 ..
                             } => unavailable_devices += 1,
                             ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_) => {
-                                findings += 1
+                                findings += 1;
+                                if let Some(words) = scrub_finding_words(&event) {
+                                    *by_kind.entry(words).or_default() += 1;
+                                }
+                                if let Some(key) = scrub_finding_key(&event) {
+                                    damaged_objects.insert(key.to_string());
+                                }
                             }
                             ScrubEvent::Repaired { .. } => repairs += 1,
                             ScrubEvent::RepairFailed { .. } => repair_failures += 1,
@@ -941,6 +1020,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     "cross-node checks: {versions_checked} version(s) checked"
                                 );
                             }
+                            ScrubEvent::CrossCheckAvailability { .. } => availability = Some(event),
                             ScrubEvent::CrossCheckExposure { .. } => exposure = Some(event),
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
@@ -965,17 +1045,39 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
             let code = scrub_exit_code(*repair, incomplete, findings, repair_failures);
             if !cli.json {
-                eprintln!(
-                    "{findings} finding(s), {repairs} repair(s), {repair_failures} failed repair(s): {}",
+                let mut last = counted(findings, "finding", "findings");
+                if !damaged_objects.is_empty() {
+                    last.push_str(&format!(
+                        " in {}",
+                        counted(damaged_objects.len(), "object", "objects")
+                    ));
+                }
+                if !by_kind.is_empty() {
+                    let kinds: Vec<String> = by_kind
+                        .iter()
+                        .map(|((one, many), n)| counted(*n, one, many))
+                        .collect();
+                    last.push_str(&format!(": {}", kinds.join(", ")));
+                }
+                if *repair {
+                    last.push_str(&format!("; {repairs} repaired, {repair_failures} failed"));
+                }
+                last.push_str(&format!(
+                    "; {}",
                     scrub_outcome(*repair, incomplete, findings, repair_failures)
-                );
+                ));
+                eprintln!("{last}");
                 if unavailable_devices > 0 {
                     eprintln!(
-                        "{unavailable_devices} device(s) unavailable, not checked: restore or retire them, then run again"
+                        "{} unavailable, not checked: restore or retire them, then run again",
+                        counted(unavailable_devices, "device", "devices")
                     );
                 }
                 if let Some(error) = &end.error {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
+                }
+                if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = &availability {
+                    eprintln!("{}", describe_availability(versions));
                 }
                 if let Some(ScrubEvent::CrossCheckExposure {
                     unread,
@@ -1625,28 +1727,65 @@ fn describe_exposure(
     unreadable: u64,
 ) -> String {
     let mut lines = vec![format!(
-        "WARNING: data at higher risk: {with_shards_out} of {versions_checked} version(s) have a shard on an unavailable device"
+        "WARNING: data at higher risk: versions with a shard on an unavailable device: {with_shards_out} of {versions_checked}"
     )];
     for entry in unread {
         lines.push(format!(
-            "  device {}: {} version(s)",
-            entry.device.0, entry.versions
+            "  device {}: {}",
+            entry.device.0,
+            counted(entry.versions as usize, "version", "versions")
         ));
     }
     if at_the_limit > 0 {
         lines.push(format!(
-            "  {at_the_limit} version(s) can lose no further shard: one more device out makes them unreadable"
+            "  {} can lose no further shard: one more device out makes {} unreadable",
+            counted(at_the_limit as usize, "version", "versions"),
+            if at_the_limit == 1 { "it" } else { "them" }
         ));
     }
-    lines.push(if unreadable > 0 {
-        format!("  {unreadable} version(s) are unreadable now: more than m shards out")
-    } else {
-        "  0 version(s) are unreadable now".to_string()
+    lines.push(match unreadable {
+        0 => "  no version is unreadable now".to_string(),
+        1 => "  1 version is unreadable now: more than m shards out".to_string(),
+        n => format!("  {n} versions are unreadable now: more than m shards out"),
     });
     lines.push(
         "restore the device, or retire it with `djbod cluster remove-device --force` and run `djbod scrub --repair` to rebuild what it held".to_string(),
     );
     lines.join("\n")
+}
+
+/// Every version checked by how many of its shards are available (SPEC
+/// 20.1.2.2), against its scheme: whole, readable with so many to
+/// spare, or unreadable.
+fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -> String {
+    if versions.is_empty() {
+        return "shards available: no version checked".to_string();
+    }
+    let parts: Vec<String> = versions
+        .iter()
+        .map(|v| {
+            let state = if v.shards_available == v.shards_total {
+                String::new()
+            } else if v.shards_available >= v.k {
+                match v.shards_available - v.k {
+                    0 => " (readable, none to spare)".to_string(),
+                    spare => format!(
+                        " (readable, {} to spare)",
+                        counted(spare as usize, "shard", "shards")
+                    ),
+                }
+            } else {
+                " (unreadable)".to_string()
+            };
+            format!(
+                "{} with {} of {}{state}",
+                counted(v.versions as usize, "object", "objects"),
+                v.shards_available,
+                v.shards_total
+            )
+        })
+        .collect();
+    format!("shards available: {}", parts.join(", "))
 }
 
 /// The devices a listing went without (SPEC 15.1) and what that means

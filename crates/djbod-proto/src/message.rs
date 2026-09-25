@@ -571,6 +571,16 @@ pub enum ClusterFinding {
         device: DeviceId,
         shard_index: u8,
     },
+    /// The record places a shard on a device that is `removed` or no
+    /// longer in the cluster document (18.2.1): the shard is lost (18.3),
+    /// and repair rebuilds it onto another device. Not a fault of the
+    /// device that was consulted; the device is gone by decision.
+    ShardLost {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        shard_index: u8,
+    },
     /// A copy of the record at a lower placement revision than the
     /// current one, on a device the current revision no longer lists:
     /// left behind by an interrupted re-placement (SPEC 18.8.1).
@@ -625,6 +635,16 @@ pub enum ScrubEvent {
         versions_checked: u64,
         key_hash: KeyHash,
     },
+    /// Every version checked, counted by how many of its shards are
+    /// available against how many it has (20.1.2.2): a shard is not
+    /// available when its device is unread or removed, its file is
+    /// missing, or the node's own scrub found it damaged. Sent once when
+    /// the cross-node phase ends, whatever it found: the answer to "what
+    /// state is my data in" in one line.
+    CrossCheckAvailability {
+        versions_checked: u64,
+        versions: Vec<ShardAvailability>,
+    },
     /// What the devices the merge could not read cost (20.1.2.2, 5.6),
     /// sent once when the cross-node phase ends with any device unread.
     /// Not damage: nothing is known to be wrong with a shard on such a
@@ -652,6 +672,17 @@ pub enum ScrubEvent {
         key: String,
         detail: ErrorDetail,
     },
+}
+
+/// Versions with `shards_available` of `shards_total` shards available,
+/// at scheme `k`: whole when equal, readable while at least k are, with
+/// `shards_available - k` to spare, and unreadable below k.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardAvailability {
+    pub shards_total: u8,
+    pub shards_available: u8,
+    pub k: u8,
+    pub versions: u64,
 }
 
 /// One device the cross-node checks could not read (5.6), and how many

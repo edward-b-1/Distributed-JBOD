@@ -357,17 +357,25 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
     assert_eq!(moved.record.revision, record.revision + 1);
     assert!(moved.source_cleaned && !moved.rebuilt);
 
-    // A scrub: one summary per device, then a clean end.
+    // A scrub: one summary per device, every version whole, then a
+    // clean end.
     let mut run = client.scrub(None, false).await.expect("start scrub");
     let mut summaries = 0;
+    let mut whole = false;
     let end = loop {
         match run.next_event().await.expect("scrub event") {
             Ok(ScrubEvent::NodeSummary { .. }) => summaries += 1,
+            Ok(ScrubEvent::CrossCheckAvailability { versions, .. }) => {
+                whole = versions
+                    .iter()
+                    .all(|v| v.shards_available == v.shards_total);
+            }
             Ok(other) => panic!("unexpected scrub event {other:?}"),
             Err(end) => break end,
         }
     };
     assert_eq!(summaries, 3);
+    assert!(whole);
     assert!(end.error.is_none(), "{end:?}");
 
     // Drain the device shard 0 now sits on: an estimate, one move, an end.

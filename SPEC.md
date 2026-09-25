@@ -2198,9 +2198,11 @@ than the current revision lists devices, or copies that disagree, is
 `RecordsInconsistent`; a copy at a lower revision on a device the
 current revision no longer lists is `StaleCopy`; a listed device that
 has the record but not the shard file is `ShardMissingOnDevice`. A
-listed device that is no longer in the cluster document has no stream,
-so its copy is absent and the version shows as `RecordsInconsistent`,
-which is what it is; repair rebuilds the shard elsewhere (18.3). No
+listed device that is `removed` or no longer in the cluster document has
+no stream and is expected to hold nothing (18.2.1), so its absent copy
+is not counted against the version; each shard the record places on it
+is `ShardLost`, one finding per shard, and repair rebuilds it onto
+another device (18.3). No
 lookup and no probe is made,
 and no list of keys is held: the phase's memory is one page per device
 plus the current group, so it is proportional to the number of devices,
@@ -2232,10 +2234,22 @@ out and are unreadable now. `djbod scrub` prints this as its last
 lines, as a warning that the data is at higher risk, with what to do:
 restore the device, or retire it (18.2.1.1) and run `scrub --repair`.
 The web UI shows the same in the scrub log. The exit code does not
-change for it: exposure is not damage, and the line says which. This is
-the classification of every version against the devices that are out
-(whole, degraded, at the limit, unreadable) computed in the one place
-that already reads every record; a scheduled scrub gets it for free.
+change for it: exposure is not damage, and the line says which.
+
+The phase also ends, every time, with every version it checked counted
+by how many of its shards are available against how many it has, at
+its scheme: a shard is not available when its device is unread or
+removed, its file is missing, or the node's own scrub found it damaged.
+`djbod scrub` prints it as one line after the verdict, for example
+`shards available: 245756 objects with 2 of 3 (readable, none to
+spare)`, with whole objects first and unreadable ones last, so the
+state of the data is read in the scheme's own terms: how many shards
+each object has left, and how many it can still lose. A version whose
+copies could not be trusted is not counted, its shards being unknown.
+This is the classification of every version against what is out (whole,
+degraded with so much to spare, at the limit, unreadable) computed in
+the one place that already reads every record; a scheduled scrub gets
+it for free.
 
 A node that cannot be reached, or that refuses or answers out of
 protocol, is not damage and is never reported as damage. In the first
@@ -2278,7 +2292,11 @@ contents were not checked and no repair can reach them; a stream that
 ends only because repairs failed is complete. Damage, codes 2 and 4,
 is what a checksum or a cross-node check found wrong in data that was
 read, which is what `--repair` acts on.
-The last line of the human output states the outcome in these words;
+The last line of the human output gives the count of findings, the
+objects they fall in, the count of each kind in words (shards on a
+removed device, shards missing from their device, stale record copies,
+and so on), the repairs and failures when `--repair` was given and
+nothing about repairs otherwise, and then the outcome in these words;
 `--json` prints the events alone, and the exit code carries the verdict.
 
 20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard
