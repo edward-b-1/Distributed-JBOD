@@ -1299,16 +1299,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     node_id,
                     partial,
                 } => {
+                    // Fetched once: every line of the drain names devices
+                    // and nodes by their labels where they have one (6.2.5.1).
+                    let document =
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let devices: Vec<Uuid> = match (device, node_id) {
                         (Some(device), _) => vec![resolve_device(&cli, device).await?.0],
                         (None, Some(node_id)) => {
-                            let document = djbod_client::admin::fetch_document(
-                                &connector(&cli)?,
-                                node,
-                                cluster,
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                             let wanted =
                                 document
                                     .node_by_name(node_id)
@@ -1333,7 +1332,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     };
                     let mut all_moved = true;
                     for device in devices {
-                        all_moved &= drain_device(&cli, DeviceId(device), *partial).await?;
+                        all_moved &=
+                            drain_device(&cli, &document, DeviceId(device), *partial).await?;
                     }
                     if !all_moved {
                         std::process::exit(2);
@@ -2171,7 +2171,16 @@ async fn force_remove_node(
 
 /// Run one drain and print its progress. Returns whether every version
 /// was moved.
-async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
+/// Run one drain and print it: names where the document has them, the
+/// full identity where it matters (SPEC 6.2.5.1), and the source beside
+/// every destination so each line says where a shard went from and to.
+async fn drain_device(
+    cli: &Cli,
+    document: &djbod_core::cluster::ClusterDocument,
+    device: DeviceId,
+    partial: bool,
+) -> anyhow::Result<bool> {
+    let source = document.device_name(device);
     let mut client = connect(cli).await?;
     let mut run = client.drain(device, partial).await.map_err(client_err)?;
     let mut moved = 0usize;
@@ -2203,8 +2212,8 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                     } => {
                         println!(
                             "draining {} on node {}: {}, {} to move; {} free on {}, {required_devices} needed per version",
-                            device.0,
-                            short(&node.0),
+                            device_identity(document, device),
+                            node_identity(document, node),
                             counted(versions as usize, "version", "versions"),
                             human_bytes(shard_bytes),
                             human_bytes(target_free_bytes),
@@ -2220,8 +2229,8 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                     } => {
                         moved += 1;
                         println!(
-                            "moved    {key}  shard {shard_index} -> {}{}",
-                            destination.0,
+                            "moved    {key}  shard {shard_index}  {source} -> {}{}",
+                            document.device_name(destination),
                             if rebuilt { " (rebuilt)" } else { "" }
                         );
                     }
@@ -2247,12 +2256,29 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     if let Some(error) = &end.error {
         eprintln!(
             "drain of {} incomplete: {}",
-            device.0,
+            device_identity(document, device),
             describe_detail(error)
         );
         return Ok(false);
     }
     Ok(true)
+}
+
+/// A device's full identity for lines that matter (SPEC 6.2.5.1): its
+/// label with the UUID in brackets, or the UUID alone when it has none.
+fn device_identity(document: &djbod_core::cluster::ClusterDocument, id: DeviceId) -> String {
+    match document.device(id).and_then(|d| d.label.as_deref()) {
+        Some(label) => format!("{label} ({})", id.0),
+        None => id.0.to_string(),
+    }
+}
+
+/// A node's full identity, as `device_identity`.
+fn node_identity(document: &djbod_core::cluster::ClusterDocument, id: NodeId) -> String {
+    match document.node(id).and_then(|n| n.label.as_deref()) {
+        Some(label) => format!("{label} ({})", id.0),
+        None => id.0.to_string(),
+    }
 }
 
 fn short(id: &Uuid) -> String {
