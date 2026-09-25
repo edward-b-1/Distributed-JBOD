@@ -1,3 +1,22 @@
+# Changelog
+
+All notable changes to Distributed-JBOD are recorded in this file. The format
+follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The
+workspace `version` in `Cargo.toml` is the single source of the version number
+and every crate inherits it. A build identifies itself as `<version>+<git
+commit>`, which `djbod --version`, `djbod identity`, `djbod status` and `djbod
+cluster show` print.
+
+Nothing before 0.2.0 was tagged: the workspace carried version 0.1.0 from the
+first commit on 16 September 2026, no build was published, and tags and version
+increments start at 0.2.0. Each section below the first tag is therefore one
+commit on `main`, headed by its short hash in place of a release tag. From 0.2.0
+on, a section is a tagged release.
+
+## [Unreleased]
+
 ## [3e55cc5] - 2026-09-25
 
 Pull request #221: docs: versions versus revisions
@@ -389,8 +408,7 @@ Pull request #111: The Rust client API: node addresses with failover, one method
 - Failover over one kept connection: when it fails, the next request goes over a fresh connection to the next address, and only requests safe to repeat are retried on the client's own initiative, which is reads, `head`, listing, `status` and the document. A write, a delete, a repair or a refusal by the node is never repeated.
 - One method per operation: `put` and `put_from_reader`, `get` and `get_to_writer`, `head`, `delete`, `list` with `ListPage::next_start_after` or `list_all`, `repair`, `status`, `identity` and `cluster_document`.
 - `Error::detail()`, giving the node's `ErrorDetail` when the node answered with one, `is_not_found()` for the common case, and `Unreachable` listing every address tried and why it failed (SPEC 16.2).
-- `djbod_client::blocking::Client`, the same client without `async`, running on a current-thread runtime it owns and using `std::io::Read` and `Write` for the streaming methods.
-- SPEC 20.8 stating the library's obligations and 20.8.1 the bindings plan, with the protocol remaining the contract for native clients.
+- `djbod_client::blocking::Client`, the same client without `async`, running on a current-thread runtime it owns and using `std::io::Read` and `Write` for the streaming methods, with SPEC 20.8 stating the library's obligations and 20.8.1 the bindings plan.
 
 ## [dfb98ce] - 2026-09-20
 
@@ -1022,12 +1040,11 @@ Pull request #36: Milestone 5: the administration web UI, djbod-ui (SPEC 20.3.1)
 
 ### Added
 
-- `djbod-ui`, a crate serving one embedded page and a JSON API under `/api` on a local HTTP port, where every call is one node operation or one membership procedure, so the user interface holds no state of its own and every action it offers is also a command-line operation (SPEC 20.3.1).
+- `djbod-ui`, a crate serving one embedded page and a JSON API under `/api` on a local HTTP port, run with `djbod-ui --listen` and taking `DJBOD_NODE` and `DJBOD_CLUSTER` like the client. Every call is one node operation or one membership procedure, so the user interface holds no state of its own and every action it offers is also a command-line operation (SPEC 20.3.1).
 - An Overview of nodes with their document versions and reachability and devices with a used-space meter and state, with set-state, remove and sync.
 - An Objects section listing by prefix with paging, upload, the record and shard placement, download, repair, move-shard and delete.
 - A Maintenance section showing scrub and drain events live as newline-delimited JSON, and a Settings section for the scheme, the limits and the raw cluster document.
-- Object bodies streaming through in both directions without being held, with a download that meets damage cut short of its declared `Content-Length` so the browser reports a failed download rather than saving a wrong file.
-- `djbod-ui --listen`, taking `DJBOD_NODE` and `DJBOD_CLUSTER` like the client and binding to localhost by default. Forced node removal and re-encode stay on the command line, and there is no authentication until the protocol has it.
+- Object bodies streaming through in both directions without being held, with a download that meets damage cut short of its declared `Content-Length` so the browser reports a failed download rather than saving a wrong file. The server binds to localhost by default, has no authentication until the protocol has it, and leaves forced node removal and re-encode on the command line.
 
 ## [6b3b858] - 2026-09-19
 
@@ -1395,12 +1412,11 @@ Pull request #10: Add the coordinator: client-facing operations for a cluster of
 
 ### Added
 
-- The `coordinator` module, serving every client-facing operation by fanning node-to-node operations out over every node in the cluster document, this node included over loopback, so one node and twenty take the same code path (SPEC 4.1).
+- The `coordinator` module, serving every client-facing operation by fanning node-to-node operations out over every node in the cluster document, this node included over loopback, so one node and twenty take the same code path (SPEC 4.1). With it come `ulid::VersionGenerator`, monotonic within a millisecond (SPEC 9.2.3), and `advertise` in the node configuration for the address recorded in the document.
 - Lookup, which broadcasts `LocalLookup` and then checks that a version has k+m equal copies, each from a device the record lists and naming the requested key, with the newest version winning (SPEC 13, 9.1.6, 9.4.4).
 - `PutObject`, which places by most free bytes over k+m distinct active devices with room, streams the body into stripes, encodes and fans out with stripe numbers while folding in the whole-object checksum, writes the records, and then deletes older versions (SPEC 10).
 - `GetObject`, which opens every data shard before the record reaches the client, decodes each stripe and fails the stream naming device, shard index and stripe on anything but `Intact` (SPEC 11.4, 11.7).
 - `ListKeys`, taking the newest version per key across nodes with `start_after`, `limit` and `truncated` (SPEC 15.1).
-- `ulid::VersionGenerator`, monotonic within a millisecond (SPEC 9.2.3), and `advertise` in the node configuration for the address recorded in the document.
 
 ## [c201faa] - 2026-09-18
 
@@ -1752,3 +1768,170 @@ Direct commit: Initial commit
 ### Added
 
 - The repository, with a `README.md` naming the project.
+
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/3e55cc5...HEAD
+[3e55cc5]: https://github.com/edward-b-1/Distributed-JBOD/commit/3e55cc571b1e0f6771971407e928eef701c751c3
+[92c4f75]: https://github.com/edward-b-1/Distributed-JBOD/commit/92c4f7516e676beb33ff04c620b7f849f9c12736
+[b928225]: https://github.com/edward-b-1/Distributed-JBOD/commit/b928225f2ee451dc4e4a2914b478b43673f37269
+[dffe86d]: https://github.com/edward-b-1/Distributed-JBOD/commit/dffe86d5741d31192cf7e0cd865594121dae5720
+[ad9bfa3]: https://github.com/edward-b-1/Distributed-JBOD/commit/ad9bfa33c4cbb8b2431988c2fd1570dc623ea40f
+[d0b8133]: https://github.com/edward-b-1/Distributed-JBOD/commit/d0b8133c6f1bc794b74925a6c5caea06a6db6fab
+[17dd946]: https://github.com/edward-b-1/Distributed-JBOD/commit/17dd946c55183be65440e76284e45926b7e5a97f
+[0cb7a49]: https://github.com/edward-b-1/Distributed-JBOD/commit/0cb7a4945bae05ed3c379db300e15cc35ab61b08
+[e9241a2]: https://github.com/edward-b-1/Distributed-JBOD/commit/e9241a2d2d41e8bb5df73fd6e1c7133bfc156d13
+[79dac71]: https://github.com/edward-b-1/Distributed-JBOD/commit/79dac71ecf0a2230a048dfe6a347ee428c6acb0d
+[3668032]: https://github.com/edward-b-1/Distributed-JBOD/commit/36680327e57d51e62a83e91507f8cdbc1f259298
+[40b0938]: https://github.com/edward-b-1/Distributed-JBOD/commit/40b0938132d83667a89f244fb5d78def9d1ab7af
+[7da5ff6]: https://github.com/edward-b-1/Distributed-JBOD/commit/7da5ff6a190b97da1168f549ca81316063c52331
+[028c4f2]: https://github.com/edward-b-1/Distributed-JBOD/commit/028c4f283b0ccd903a7e6b0a8ac765a09900b5ca
+[31e8d23]: https://github.com/edward-b-1/Distributed-JBOD/commit/31e8d2366423cd434b53478e7d80d07c914c6a57
+[1cb6d05]: https://github.com/edward-b-1/Distributed-JBOD/commit/1cb6d05a782836cc86630b45dfdccba4c00380d0
+[e792d8e]: https://github.com/edward-b-1/Distributed-JBOD/commit/e792d8ee31475e9838f2a1ecee112248498ef1ff
+[f5a98e2]: https://github.com/edward-b-1/Distributed-JBOD/commit/f5a98e26cbe837767085bf5b0d0adba3dfdb3474
+[3c3fd58]: https://github.com/edward-b-1/Distributed-JBOD/commit/3c3fd58b024cc631ac072fe507c3884b4bf5fd4e
+[dd84671]: https://github.com/edward-b-1/Distributed-JBOD/commit/dd84671ed51e4c3b434488355a458dcc3980f095
+[d5b2333]: https://github.com/edward-b-1/Distributed-JBOD/commit/d5b23331ed4230cea0e09c6e5fb79a25e674d0a4
+[50c559e]: https://github.com/edward-b-1/Distributed-JBOD/commit/50c559ed21c964c35953df5de8f9a7c6e517877b
+[48eb00e]: https://github.com/edward-b-1/Distributed-JBOD/commit/48eb00e11419fb0925eee956875156ca26da701c
+[0815ec4]: https://github.com/edward-b-1/Distributed-JBOD/commit/0815ec442219d1dab9f28143eb8316b293b486da
+[33ec9fd]: https://github.com/edward-b-1/Distributed-JBOD/commit/33ec9fd1a12200f4743afe5cc8a54bac8352cf2e
+[be4ed14]: https://github.com/edward-b-1/Distributed-JBOD/commit/be4ed14230b6b46c119fb6a8219541b50142fd67
+[d9601b7]: https://github.com/edward-b-1/Distributed-JBOD/commit/d9601b7cc961ca8750fa1f102621338ae1409370
+[27d82c7]: https://github.com/edward-b-1/Distributed-JBOD/commit/27d82c765cc7b171ed1607cf7e35e7be5f09c10b
+[6f4d6a3]: https://github.com/edward-b-1/Distributed-JBOD/commit/6f4d6a34e2b1504f504b898285bd29722a863fb2
+[e893ec2]: https://github.com/edward-b-1/Distributed-JBOD/commit/e893ec28403ef4836a0d2c097f5ae0dfea5babc0
+[06f318f]: https://github.com/edward-b-1/Distributed-JBOD/commit/06f318f1710a9bd8f04ebf5f8dc8e11ef4fb1021
+[89edbfd]: https://github.com/edward-b-1/Distributed-JBOD/commit/89edbfd0c71c22f0b932c5a7d2eb02b9cd77bb48
+[84f2bb5]: https://github.com/edward-b-1/Distributed-JBOD/commit/84f2bb52cb1f0db2104658e63f569940adbc706c
+[458a4e8]: https://github.com/edward-b-1/Distributed-JBOD/commit/458a4e83267efbd1b198c1dbfcf92610cb4e45d1
+[ebc4340]: https://github.com/edward-b-1/Distributed-JBOD/commit/ebc434029990778d126f5682beeff045f8e9dbe2
+[dfb98ce]: https://github.com/edward-b-1/Distributed-JBOD/commit/dfb98cebe3bef7acdb469c6aa6d750d9e259c406
+[75cdbf2]: https://github.com/edward-b-1/Distributed-JBOD/commit/75cdbf26380fa6768cb72ffbbe5c1b078fa17a10
+[7da535a]: https://github.com/edward-b-1/Distributed-JBOD/commit/7da535a28d8b7313749b29bce484b3cf0a77b6fd
+[05c09ca]: https://github.com/edward-b-1/Distributed-JBOD/commit/05c09ca358162788fefe89389bf19e551d147297
+[32ca228]: https://github.com/edward-b-1/Distributed-JBOD/commit/32ca2282bc16641b27479a4511e038868ded6312
+[6a062f3]: https://github.com/edward-b-1/Distributed-JBOD/commit/6a062f36aaeaaf45c50bd547650de9a1b5a6ad78
+[f80202a]: https://github.com/edward-b-1/Distributed-JBOD/commit/f80202a7956783ff2b337e1e98f8631bef745920
+[ebf522e]: https://github.com/edward-b-1/Distributed-JBOD/commit/ebf522e5291e1e7b424b81650c31bed451b270c3
+[66f733a]: https://github.com/edward-b-1/Distributed-JBOD/commit/66f733a2b3ac57d95b153377148f1fcdd6d15adf
+[3b7b5d8]: https://github.com/edward-b-1/Distributed-JBOD/commit/3b7b5d83ff61d6401d2cef948e0a142558997e97
+[e88bb62]: https://github.com/edward-b-1/Distributed-JBOD/commit/e88bb624c9cc8f71da25ff8f7b1d8c64de6cd648
+[50c4936]: https://github.com/edward-b-1/Distributed-JBOD/commit/50c4936f15850dfd5df733f4f8d042c0c68ec07a
+[ddb12cc]: https://github.com/edward-b-1/Distributed-JBOD/commit/ddb12cc6766df3c22df74930050f3e854f6b6ca4
+[ec9094c]: https://github.com/edward-b-1/Distributed-JBOD/commit/ec9094c68a46b400706f4ee1ccd080f45fe03e27
+[617b7e2]: https://github.com/edward-b-1/Distributed-JBOD/commit/617b7e244ccd73e2e9df42dd1be3dba73cad9144
+[97da9e5]: https://github.com/edward-b-1/Distributed-JBOD/commit/97da9e5d1e0bbe681cbdaef6e42cbac66db9d5c9
+[354db81]: https://github.com/edward-b-1/Distributed-JBOD/commit/354db81a66f6485d22ec03521e2325bf4f36f0cc
+[c1374bb]: https://github.com/edward-b-1/Distributed-JBOD/commit/c1374bb4451cb11e0aef14bdf199817fcbff681c
+[8085a6f]: https://github.com/edward-b-1/Distributed-JBOD/commit/8085a6f3827be6403dfc6baa2ace9e3747e1dabe
+[71ba68b]: https://github.com/edward-b-1/Distributed-JBOD/commit/71ba68b29bae8152aba5315ad020e6b64abf04d4
+[04f1a8d]: https://github.com/edward-b-1/Distributed-JBOD/commit/04f1a8dce6a3a5ae425d5297b33bf81684ff67d5
+[c2d6341]: https://github.com/edward-b-1/Distributed-JBOD/commit/c2d634109bd69bfd6ef41913edece3e7945823a4
+[102b696]: https://github.com/edward-b-1/Distributed-JBOD/commit/102b69670bb97a1768b804fd8bb861d769b5a814
+[a823f69]: https://github.com/edward-b-1/Distributed-JBOD/commit/a823f691ff6002560845da47fb287a3890bb17ff
+[ec4d2f2]: https://github.com/edward-b-1/Distributed-JBOD/commit/ec4d2f2e1c6d8704ec8bfb4d811499e1b77712b9
+[6131634]: https://github.com/edward-b-1/Distributed-JBOD/commit/6131634ec9afae82e96c9d825d2b2e4f469d83d2
+[fb6c470]: https://github.com/edward-b-1/Distributed-JBOD/commit/fb6c4709d51c37883706cd498194a67fd88be0a6
+[dd3238d]: https://github.com/edward-b-1/Distributed-JBOD/commit/dd3238d600480c6b497229dde676ae9518443ff4
+[f2fdc63]: https://github.com/edward-b-1/Distributed-JBOD/commit/f2fdc6307276ce59d2964cab87ac25b309384880
+[4d8ab2e]: https://github.com/edward-b-1/Distributed-JBOD/commit/4d8ab2ebae4d1fdb63c9ce42a76dea3b43aaa353
+[da9ff6b]: https://github.com/edward-b-1/Distributed-JBOD/commit/da9ff6b3d5b43c4826101c3c038ff133b7a18c7d
+[5ddd227]: https://github.com/edward-b-1/Distributed-JBOD/commit/5ddd227a1362270d74251e130affe37a5cfc93a0
+[e11dec5]: https://github.com/edward-b-1/Distributed-JBOD/commit/e11dec5532ec6ed86ac8135105f8856a69b62a66
+[140707f]: https://github.com/edward-b-1/Distributed-JBOD/commit/140707f6bb4c94bfc19cee44aecbbf556d803478
+[2030b3b]: https://github.com/edward-b-1/Distributed-JBOD/commit/2030b3b1171775ce1e3ea9c9a6df026836e81f19
+[b23eaaa]: https://github.com/edward-b-1/Distributed-JBOD/commit/b23eaaa15463e93a37905865c0215143761f75f8
+[bc7048d]: https://github.com/edward-b-1/Distributed-JBOD/commit/bc7048d71376ed3d142809a1aaa72e8865bc67ab
+[7e10db5]: https://github.com/edward-b-1/Distributed-JBOD/commit/7e10db5cc431a51c0b899719533f9d0a2adca529
+[ac29f71]: https://github.com/edward-b-1/Distributed-JBOD/commit/ac29f715e3d8beaab2ba3a69f6e77ff666c16970
+[6dd3a03]: https://github.com/edward-b-1/Distributed-JBOD/commit/6dd3a037e41de519c8d7ede8afac3d6d7017923f
+[473cc7b]: https://github.com/edward-b-1/Distributed-JBOD/commit/473cc7ba3d71bf1b662dad3792bf466bc2acaa9d
+[dd15f01]: https://github.com/edward-b-1/Distributed-JBOD/commit/dd15f011d1223c7301343fe7516015505a4a33fa
+[6c42b2b]: https://github.com/edward-b-1/Distributed-JBOD/commit/6c42b2bf5b3586083b799ada162627f392cd3632
+[00fdb23]: https://github.com/edward-b-1/Distributed-JBOD/commit/00fdb23ec1f5cddeb683b384b7f8f6435ccad065
+[6754093]: https://github.com/edward-b-1/Distributed-JBOD/commit/6754093f03daf1832e29b5751533b5277fee6903
+[0b7b149]: https://github.com/edward-b-1/Distributed-JBOD/commit/0b7b149b412206feb87b448afe80341bf8215fc1
+[2606d6a]: https://github.com/edward-b-1/Distributed-JBOD/commit/2606d6ae2165c4b703fe1093c12149bf08447919
+[e747fe7]: https://github.com/edward-b-1/Distributed-JBOD/commit/e747fe7c58c172296ee74ba935f9601ae26d59da
+[33a4047]: https://github.com/edward-b-1/Distributed-JBOD/commit/33a4047853e949b62a932ad0735a2257e7b1ae76
+[c321575]: https://github.com/edward-b-1/Distributed-JBOD/commit/c3215753bd99e694f71f936a6359336a6ed4d6d7
+[27d9f52]: https://github.com/edward-b-1/Distributed-JBOD/commit/27d9f5213b02efaf48077484c31b0a0de7e35d77
+[8118ff7]: https://github.com/edward-b-1/Distributed-JBOD/commit/8118ff73dcb0f92890d82979a92a68d7c5e38a08
+[ea6ea1d]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea6ea1d481058070be4f0c39b29e3f1b5fc8bc98
+[fbd6ef6]: https://github.com/edward-b-1/Distributed-JBOD/commit/fbd6ef6aea150cef0d91c7152afef461b454cee0
+[55a0e99]: https://github.com/edward-b-1/Distributed-JBOD/commit/55a0e99be4a85d407ee9dea9b20c77ae28662f0c
+[ecb79e0]: https://github.com/edward-b-1/Distributed-JBOD/commit/ecb79e0fdcf578c6f17ab15a6ed2b0e715191826
+[dcde5e2]: https://github.com/edward-b-1/Distributed-JBOD/commit/dcde5e221152e5e5dd24a7bd9d5934cc4fb9a9dc
+[a85af24]: https://github.com/edward-b-1/Distributed-JBOD/commit/a85af24571c23784c3d8c35d53903fce7fe38995
+[dd8cf67]: https://github.com/edward-b-1/Distributed-JBOD/commit/dd8cf67af4fa137608a0368312d45465edf9c8c1
+[94d84fc]: https://github.com/edward-b-1/Distributed-JBOD/commit/94d84fc8137e66f8332e46f3206149945e666158
+[b8c518d]: https://github.com/edward-b-1/Distributed-JBOD/commit/b8c518dc41eebef2314a030829f6c1a076c77c28
+[ca3cfa2]: https://github.com/edward-b-1/Distributed-JBOD/commit/ca3cfa21e2ed76b93304b508543c11e6b60eb175
+[c3be4db]: https://github.com/edward-b-1/Distributed-JBOD/commit/c3be4dbb02d7ddc0b684e97f0c87061445f4fa10
+[01433e3]: https://github.com/edward-b-1/Distributed-JBOD/commit/01433e3fe70fb9e59b74e7fe92cb271eeeae6d0e
+[51e1afc]: https://github.com/edward-b-1/Distributed-JBOD/commit/51e1afc4dbb628e4d3b33d452babfa0fd751addf
+[b3f3dbf]: https://github.com/edward-b-1/Distributed-JBOD/commit/b3f3dbf332e5960575ff0446009a3dfca79858b8
+[6b3b858]: https://github.com/edward-b-1/Distributed-JBOD/commit/6b3b858705c49e6cf0f769f4aa56d14ff205fd2c
+[fb4c4de]: https://github.com/edward-b-1/Distributed-JBOD/commit/fb4c4de84fa6f7f704ee8fddf7f9346701f366f4
+[7572a08]: https://github.com/edward-b-1/Distributed-JBOD/commit/7572a0805a10f3b32b273dca7cf001e0c8c5a753
+[e02dcdb]: https://github.com/edward-b-1/Distributed-JBOD/commit/e02dcdb5db39eb7e7555405c3d6187d7f1e49bb8
+[99bfa9f]: https://github.com/edward-b-1/Distributed-JBOD/commit/99bfa9f29839796d3c96e8797ba9be3fea3173f9
+[1708dc4]: https://github.com/edward-b-1/Distributed-JBOD/commit/1708dc4baa86889b57d8549741a1f9c2dc2b31bf
+[a4ab9e5]: https://github.com/edward-b-1/Distributed-JBOD/commit/a4ab9e5916a7d8cbf2f056292df4943d3f0be358
+[27868a7]: https://github.com/edward-b-1/Distributed-JBOD/commit/27868a7674f820145c07816da205b8c69e06d29f
+[6c7580f]: https://github.com/edward-b-1/Distributed-JBOD/commit/6c7580fb60f5c464baaf5e89e20d150abdd095e7
+[564af37]: https://github.com/edward-b-1/Distributed-JBOD/commit/564af37429c0dc9c9dc4b9d5a852958c169ccc9a
+[dc9aa77]: https://github.com/edward-b-1/Distributed-JBOD/commit/dc9aa77b14ec942e8ba69c1b97a7af94a488047b
+[51b4221]: https://github.com/edward-b-1/Distributed-JBOD/commit/51b422126dc12cd5dd2361f9c3a1fb10e3e36856
+[81238a2]: https://github.com/edward-b-1/Distributed-JBOD/commit/81238a29a3a1ab75b8a8d048d46319859714dc28
+[1f608f8]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f608f81662b511f8d5af83b1fdfc2c2ca267ec1
+[110e876]: https://github.com/edward-b-1/Distributed-JBOD/commit/110e876d380ae30f1cc290982f6af71c52fa931c
+[70427eb]: https://github.com/edward-b-1/Distributed-JBOD/commit/70427eb43872de193b7ba32f61416400e1dcc662
+[6b0a321]: https://github.com/edward-b-1/Distributed-JBOD/commit/6b0a3212966548ed84d9d89afd0f8d7b08cda85a
+[3732738]: https://github.com/edward-b-1/Distributed-JBOD/commit/37327389f7f2745f4fc5773d4148792f0b88bdec
+[d2532ae]: https://github.com/edward-b-1/Distributed-JBOD/commit/d2532ae174c30ba499d83bb9e5f5450a21050660
+[5be4b18]: https://github.com/edward-b-1/Distributed-JBOD/commit/5be4b187a1b1969d8d5491c43e71366c3460b2d0
+[cc1c114]: https://github.com/edward-b-1/Distributed-JBOD/commit/cc1c114fcacb0a69aaf9920a1508632c79617200
+[3f3fe57]: https://github.com/edward-b-1/Distributed-JBOD/commit/3f3fe5795aa226e8d2dcc767dc4ebce84e3b7218
+[a3cde8e]: https://github.com/edward-b-1/Distributed-JBOD/commit/a3cde8ee064770d808d171cde638519d480cb91d
+[dbfd6ac]: https://github.com/edward-b-1/Distributed-JBOD/commit/dbfd6ac111c2c08de8f0bbe456c1c481809821dc
+[aaec982]: https://github.com/edward-b-1/Distributed-JBOD/commit/aaec9828802e32de7f22766c987afe1fb82a4e96
+[aad6066]: https://github.com/edward-b-1/Distributed-JBOD/commit/aad6066f62834482d7b65b2340768298250f7c90
+[a5ce980]: https://github.com/edward-b-1/Distributed-JBOD/commit/a5ce9802df65617b201313a189f73e32bb910831
+[79206fc]: https://github.com/edward-b-1/Distributed-JBOD/commit/79206fc6f605011de128aa029247f5b9bd804c9e
+[9d903cb]: https://github.com/edward-b-1/Distributed-JBOD/commit/9d903cb9ab117e9018bd6ca017d10fa6f309f555
+[221185f]: https://github.com/edward-b-1/Distributed-JBOD/commit/221185ff317e26ac15deb2a927bf8663a8e53744
+[f33b077]: https://github.com/edward-b-1/Distributed-JBOD/commit/f33b077473e1dc2ca67fce7442bca9b687e4c1b9
+[c201faa]: https://github.com/edward-b-1/Distributed-JBOD/commit/c201faa811ace1c3680a8474d56846d7c7df1796
+[152da35]: https://github.com/edward-b-1/Distributed-JBOD/commit/152da35af3f69845246f7515e103e5b197e005a0
+[a411e25]: https://github.com/edward-b-1/Distributed-JBOD/commit/a411e25214dfe83913e91998716774f8f2ee2744
+[01d627d]: https://github.com/edward-b-1/Distributed-JBOD/commit/01d627d029576726ceca3ab4d27b996bfa393ea6
+[9719a99]: https://github.com/edward-b-1/Distributed-JBOD/commit/9719a99e69205f05016333421e31fd2840a5e379
+[ce5b96d]: https://github.com/edward-b-1/Distributed-JBOD/commit/ce5b96d0fd5558fc0d57e61d49286279b5486d95
+[703fff2]: https://github.com/edward-b-1/Distributed-JBOD/commit/703fff2b2122ebb50b7928e56f30211d3c490167
+[77fe2e4]: https://github.com/edward-b-1/Distributed-JBOD/commit/77fe2e434b3516352ef185d068784c2f69ea17ab
+[54049f5]: https://github.com/edward-b-1/Distributed-JBOD/commit/54049f5b5db6329c750bb7450d3bb3c747171046
+[feec79a]: https://github.com/edward-b-1/Distributed-JBOD/commit/feec79a95e65252ae0d39981c7900d74840bb7df
+[7d7a023]: https://github.com/edward-b-1/Distributed-JBOD/commit/7d7a0234b95d4956832ae928865095b3d809bd36
+[d142139]: https://github.com/edward-b-1/Distributed-JBOD/commit/d142139f67bba585e3864612d37cacdf71d06c80
+[6dc4077]: https://github.com/edward-b-1/Distributed-JBOD/commit/6dc407780c389f0dd7fbde43c3e859a2a2f0cea5
+[c81be85]: https://github.com/edward-b-1/Distributed-JBOD/commit/c81be85b0b9306b9d68f69d246619050e91bbf56
+[078c922]: https://github.com/edward-b-1/Distributed-JBOD/commit/078c9220c39a8367b753c7b5607c05ce2e8b0971
+[9c2a517]: https://github.com/edward-b-1/Distributed-JBOD/commit/9c2a517c26e90531c697e354bbd4bb9b02cae265
+[09b7aec]: https://github.com/edward-b-1/Distributed-JBOD/commit/09b7aec6e239c00867edfcb0d46e96af4c8c52c9
+[b78395c]: https://github.com/edward-b-1/Distributed-JBOD/commit/b78395cd445e7cab226f7f851872f35c04c82592
+[8c4b032]: https://github.com/edward-b-1/Distributed-JBOD/commit/8c4b03205040bf99e6ff141797b8af79730c5a6b
+[1cba456]: https://github.com/edward-b-1/Distributed-JBOD/commit/1cba4565c736f14756c03437c1cee2046e9d8db2
+[7a077dc]: https://github.com/edward-b-1/Distributed-JBOD/commit/7a077dca36eb96539fec6feb855f2c7c32414014
+[6df8c58]: https://github.com/edward-b-1/Distributed-JBOD/commit/6df8c58d5aa66bece3903ae0e753fae5c26098bc
+[a0d6813]: https://github.com/edward-b-1/Distributed-JBOD/commit/a0d681366fe18da8c3c8d42bc5ba0e3693bb1dda
+[bd53239]: https://github.com/edward-b-1/Distributed-JBOD/commit/bd532399fdae3adf56aa2682deaa8556447b35b7
+[329460c]: https://github.com/edward-b-1/Distributed-JBOD/commit/329460c536f6d6f2a89dd50efda0d0ad6fa85916
+[c419bdb]: https://github.com/edward-b-1/Distributed-JBOD/commit/c419bdb00c9ab65879968ad843134807c47c393d
+[ceccfca]: https://github.com/edward-b-1/Distributed-JBOD/commit/ceccfca1fa8b6f30cdc47a7af5251023494302f3
+[7e3fbce]: https://github.com/edward-b-1/Distributed-JBOD/commit/7e3fbcec820267e3e3a63590a3e1332b3bf2a8ec
+[042504c]: https://github.com/edward-b-1/Distributed-JBOD/commit/042504c09b0ab735e91bdf34daf6fc3a087dd5c2
+[fbec7af]: https://github.com/edward-b-1/Distributed-JBOD/commit/fbec7af5b51292184eb97e1a458c1cea59f2958b
+[b4c7f4b]: https://github.com/edward-b-1/Distributed-JBOD/commit/b4c7f4bba7be2f2949eea1b8e8c3847ff057f555
+[f3dc556]: https://github.com/edward-b-1/Distributed-JBOD/commit/f3dc55601ca2c530449d5436513c64e682c80bf6
+[b1db55e]: https://github.com/edward-b-1/Distributed-JBOD/commit/b1db55e52e57181cf9eaee5f9db9263d3905b7de
