@@ -606,6 +606,22 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "node_unreachable");
+    // The message names the address tried and says why in plain words;
+    // the operating system's own text is kept aside for debugging.
+    assert_eq!(
+        json["error"]["message"], "node 127.0.0.1:1 is not reachable: connection refused",
+        "{json}"
+    );
+    assert_eq!(json["error"]["address"], "127.0.0.1:1");
+    let detail = json["error"]["detail"].as_str().unwrap();
+    assert!(detail.contains("refused"), "{detail}");
+    assert!(
+        !json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("os error"),
+        "{json}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
