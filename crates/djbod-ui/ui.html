@@ -876,11 +876,16 @@ function renderOverview() {
       el('div', { class: 'track' }, el('div', { class: 'fill ' + severity, style: `width:${(fraction * 100).toFixed(1)}%` })),
       el('span', { class: 'pct', text: `${(fraction * 100).toFixed(0)}%` }));
     const actions = el('div', { class: 'actions' });
-    if (d.state === 'active') actions.append(el('button', { text: 'Set draining', onclick: () => setState(d.device, 'draining'), title: 'stop new shards landing here; moves nothing' }));
+    const unavailable = d.available === false && d.state !== 'removed';
+    // A device nothing can be read from cannot be drained; the way out is
+    // the forced removal of SPEC 18.2.1.1, so that comes first. Draining
+    // it is still allowed, for a disk that is expected back.
+    if (unavailable) actions.append(el('button', { class: 'danger', text: 'Force remove', onclick: () => forceRemoveDevice(d), title: 'mark it removed without draining; its shards are rebuilt elsewhere by a scrub with repair' }));
+    if (d.state === 'active') actions.append(el('button', { text: 'Set draining', onclick: () => setState(d.device, 'draining'), title: unavailable ? 'no drain can run while the device is unavailable; only useful if it is expected back' : 'stop new shards landing here; moves nothing' }));
     if (d.state === 'draining') {
-      actions.append(el('button', { text: 'Drain…', onclick: () => { $('drain-device').value = d.device; document.querySelector('[data-tab=maintenance]').click(); } }));
+      if (!unavailable) actions.append(el('button', { text: 'Drain…', onclick: () => { $('drain-device').value = d.device; document.querySelector('[data-tab=maintenance]').click(); } }));
       actions.append(el('button', { text: 'Set active', onclick: () => setState(d.device, 'active') }));
-      actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
+      if (!unavailable) actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
     }
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
     return el('tr', {}, el('td', {}, deviceCell(d.device)),
@@ -927,6 +932,33 @@ async function removeDevice(device) {
     toast(r.changed ? `device ${deviceText(device)} removed (document version ${r.document_version})` : `device ${deviceText(device)} was already removed`);
     refresh();
   } catch (e) { fail('remove device', e); }
+}
+// `djbod cluster remove-device --force` (SPEC 18.2.1.1): for a device the
+// cluster cannot read. Says what it costs, in the command's words, and
+// has the device's name typed back, as the command does.
+async function forceRemoveDevice(d) {
+  const doc = state.cluster.document;
+  const name = d.label || short(d.device);
+  const remaining = state.status.devices.filter((x) => x.device !== d.device && x.state === 'active' && x.available !== false).length;
+  const need = doc.k + doc.m;
+  const lines = [
+    `Force remove device ${deviceText(d.device)} on ${nodeText(d.node)}?`,
+    '',
+    'It is marked removed without draining and without checking what it holds. Every object with a shard on it loses that shard:',
+    `- objects with at most ${doc.m} shard${doc.m === 1 ? '' : 's'} here are rebuilt from their other shards by a scrub with repair;`,
+    `- objects with more than ${doc.m} here are lost for good.`,
+  ];
+  if (remaining < need) lines.push('', `Only ${remaining} active, available device${remaining === 1 ? '' : 's'} would remain and ${need} are needed for a rebuild; nothing can be rebuilt until a device is added.`);
+  lines.push('', `Type ${name} to continue.`);
+  const answer = prompt(lines.join('\n'), '');
+  if (answer === null) return;
+  if (answer.trim() !== name) { toast(`not removed: ${JSON.stringify(answer.trim())} is not ${name}`, '', true); return; }
+  try {
+    const r = await post(`/devices/${d.device}/remove`, { force: true });
+    toast(r.changed ? `device ${deviceText(d.device)} removed as lost (document version ${r.document_version})` : `device ${deviceText(d.device)} was already removed`,
+      r.changed ? 'Run a scrub with repair from the Maintenance tab to rebuild its shards elsewhere.' : '');
+    refresh();
+  } catch (e) { fail('force remove device', e); }
 }
 async function removeNode(node) {
   if (!confirm(`Remove node ${node} from the cluster?\n\nRefused while any object still has a shard on its devices. The node acknowledges the change, then stops serving and exits.`)) return;
@@ -1312,9 +1344,14 @@ $('scrub-go').addEventListener('click', async () => {
 function renderDrainDevices() {
   const select = $('drain-device');
   const current = select.value;
-  select.replaceChildren(...state.status.devices.filter((d) => d.state === 'draining').map((d) =>
+  // A draining device nothing can be read from is not offered: its
+  // shards cannot be copied, only rebuilt after a forced removal.
+  select.replaceChildren(...state.status.devices.filter((d) => d.state === 'draining' && d.available !== false).map((d) =>
     el('option', { value: d.device, text: `${deviceText(d.device)} on ${nodeText(d.node)} (${human(d.total_bytes - d.free_bytes)} used)` })));
-  if (select.options.length === 0) select.append(el('option', { value: '', text: 'no draining device; set one draining first' }));
+  if (select.options.length === 0) {
+    const unavailable = state.status.devices.filter((d) => d.state === 'draining' && d.available === false).length;
+    select.append(el('option', { value: '', text: unavailable ? `no drainable device; ${unavailable} draining device${unavailable === 1 ? ' is' : 's are'} unavailable and can only be force removed` : 'no draining device; set one draining first' }));
+  }
   if (current) select.value = current;
   $('drain-go').disabled = !select.value;
 }

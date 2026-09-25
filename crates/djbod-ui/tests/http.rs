@@ -593,6 +593,47 @@ async fn bad_requests_are_reported_as_such() {
     assert_eq!(json["error"]["code"], "device_active");
 }
 
+/// `{"force": true}` is `remove-device --force` (SPEC 18.2.1.1): the
+/// device is marked removed without a drain or a reference scan, as for
+/// one the cluster can no longer read. The plain form still refuses it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_is_force_removed_without_draining() {
+    let test = start_node(4, 2, 1).await;
+    let (status, _) = put_object(&test, "x/one", &pattern_bytes(3000, 9), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, status_json) = get_json(&test, "/api/status").await;
+    let device = status_json["devices"][0]["device"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/remove"),
+        serde_json::json!({ "force": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], true);
+    assert_eq!(json["forced"], true);
+    let (_, after) = get_json(&test, "/api/status").await;
+    let entry = after["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device"] == device.as_str())
+        .unwrap();
+    assert_eq!(entry["state"], "removed", "{after}");
+    // Already removed: nothing changes, no error.
+    let (status, json) = post_json(
+        &test,
+        &format!("/api/devices/{device}/remove"),
+        serde_json::json!({ "force": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["changed"], false);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_is_down_is_reported_not_crashed() {
     let target = Target {
