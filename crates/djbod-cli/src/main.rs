@@ -928,7 +928,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             // Printed after the last line: every version by its shards
             // available, and then what the unavailable devices cost, so
             // that is the last thing read (SPEC 20.1.2.2).
-            let mut availability: Option<ScrubEvent> = None;
+            let mut availability_before: Option<ScrubEvent> = None;
+            let mut availability_after: Option<ScrubEvent> = None;
             let mut exposure: Option<ScrubEvent> = None;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
@@ -1023,7 +1024,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     counted(*versions_checked as usize, "version", "versions")
                                 );
                             }
-                            ScrubEvent::CrossCheckAvailability { .. } => availability = Some(event),
+                            ScrubEvent::CrossCheckAvailability {
+                                after_repair: true, ..
+                            } => availability_after = Some(event),
+                            ScrubEvent::CrossCheckAvailability { .. } => {
+                                availability_before = Some(event)
+                            }
                             ScrubEvent::CrossCheckExposure { .. } => exposure = Some(event),
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
@@ -1079,11 +1085,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         counted(unavailable_devices, "device", "devices")
                     );
                 }
-                if let Some(error) = &end.error {
+                // A stream that ended only because repairs failed is a
+                // complete run (20.1.2.3), and the verdict has the count.
+                if let Some(error) = end
+                    .error
+                    .as_ref()
+                    .filter(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed)
+                {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
                 }
-                if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = &availability {
-                    eprintln!("{}", describe_availability(versions));
+                // One line without --repair; with it, before and after,
+                // so the two show what the run changed.
+                for (event, label) in [
+                    (
+                        &availability_before,
+                        if *repair {
+                            "shards available before repair"
+                        } else {
+                            "shards available"
+                        },
+                    ),
+                    (&availability_after, "shards available after repair"),
+                ] {
+                    if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = event {
+                        eprintln!("{}", describe_availability(versions, label));
+                    }
                 }
                 if let Some(ScrubEvent::CrossCheckExposure {
                     unread,
@@ -1767,9 +1793,12 @@ fn describe_exposure(
 /// Every version checked by how many of its shards are available (SPEC
 /// 20.1.2.2), against its scheme: whole, readable with so many to
 /// spare, or unreadable.
-fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -> String {
+fn describe_availability(
+    versions: &[djbod_proto::message::ShardAvailability],
+    label: &str,
+) -> String {
     if versions.is_empty() {
-        return "shards available: no version checked".to_string();
+        return format!("{label}: no version checked");
     }
     let parts: Vec<String> = versions
         .iter()
@@ -1795,7 +1824,7 @@ fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -
             )
         })
         .collect();
-    format!("shards available: {}", parts.join(", "))
+    format!("{label}: {}", parts.join(", "))
 }
 
 /// The devices a listing went without (SPEC 15.1) and what that means

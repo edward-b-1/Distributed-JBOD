@@ -3746,25 +3746,39 @@ async fn scrub(
     while let Some(event) = receiver.recv().await {
         send_event(writer, id, &mut sequence, &event).await?;
     }
-    let outcome = merge.await.map_err(|join| {
+    let mut outcome = merge.await.map_err(|join| {
         error(
             ErrorCode::Internal,
             format!("cross-node check task failed: {join}"),
         )
     })?;
     finding_count += outcome.findings;
-    damaged_keys.extend(outcome.damaged_keys);
+    damaged_keys.extend(outcome.damaged_keys.iter().cloned());
     let check_stopped: Option<u64> = outcome.stopped_after;
+    // A repairing run reports the count twice, before and after the
+    // repairs, so the two lines show what the run changed (20.1.2.2).
+    if repair {
+        send_event(
+            writer,
+            id,
+            &mut sequence,
+            &outcome.availability_event(false),
+        )
+        .await?;
+    }
 
     // Phase 3: repairs, one per damaged key, from this one place.
     let mut repair_failures = 0usize;
     if repair {
         for key in &damaged_keys {
             let event = match repair_object(node, key).await {
-                Ok(Response::RepairObject(report)) => ScrubEvent::Repaired {
-                    key: key.clone(),
-                    report,
-                },
+                Ok(Response::RepairObject(report)) => {
+                    outcome.note_repaired(key);
+                    ScrubEvent::Repaired {
+                        key: key.clone(),
+                        report,
+                    }
+                }
                 Ok(other) => ScrubEvent::RepairFailed {
                     key: key.clone(),
                     detail: ErrorDetail::new(ErrorCode::Internal, format!("unexpected {other:?}")),
@@ -3781,6 +3795,15 @@ async fn scrub(
             send_event(writer, id, &mut sequence, &event).await?;
         }
     }
+    // Every version checked, by shards available, as the run leaves it
+    // (20.1.2.2): the only count without --repair, the second with it.
+    send_event(
+        writer,
+        id,
+        &mut sequence,
+        &outcome.availability_event(repair),
+    )
+    .await?;
 
     let end = if failed_nodes > 0 || check_stopped.is_some() {
         let checks = match check_stopped {
@@ -4020,12 +4043,31 @@ struct CrossCheckOutcome {
     exposure: Exposure,
     /// Versions by (shards total, shards available, k).
     availability: BTreeMap<(u8, u8, u8), u64>,
+    /// The bucket of each version counted with a shard unavailable, by
+    /// key, so that a repair can move it to whole.
+    damaged_availability: BTreeMap<String, (u8, u8, u8)>,
 }
 
 impl CrossCheckOutcome {
+    /// A repair of `key` succeeded: every shard the record lists is in
+    /// place, so the version is whole.
+    fn note_repaired(&mut self, key: &str) {
+        let Some(bucket) = self.damaged_availability.remove(key) else {
+            return;
+        };
+        if let Some(count) = self.availability.get_mut(&bucket) {
+            *count -= 1;
+            if *count == 0 {
+                self.availability.remove(&bucket);
+            }
+        }
+        let (total, _, k) = bucket;
+        *self.availability.entry((total, total, k)).or_default() += 1;
+    }
+
     /// The count of every version checked by its shards available, for
-    /// the end of the phase (20.1.2.2). Whole versions first.
-    fn availability_event(&self) -> ScrubEvent {
+    /// the end of the run (20.1.2.2). Whole versions first.
+    fn availability_event(&self, after_repair: bool) -> ScrubEvent {
         let mut versions: Vec<ShardAvailability> = self
             .availability
             .iter()
@@ -4040,6 +4082,7 @@ impl CrossCheckOutcome {
         ScrubEvent::CrossCheckAvailability {
             versions_checked: self.versions_checked,
             versions,
+            after_repair,
         }
     }
 }
@@ -4186,7 +4229,6 @@ async fn merge_sources(
             .map(|h| (h.record.key_hash, h.record.version))
             .min()
         else {
-            let _ = events.send(outcome.availability_event()).await;
             if let Some(exposure) = outcome.exposure.event(&unread, outcome.versions_checked) {
                 let _ = events.send(exposure).await;
             }
@@ -4214,12 +4256,16 @@ async fn merge_sources(
         if let Some(current) = group.iter().max_by_key(|c| c.record.revision) {
             outcome.exposure.note(&current.record, &unread);
         }
+        let key = group.first().map(|c| c.record.key.clone());
         let (findings, shards) = check_group(group, &present, &unread, &known, damaged_shards);
         if let Some(shards) = shards {
-            *outcome
-                .availability
-                .entry((shards.total, shards.available, shards.k))
-                .or_default() += 1;
+            let bucket = (shards.total, shards.available, shards.k);
+            *outcome.availability.entry(bucket).or_default() += 1;
+            if shards.available < shards.total {
+                if let Some(key) = key {
+                    outcome.damaged_availability.insert(key, bucket);
+                }
+            }
         }
         for finding in findings {
             outcome.findings += 1;
@@ -4255,7 +4301,6 @@ async fn merge_sources(
                     let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
                     stop(&events, &mut outcome, unreachable).await;
                     // What was counted before the stop still stands.
-                    let _ = events.send(outcome.availability_event()).await;
                     if let Some(exposure) =
                         outcome.exposure.event(&unread, outcome.versions_checked)
                     {
@@ -4554,28 +4599,66 @@ mod tests {
         // by shards available says the same: 1 of 2, at k = 1.
         assert_eq!(
             events,
-            vec![
-                ScrubEvent::CrossCheckAvailability {
-                    versions_checked: 1,
-                    versions: vec![ShardAvailability {
-                        shards_total: 2,
-                        shards_available: 1,
-                        k: 1,
-                        versions: 1,
-                    }],
-                },
-                ScrubEvent::CrossCheckExposure {
-                    unread: vec![DeviceExposure {
-                        device: device(2),
-                        versions: 1,
-                    }],
-                    versions_checked: 1,
-                    versions_with_shards_out: 1,
-                    versions_at_the_limit: 1,
-                    versions_unreadable: 0,
-                },
-            ]
+            vec![ScrubEvent::CrossCheckExposure {
+                unread: vec![DeviceExposure {
+                    device: device(2),
+                    versions: 1,
+                }],
+                versions_checked: 1,
+                versions_with_shards_out: 1,
+                versions_at_the_limit: 1,
+                versions_unreadable: 0,
+            }]
         );
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((2, 1, 1), 1)]),
+            "{:?}",
+            outcome.availability
+        );
+        assert_eq!(
+            outcome.availability_event(false),
+            ScrubEvent::CrossCheckAvailability {
+                versions_checked: 1,
+                versions: vec![ShardAvailability {
+                    shards_total: 2,
+                    shards_available: 1,
+                    k: 1,
+                    versions: 1,
+                }],
+                after_repair: false,
+            }
+        );
+    }
+
+    /// A repaired version is whole: its bucket moves to all shards
+    /// available, and one that failed to repair stays where it was.
+    #[test]
+    fn a_repair_moves_the_version_to_whole() {
+        let mut outcome = CrossCheckOutcome {
+            availability: BTreeMap::from([((3, 2, 2), 2), ((3, 3, 2), 5)]),
+            damaged_availability: BTreeMap::from([
+                ("a".to_string(), (3, 2, 2)),
+                ("b".to_string(), (3, 2, 2)),
+            ]),
+            ..CrossCheckOutcome::default()
+        };
+        outcome.note_repaired("a");
+        outcome.note_repaired("never damaged");
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((3, 2, 2), 1), ((3, 3, 2), 6)])
+        );
+        assert_eq!(outcome.damaged_availability.len(), 1);
+        outcome.note_repaired("b");
+        assert_eq!(outcome.availability, BTreeMap::from([((3, 3, 2), 7)]));
+        assert!(matches!(
+            outcome.availability_event(true),
+            ScrubEvent::CrossCheckAvailability {
+                after_repair: true,
+                ..
+            }
+        ));
     }
 
     /// The exposure counts by how many of a version's shards are on
@@ -4664,17 +4747,17 @@ mod tests {
             ScrubEvent::CrossCheckStopped { node: n, versions_checked: 2, versions_unchecked: None, .. }
                 if *n == node(2)
         ));
-        assert!(
-            matches!(
-                &events[2],
-                ScrubEvent::CrossCheckAvailability {
-                    versions_checked: 2,
-                    ..
-                }
-            ),
-            "{events:?}"
+        assert_eq!(events.len(), 2, "{events:?}");
+        // The intact version has both shards; the one missing a shard
+        // file has one of two, and is remembered for a repair to mend.
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((2, 2, 1), 1), ((2, 1, 1), 1)])
         );
-        assert_eq!(events.len(), 3, "{events:?}");
+        assert_eq!(
+            outcome.damaged_availability.keys().collect::<Vec<_>>(),
+            vec![&missing.key]
+        );
     }
 
     /// A copy missing on a device that has a stream is fewer than the
@@ -4714,11 +4797,10 @@ mod tests {
         );
         // The inconsistent version's shards are not known and not counted;
         // the lost shard leaves the other version with 1 of 2.
-        assert!(
-            events.iter().any(|e| matches!(e,
-            ScrubEvent::CrossCheckAvailability { versions_checked: 2, versions }
-                if *versions == vec![ShardAvailability { shards_total: 2, shards_available: 1, k: 1, versions: 1 }])),
-            "{events:?}"
+        assert_eq!(outcome.availability, BTreeMap::from([((2, 1, 1), 1)]));
+        assert_eq!(
+            outcome.damaged_availability,
+            BTreeMap::from([("gone".to_string(), (2, 1, 1))])
         );
 
         // Progress: two clean streams of PROGRESS_EVERY_VERSIONS + 1 versions.
@@ -4741,14 +4823,12 @@ mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [
-                    ScrubEvent::CrossCheckProgress { versions_checked, .. },
-                    ScrubEvent::CrossCheckAvailability { versions, .. },
-                ] if *versions_checked == PROGRESS_EVERY_VERSIONS
-                    && *versions == vec![ShardAvailability { shards_total: 2, shards_available: 2, k: 1, versions: count }]
+                [ScrubEvent::CrossCheckProgress { versions_checked, .. }] if *versions_checked == PROGRESS_EVERY_VERSIONS
             ),
             "{events:?}"
         );
+        assert_eq!(outcome.availability, BTreeMap::from([((2, 2, 1), count)]));
+        assert!(outcome.damaged_availability.is_empty());
     }
 
     #[test]
