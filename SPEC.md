@@ -2240,16 +2240,20 @@ The run also ends, every time, with every version the phase checked
 counted by how many of its shards are available against how many it
 has, at its scheme: a shard is not available when its device is unread
 or removed, its file is missing, or the node's own scrub found it
-damaged. With `--repair` the count follows the repairs, each version
-repaired counted as whole and each that could not be left where it was,
-so it describes the data as the run leaves it, and says so. `djbod
-scrub` prints it as one line after the verdict, for example `shards
-available: 245756 objects with 2 of 3 (readable, none to spare)`, or
-`shards available after repair: 229839 objects with 3 of 3, 15917 with
-2 of 3 (readable, none to spare)`, with whole objects first and
-unreadable ones last, so the state of the data is read in the scheme's
-own terms: how many shards each object has left, and how many it can
-still lose. A version whose copies could not be trusted is not counted,
+damaged. `djbod scrub` prints it as one line after the verdict, for
+example `shards available: 245756 objects with 2 of 3 (readable, none
+to spare)`, with whole objects first and unreadable ones last, so the
+state of the data is read in the scheme's own terms: how many shards
+each object has left, and how many it can still lose. With `--repair`
+the count is reported twice, before the repairs and after them, each
+version repaired counted as whole and each that could not be left where
+it was, so the two lines show what the run changed:
+
+```
+shards available before repair: 245756 objects with 2 of 3 (readable, none to spare)
+shards available after repair: 229839 objects with 3 of 3, 15917 with 2 of 3 (readable, none to spare)
+```
+ A version whose copies could not be trusted is not counted,
 its shards being unknown.
 This is the classification of every version against what is out (whole,
 degraded with so much to spare, at the limit, unreadable) computed in

@@ -3755,6 +3755,17 @@ async fn scrub(
     finding_count += outcome.findings;
     damaged_keys.extend(outcome.damaged_keys.iter().cloned());
     let check_stopped: Option<u64> = outcome.stopped_after;
+    // A repairing run reports the count twice, before and after the
+    // repairs, so the two lines show what the run changed (20.1.2.2).
+    if repair {
+        send_event(
+            writer,
+            id,
+            &mut sequence,
+            &outcome.availability_event(false),
+        )
+        .await?;
+    }
 
     // Phase 3: repairs, one per damaged key, from this one place.
     let mut repair_failures = 0usize;
@@ -3785,7 +3796,7 @@ async fn scrub(
         }
     }
     // Every version checked, by shards available, as the run leaves it
-    // (20.1.2.2): after the repairs when there were any.
+    // (20.1.2.2): the only count without --repair, the second with it.
     send_event(
         writer,
         id,
