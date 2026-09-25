@@ -1317,6 +1317,54 @@ async fn a_destroyed_device_is_reported_unavailable() {
     assert_eq!(out.lines().count(), 4, "{out}");
     assert!(err.contains(&format!("{} unavailable", dead.id())), "{err}");
 
+    // Reads go on without the dead device's record copy and shard (SPEC
+    // 9.4.4, 11.4): the data comes back, standard error names the copy
+    // and the device as unavailable, and the exit code is 2.
+    let output = dir.path().join("out.bin");
+    let run = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "get",
+            "k",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run djbod");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("1 of 3 record copies could not be read"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(err.contains("unavailable, perhaps for now"), "{err}");
+    assert_eq!(
+        std::fs::read(&output).expect("output"),
+        std::fs::read(&source).expect("input")
+    );
+    let run = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "head",
+            "k",
+        ])
+        .output()
+        .expect("run djbod");
+    let out = String::from_utf8_lossy(&run.stdout);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{out}{err}");
+    assert!(out.contains("key           k"), "{out}");
+    assert!(
+        err.contains("1 of 3 record copies could not be read"),
+        "{err}"
+    );
+
     // The device's contents were not checked: not damage, an incomplete
     // run, exit 3, and no per-key noise for the copies it held.
     let scrub = djbod_command()

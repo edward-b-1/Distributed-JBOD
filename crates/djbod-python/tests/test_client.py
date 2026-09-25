@@ -134,3 +134,31 @@ def test_a_reconstructed_read_warns_and_returns_correct_data(client):
         info = client.get_to_file("damaged", str(shard.parent / "out.bin"))
     assert any(isinstance(w.message, djbod.DegradedRead) for w in again)
     assert info.reconstructed[0]["first_stripe"] == 0
+    assert info.missing_records == []
+
+
+def test_a_read_without_every_record_copy_warns_and_names_the_copy(client):
+    import warnings
+
+    from conftest import DEVICE_DIRS
+
+    body = b"copies" * 1000
+    client.put("thin", body)
+    # 1+1: two record copies, one beside each shard. Delete one; the other
+    # vouches for the record (k = 1), so reads go on and say so (SPEC 9.4.4).
+    copies = [p for d in DEVICE_DIRS for p in d.rglob("*.meta.json") if b"thin" in p.read_bytes()]
+    assert len(copies) == 2
+    copies[0].unlink()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        info = client.head("thin")
+        assert client.get("thin") == body
+    degraded = [w.message for w in caught if isinstance(w.message, djbod.DegradedRead)]
+    assert len(degraded) == 2, [str(w.message) for w in caught]
+    assert degraded[0].reconstructed == []
+    assert len(degraded[0].missing_records) == 1
+    assert degraded[0].missing_records[0]["fault"]["kind"] == "missing"
+    assert info.missing_records == degraded[0].missing_records
+    assert "record cop" in str(degraded[0])
+    # Nothing was rewritten by the read.
+    assert not copies[0].exists()

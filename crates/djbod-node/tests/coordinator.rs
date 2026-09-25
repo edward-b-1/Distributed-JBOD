@@ -19,7 +19,8 @@ use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_node::transport::Connector;
 use djbod_proto::message::{
-    ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent, ShardCondition,
+    ClusterFinding, DrainEvent, ErrorCode, ListQuery, MissingRecordCopy, RecordCopyFault, Request,
+    Response, ScrubEvent, ShardCondition,
 };
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -154,7 +155,7 @@ async fn put_head_get_list_delete_round_trip() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => {
+            Response::HeadObject { record, .. } => {
                 assert_eq!(record.key, *key);
                 assert_eq!(record.version, *version);
                 assert_eq!(record.size, body.len() as u64);
@@ -274,7 +275,7 @@ async fn put_replaces_the_previous_version_and_removes_it() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let v2 = client
@@ -335,7 +336,7 @@ async fn a_corrupt_block_is_reconstructed_from_parity_and_named() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -564,7 +565,7 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -628,7 +629,7 @@ async fn repair_recreates_a_missing_or_structurally_broken_shard() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -736,7 +737,7 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let record_path = |device: DeviceId| {
@@ -747,21 +748,27 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
             .join(djbod_core::layout::record_file_name(&record.version))
     };
 
-    // Delete one record copy: reads refuse (9.4.4), repair rewrites it.
+    // Delete one record copy: three agreeing copies remain, k = 3 vouch,
+    // so reads go on and name the copy they went without (9.4.4, 18.4.2);
+    // the device was consulted and had none, so the fault is `Missing`.
+    // Nothing is rewritten by the read; repair rewrites it.
     let victim = record.shards[1].device;
     let before = std::fs::read(record_path(victim)).expect("read");
     std::fs::remove_file(record_path(victim)).expect("remove");
-    match client
-        .request(Request::HeadObject {
-            key: "k".to_string(),
-        })
-        .await
-    {
-        Err(ConnectionError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::RecordsInconsistent)
-        }
-        other => panic!("expected RecordsInconsistent, got {other:?}"),
-    }
+    let (head_record, missing) = head_with_missing(&mut client, "k").await.expect("head");
+    assert_eq!(head_record, record);
+    assert_eq!(
+        missing,
+        vec![MissingRecordCopy {
+            device: victim,
+            fault: RecordCopyFault::Missing,
+        }]
+    );
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.missing_records, missing);
+    assert!(read.reconstructed.is_empty(), "{:?}", read.reconstructed);
+    assert!(!record_path(victim).exists(), "a read writes nothing");
     let report = repair(&mut client, "k").await;
     assert_eq!(report.record_copies_rewritten, vec![victim]);
     assert!(
@@ -776,9 +783,24 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         .await
         .expect("head after repair");
 
-    // Delete two of four: only two remain, fewer than k = 3; repair refuses.
+    // Delete two of four: only two remain, fewer than k = 3; reads and
+    // repair both refuse, and the read names every copy it lacks.
     std::fs::remove_file(record_path(record.shards[0].device)).expect("remove");
     std::fs::remove_file(record_path(record.shards[2].device)).expect("remove");
+    match head_with_missing(&mut client, "k").await {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
+            assert!(
+                detail
+                    .message
+                    .contains("only 2 record copies of 4 can be read"),
+                "{}",
+                detail.message
+            );
+            assert_eq!(detail.key.as_deref(), Some("k"));
+        }
+        other => panic!("expected RecordsInconsistent, got {other:?}"),
+    }
     match client
         .request(Request::RepairObject {
             key: "k".to_string(),
@@ -839,13 +861,27 @@ fn spare_device(test: &TestNode, record: &MetadataRecord) -> DeviceId {
 
 #[allow(clippy::result_large_err)]
 async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ConnectionError> {
+    head_with_missing(client, key)
+        .await
+        .map(|(record, _)| record)
+}
+
+/// `HeadObject`: the record, and the copies the lookup went without.
+#[allow(clippy::result_large_err)]
+async fn head_with_missing(
+    client: &mut Connection,
+    key: &str,
+) -> Result<(MetadataRecord, Vec<MissingRecordCopy>), ConnectionError> {
     match client
         .request(Request::HeadObject {
             key: key.to_string(),
         })
         .await?
     {
-        Response::HeadObject { record } => Ok(record),
+        Response::HeadObject {
+            record,
+            missing_records,
+        } => Ok((record, missing_records)),
         other => panic!("{other:?}"),
     }
 }
@@ -932,24 +968,24 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     assert!(no_findings(&events), "{events:?}");
 
     // An interrupted re-placement: one device still has the revision 0
-    // copy. Reads fail until repair finishes the move forwards (18.8.1).
+    // copy. Reads trust the highest revision, which three copies agree
+    // on and the stale copy vouches for (18.8.1), and report the lagging
+    // device; repair finishes the move forwards.
     let lagging = after.shards[0].device;
     std::fs::write(
         record_path(&test, lagging, "k", &after.version),
         &old_record,
     )
     .expect("write");
-    match head(&mut client, "k").await {
-        Err(ConnectionError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
-            assert!(
-                detail.message.contains("3 record copies found, 4 expected"),
-                "{}",
-                detail.message
-            );
-        }
-        other => panic!("expected RecordsInconsistent, got {other:?}"),
-    }
+    let (head_record, missing) = head_with_missing(&mut client, "k").await.expect("head");
+    assert_eq!(head_record, after);
+    assert_eq!(
+        missing,
+        vec![MissingRecordCopy {
+            device: lagging,
+            fault: RecordCopyFault::Stale { revision: 0 },
+        }]
+    );
     let report = repair(&mut client, "k").await;
     assert_eq!(report.record_copies_rewritten, vec![lagging]);
     assert!(report.stale_copies_removed.is_empty());
@@ -1668,7 +1704,7 @@ async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let device = record

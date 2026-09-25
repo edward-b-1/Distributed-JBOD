@@ -363,17 +363,25 @@ async fn local_lookup(
     key_hash: KeyHash,
     after: Option<LookupCursor>,
 ) -> Result<Response, Failure> {
+    // A device this node cannot read (5.6) contributes no copies and is
+    // named instead, so the coordinator can tell a device that is out
+    // from a copy that is gone (9.4.4). Any other failure is still the
+    // request's.
     let mut records = Vec::new();
+    let mut unread = node.unavailable_devices();
     for device in node.devices() {
         let id = device.id();
-        let found = blocking(move || device.read_records(&key_hash))
-            .await
-            .map_err(|f| match f {
-                Failure::Error(d) => Failure::Error(with_device(d, id)),
-                other => other,
-            })?;
-        for record in found {
-            records.push(LocatedRecord { device: id, record });
+        match blocking(move || device.read_records(&key_hash)).await {
+            Ok(found) => {
+                for record in found {
+                    records.push(LocatedRecord { device: id, record });
+                }
+            }
+            Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
+                unread.push(id);
+            }
+            Err(Failure::Error(detail)) => return Err(Failure::Error(with_device(detail, id))),
+            Err(other) => return Err(other),
         }
     }
     records.sort_by(|a, b| {
@@ -402,6 +410,7 @@ async fn local_lookup(
     Ok(Response::LocalLookup {
         records: page,
         truncated,
+        unread,
     })
 }
 

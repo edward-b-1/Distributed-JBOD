@@ -44,15 +44,20 @@ class DegradedWrite(Warning):
 
 
 class DegradedRead(Warning):
-    """A read returned correct data only by reconstructing blocks from
-    parity (SPEC 11.4). `key` names the object; `reconstructed` lists each
-    entry as a dict: shard_index, device, fault, first_stripe, stripes (a
-    bad block is one stripe; a shard that could not be opened is every
-    stripe of the object). A fault of kind `unavailable` may be temporary,
-    a device or node that could not be reached; the others are damage on
-    disk that stays until `repair` runs, and every read pays again."""
+    """A read (or head) returned correct data while the cluster was not
+    whole: it reconstructed blocks from parity (SPEC 11.4), or trusted the
+    record without every copy (9.4.4), or both. `key` names the object.
+    `reconstructed` lists each entry as a dict: shard_index, device,
+    fault, first_stripe, stripes (a bad block is one stripe; a shard that
+    could not be opened is every stripe of the object). `missing_records`
+    lists each record copy that did not arrive as a dict: device, fault,
+    the fault of kind `missing`, `stale` (an interrupted re-placement, with
+    its `revision`) or `unavailable`. A fault of kind `unavailable` may be
+    temporary, a device or node that could not be reached; the others are
+    damage that stays until `repair` runs, and every read pays again."""
 
-    def __init__(self, message: str, key: str, reconstructed: list):
+    def __init__(self, message: str, key: str, reconstructed: list, missing_records: list = ()):
         super().__init__(message)
         self.key = key
         self.reconstructed = reconstructed
+        self.missing_records = list(missing_records)

@@ -32,7 +32,10 @@ use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_core::stripe::FaultKind;
-use djbod_proto::message::{DrainEvent, ErrorCode, ErrorDetail, ListQuery, Reconstruction};
+use djbod_proto::message::{
+    DrainEvent, ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction,
+    RecordCopyFault,
+};
 
 mod tables;
 
@@ -737,16 +740,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 }
             };
-            // The data is correct, but only by reconstruction (SPEC 11.4):
-            // say so, and exit 2 so a pipeline notices.
+            // The data is correct, but only by reconstruction (SPEC 11.4)
+            // or without every record copy (9.4.4): say so, and exit 2 so
+            // a pipeline notices.
             if !read.reconstructed.is_empty() {
                 eprintln!("{}", describe_reconstruction(key, &read.reconstructed));
+            }
+            if !read.missing_records.is_empty() {
+                eprintln!(
+                    "{}",
+                    describe_missing_records(key, &read.record, &read.missing_records)
+                );
+            }
+            if !read.reconstructed.is_empty() || !read.missing_records.is_empty() {
                 std::process::exit(2);
             }
         }
         Command::Head { key } => {
             let mut client = connect(&cli).await?;
-            let record = client.head(key).await.map_err(client_err)?;
+            let read = client.head(key).await.map_err(client_err)?;
+            let record = &read.record;
             {
                 {
                     if cli.json {
@@ -769,6 +782,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+            // The record was trusted without every copy (SPEC 9.4.4): say
+            // so, and exit 2 as `get` does.
+            if !read.missing_records.is_empty() {
+                eprintln!(
+                    "{}",
+                    describe_missing_records(key, record, &read.missing_records)
+                );
+                std::process::exit(2);
             }
         }
         Command::Delete { key } => {
@@ -1562,7 +1584,7 @@ async fn count_versions_behind(
     let mut client = connect(cli).await?;
     let mut behind = 0usize;
     for key in all_keys(cli).await? {
-        let record = client.head(&key).await.map_err(client_err)?;
+        let record = client.head(&key).await.map_err(client_err)?.record;
         if !at_current_scheme(&record, document) {
             behind += 1;
         }
@@ -1587,7 +1609,7 @@ async fn reencode_all(
         {
             examined += 1;
             let record = match lister.head(&key).await {
-                Ok(record) => record,
+                Ok(read) => read.record,
                 Err(e) => {
                     failures += 1;
                     println!("FAILED   {key}  head: {}", client_err(e));
@@ -1956,6 +1978,34 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
 
 fn short(id: &Uuid) -> String {
     id.to_string()[..8].to_string()
+}
+
+/// The record copies a read went without (SPEC 9.4.4): the record was
+/// trusted on the copies that agreed, and `repair` rewrites the rest.
+/// A copy on a device that is out is nothing to repair; the device is.
+fn describe_missing_records(
+    key: &str,
+    record: &djbod_core::record::MetadataRecord,
+    missing: &[MissingRecordCopy],
+) -> String {
+    let mut lines = vec![format!(
+        "{key}: {} of {} record copies could not be read; the record was trusted on the copies that agree, and `djbod repair {key}` rewrites the missing ones",
+        missing.len(),
+        record.k as usize + record.m as usize
+    )];
+    for copy in missing {
+        let fault = match &copy.fault {
+            RecordCopyFault::Missing => "missing".to_string(),
+            RecordCopyFault::Stale { revision } => {
+                format!("stale, at revision {revision}: an interrupted re-placement")
+            }
+            RecordCopyFault::Unavailable { reason } => {
+                format!("unavailable, perhaps for now: {reason}")
+            }
+        };
+        lines.push(format!("  record copy  device {}  {fault}", copy.device.0));
+    }
+    lines.join("\n")
 }
 
 /// What a read had to reconstruct (SPEC 11.4): the bytes returned are

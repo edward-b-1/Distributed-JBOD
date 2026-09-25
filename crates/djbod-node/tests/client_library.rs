@@ -142,7 +142,12 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
         Some("application/octet-stream")
     );
     let head = client.head("k").await.expect("head");
-    assert_eq!(head.size, body.len() as u64);
+    assert_eq!(head.record.size, body.len() as u64);
+    assert!(
+        head.missing_records.is_empty(),
+        "{:?}",
+        head.missing_records
+    );
     let missing = client.head("nothing").await.expect_err("missing");
     assert!(missing.is_not_found(), "{missing}");
 
@@ -331,7 +336,7 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
         .expect("connect");
     let body: Vec<u8> = vec![3u8; BLOCK as usize + 1];
     client.put("k", &body, None).await.expect("put");
-    let record = client.head("k").await.expect("head");
+    let record = client.head("k").await.expect("head").record;
     let listed: Vec<_> = record.shards.iter().map(|s| s.device).collect();
     let spare = a
         .node
