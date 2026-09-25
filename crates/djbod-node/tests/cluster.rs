@@ -389,25 +389,24 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
-    // 1+1: two record copies per version over four devices, three of
-    // them on b. With b down, three devices are out, more than k+m, so a
-    // version with both copies on b leaves no trace on a: the listing
-    // shows what a holds and says it may be incomplete (15.1, 13.3).
-    let a = first_node(1, 1, 1).await;
-    let mut b = joined_node(3, &a).await;
+    // 1+1: two record copies per version over four devices, two on each
+    // node. With b down, two devices are out, which is k+m, so a version
+    // with both copies on b leaves no trace on a: the listing shows what
+    // a holds and says it may be incomplete (15.1, 13.3). Whether any
+    // version is in fact hidden depends on placement, which on one
+    // shared filesystem ties on free space and picks the same pair every
+    // time (10.5); the listing is right either way.
+    let a = first_node(2, 1, 1).await;
+    let mut b = joined_node(2, &a).await;
     let mut client = a.client().await;
     let records = put_objects(&mut client, 8, 300).await;
-    let on_a = a.node.devices()[0].id();
+    let on_a: Vec<DeviceId> = a.node.devices().iter().map(|d| d.id()).collect();
     let mut visible: Vec<String> = records
         .iter()
-        .filter(|r| r.shard_on(on_a).is_some())
+        .filter(|r| on_a.iter().any(|d| r.shard_on(*d).is_some()))
         .map(|r| r.key.clone())
         .collect();
     visible.sort();
-    assert!(
-        visible.len() < records.len(),
-        "placement over four equal devices alternates pairs, so some versions have no copy on a"
-    );
 
     b.stop();
     match client
@@ -426,7 +425,7 @@ async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
         }) => {
             assert!(!complete);
             assert!(!truncated);
-            assert_eq!(unread.len(), 3, "{unread:?}");
+            assert_eq!(unread.len(), 2, "{unread:?}");
             assert!(unread.iter().all(|u| u.node == b.node.id()));
             assert_eq!(
                 keys.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
