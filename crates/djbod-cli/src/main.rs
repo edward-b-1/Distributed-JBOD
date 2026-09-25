@@ -979,8 +979,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             } => {
                                 println!(
                                     "node {}  device {}\n  {}",
-                                    short(&node.0),
-                                    short(&device.0),
+                                    names::node(*node),
+                                    names::device(*device),
                                     describe_scrub_finding(finding)
                                 );
                             }
@@ -991,8 +991,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             } => {
                                 eprintln!(
                                     "node {}  device {}: {} records, {} shards, {} blocks, {} read, {}",
-                                    short(&node.0),
-                                    short(&device.0),
+                                    names::node(*node),
+                                    names::device(*device),
                                     summary.records_checked,
                                     summary.shards_checked,
                                     summary.blocks_checked,
@@ -1003,12 +1003,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             ScrubEvent::NodeFailed { node, detail } => {
                                 println!(
                                     "node {} could not be scrubbed: {}",
-                                    short(&node.0),
+                                    names::node_identity(*node),
                                     detail.message
                                 );
                             }
                             ScrubEvent::ClusterFinding(finding) => {
-                                println!("cluster check: {finding:?}");
+                                println!("cluster check: {}", describe_cluster_finding(finding));
                             }
                             ScrubEvent::CrossCheckStopped {
                                 node,
@@ -1022,7 +1022,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 };
                                 println!(
                                     "cross-node checks stopped at node {}: {}; {} checked, {unchecked}",
-                                    short(&node.0),
+                                    names::node_identity(*node),
                                     detail.message,
                                     counted(*versions_checked as usize, "version", "versions")
                                 );
@@ -1777,8 +1777,8 @@ fn describe_exposure(
     )];
     for entry in unread {
         lines.push(format!(
-            "  device {}: {}",
-            entry.device.0,
+            "  {}: {}",
+            names::device_and_node(entry.device),
             counted(entry.versions as usize, "version", "versions")
         ));
     }
@@ -2268,8 +2268,48 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     Ok(true)
 }
 
-fn short(id: &Uuid) -> String {
-    id.to_string()[..8].to_string()
+/// A cross-node finding (20.1.2.2) in words, with the object first and
+/// the devices by name, rather than the Debug form of the event.
+fn describe_cluster_finding(finding: &djbod_proto::message::ClusterFinding) -> String {
+    use djbod_proto::message::ClusterFinding as C;
+    match finding {
+        C::RecordsInconsistent {
+            key,
+            version,
+            detail,
+        } => match version {
+            Some(version) => format!("{key}  version {version}  record copies inconsistent: {detail}"),
+            None => format!("{key}  record copies inconsistent: {detail}"),
+        },
+        C::ShardMissingOnDevice {
+            key,
+            version,
+            device,
+            shard_index,
+        } => format!(
+            "{key}  version {version}  shard {shard_index} missing from {}",
+            names::device_and_node(*device)
+        ),
+        C::ShardLost {
+            key,
+            version,
+            device,
+            shard_index,
+        } => format!(
+            "{key}  version {version}  shard {shard_index} lost with removed {}; repair rebuilds it elsewhere",
+            names::device_and_node(*device)
+        ),
+        C::StaleCopy {
+            key,
+            version,
+            device,
+            revision,
+            current_revision,
+        } => format!(
+            "{key}  version {version}  stale record copy at revision {revision} (current {current_revision}) on {}",
+            names::device_and_node(*device)
+        ),
+    }
 }
 
 /// The record copies a read went without (SPEC 9.4.4): the record was
