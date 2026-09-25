@@ -1180,11 +1180,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         let destination = record
                             .device_for(djbod_core::erasure::ShardIndex(*shard_index))
-                            .map(|d| d.0.to_string())
+                            .map(names::device_and_node)
                             .unwrap_or_default();
                         println!(
                             "moved shard {shard_index} of {key} from {} to {destination} ({}); record now revision {}{}",
-                            source.0,
+                            names::device_and_node(source),
                             if rebuilt { "rebuilt from the other shards" } else { "copied" },
                             record.revision,
                             if source_cleaned { "" } else { "; source copy not removed, scrub will report it as stale" }
@@ -1219,13 +1219,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 }
                             };
                             let outcome = match (&shard.relocated_to, shard.rewritten) {
-                                (Some(device), _) => format!("  -> rebuilt on {}", device.0),
+                                (Some(device), _) => {
+                                    format!("  -> rebuilt on {}", names::device_and_node(*device))
+                                }
                                 (None, true) => "  -> rewritten".to_string(),
                                 (None, false) => String::new(),
                             };
                             println!(
-                                "shard {:<3}  device {}  {condition}{outcome}",
-                                shard.index, shard.device.0
+                                "shard {:<3}  {}  {condition}{outcome}",
+                                shard.index,
+                                names::device_and_node(shard.device)
                             );
                         }
                         let count = report.shards.iter().filter(|s| s.rewritten).count();
