@@ -1,3 +1,214 @@
+## [27d9f52] - 2026-09-19
+
+Pull request #58: UI: say whose fault a failed document change is
+
+### Changed
+
+- Each variant of `MembershipError` maps to its own status and a code that is its name, where every membership error had come back as 502 with the code `membership`, so a refusal to remove a device looked the same as an unreachable cluster: 502 for a node that could not be reached or a change that got part way round, 404 for something that does not exist, 409 for a well-formed request the store's state refuses or a race a retry settles, and 500 for a fault in this server's own configuration.
+- The page titles the toast by status: refused, not found, bad request, or cannot reach the cluster.
+
+## [8118ff7] - 2026-09-19
+
+Pull request #57: UI: refuse cross-site changes and unknown host names
+
+### Security
+
+- Any method but GET or HEAD must carry `Sec-Fetch-Site: same-origin` or `none`, and a client with no such header passes only if it sends no `Origin` or an `Origin` naming this host. The server has no authentication, and a page on any other site could otherwise make an administrator's browser post to the body-less endpoints, since a plain form post needs no preflight (SPEC 20.3.2).
+- Every request, the page included, must name a host this server serves: an IP literal, `localhost`, or a name given with the new repeatable `--host NAME`, because a domain name someone else points at this address looks same-origin to the browser.
+- Both checks live in one middleware on every route. This is not authentication, only the browser's own word about where a request came from, and the guide says so.
+
+## [ea6ea1d] - 2026-09-19
+
+Pull request #56: Proposal: note that the UI's stopgap is found by polling and can be late
+
+### Changed
+
+- `docs/proposals/damage-marks.md` records that the user interface's in-memory note reaches the page only by polling after a download, so damage early in an object is seen at once and damage late in a large or slow download late or not at all, until the next periodic refresh.
+
+## [fbd6ef6] - 2026-09-19
+
+Pull request #54: UI: show device labels first, with the UUID in parentheses (to main)
+
+### Changed
+
+- Wherever the page names a device, one with a label shows the label first and its short UUID in parentheses, and one without shows the UUID alone.
+
+### Added
+
+- A Label button on the devices table, reading Rename once a label is set, backed by `POST /api/devices/{id}/label`, which is `djbod cluster set-label`.
+
+## [55a0e99] - 2026-09-19
+
+Pull request #53: UI: remember reads the node stopped for damage, and show why (to main)
+
+### Added
+
+- An in-memory note per key in the user interface server of the last read the node stopped, whether a download or a verify, with the error's device, shard and stripe and how many bytes went out first, cleared when a download, verify or repair of the key succeeds or the key is deleted.
+- `GET /api/read-failures` listing the notes, the note shown on the object panel, a column of its own marking the key in the list, and polling for the note after Download is clicked. The guide documents this as best effort, with the durable answer in `docs/proposals/damage-marks.md`.
+
+## [ecb79e0] - 2026-09-19
+
+Pull request #41: Device labels: a name beside each device UUID (SPEC 6.2.5.1)
+
+### Added
+
+- `DeviceEntry.label` in the cluster document, omitted from the JSON when absent so every existing document parses unchanged, and required by the validator to be 1 to 128 bytes, free of whitespace and control characters, not parseable as a universally unique identifier (UUID) so it can never be mistaken for one, and unique across the document.
+- `djbod cluster set-label <device> <label>` and `set-label <device> --clear`, a document proposal like `set-state`, where setting a label a device already has is a no-op.
+- A label accepted in place of a UUID by `set-state`, `drain`, `set-label`, `remove-device` and `move-shard --to`, resolved through `membership::resolve_device` against the current document.
+- A `LABEL` column in `status`, fed by an optional `label` field on `DeviceStatus` that each node fills from its document, with labels shown in `cluster-config` as part of the document.
+
+### Changed
+
+- Errors from nodes still carry the device UUID, because putting the label into `ErrorDetail` would touch every construction site in the coordinator for a cosmetic gain while `status` maps UUID to label in one command; SPEC 6.2.5.1 says so.
+
+## [dcde5e2] - 2026-09-19
+
+Pull request #48: UI: a Verify button that reads the object through and names any damage
+
+### Added
+
+- A Verify button beside Download that reads the whole object through the node without saving it, so every block is checked against its checksum and the whole object at the end, and shows either that it verified, with the size read and the version, or the node's error with the device, shard and stripe and a pointer at Repair (SPEC 11.7).
+- `POST /api/verify/{key}`, returning 200 with `verified: true` or `verified: false` plus the node's error detail, since a damaged object is an answer rather than a failed request, with 404 for a missing object and 502 for an unreachable node.
+
+## [a85af24] - 2026-09-19
+
+Pull request #44: UI: explain a download cut short in the Download button's tooltip
+
+### Added
+
+- A tooltip on the Download button explaining that a download that meets damage is cut short of its declared length, because the whole-object check of SPEC 11.7 arrives after the body and nothing else is possible over HTTP, and pointing at Repair.
+
+## [dd8cf67] - 2026-09-19
+
+Pull request #50: Proposal: remembering damaged shards in a per-node ledger
+
+### Added
+
+- `docs/proposals/damage-marks.md`, a discussion document asking why the store should remember what a read, repair, drain or scrub found damaged, when today every such finding is reported once and forgotten. It weighs four places the marks could live and recommends a per-node `damage.json` in the state directory, written only by the holder of the shard, set by the local scrub and by a fire-and-forget `MarkDamage`, and cleared by repair, by a clean scrub, by deletion and by a read whose whole-object check passed. Marks would be hints changing no operation's behaviour.
+
+## [94d84fc] - 2026-09-19
+
+Pull request #45: One place decides how a client connects
+
+### Added
+
+- `Connector::from_client_options` in `djbod_node::transport`, the one place that turns the three client TLS settings into a connector: plain with none given, TLS presenting no certificate with the authority alone, and TLS with the client's identity with all three. A certificate without its key, or either without the authority, is refused with `TlsError::IncompleteClientIdentity`.
+
+### Removed
+
+- The identical connector function that `djbod` and `djbod-ui` each carried, and the `ClientTlsPaths` import from both binaries.
+
+## [b8c518d] - 2026-09-19
+
+Pull request #49: Spec: scrub history as an open item (20.1.4)
+
+### Added
+
+- SPEC 20.1.4, recording scrub history as an open question: a scrub's findings live only in the stream sent to the client that asked for it, so nothing in the cluster records that a scrub ran, when, or what it found. The section states the want and the points to settle: where the record lives, given that a node-local scrub has only its own state directory while the cross-node findings belong to no single node; how much to keep; and how it is shown in `djbod status`, in a history listing and in the web interface.
+
+## [ca3cfa2] - 2026-09-19
+
+Pull request #47: UI: make click-to-copy work over plain HTTP
+
+### Fixed
+
+- Click-to-copy works over plain HTTP, where `navigator.clipboard` does not exist because it is offered only on secure origins. The page falls back to the older selection-based copy, reports "copied" only when a copy succeeded, and otherwise shows the full id in the toast to copy by hand.
+
+## [c3be4db] - 2026-09-19
+
+Pull request #46: Rewrap SPEC 20.3.1 and comment the download's trust in a clean stream end
+
+### Changed
+
+- SPEC 20.3.1 is rewrapped at 72 columns with its words unchanged.
+- A comment on the download handler's clean-end arm records why verifying each chunk's checksum in transit is enough: the coordinator checks the delivered length and the whole-object checksum against the record before ending the stream cleanly, and ends with `ObjectChecksumMismatch` otherwise, which is what `djbod get` relies on too.
+
+## [01433e3] - 2026-09-19
+
+Pull request #43: UI: show upload progress, with a cancel button
+
+### Added
+
+- An upload meter showing bytes sent of the total, the percentage, the rate and the time left, driven by `XMLHttpRequest` upload progress events in place of `fetch`, which reports nothing until the response arrives.
+- A note reading "waiting for the node to finish writing" between the last byte sent and the node's answer, which covers the node's fsync and the server's body drain after a refusal.
+- A Cancel button that aborts the request; the node sees the connection end and removes its reservations, as it already did for any dropped client.
+
+## [51e1afc] - 2026-09-19
+
+Pull request #42: UI: deliver a refused upload's reason, and check the room first
+
+### Added
+
+- `GET /api/upload-check?size=N`, judging a write as the coordinator does: k+m active devices each with a shard file's worth of free space within headroom, plus the object size limit, so the page refuses locally with the numbers when a file cannot fit. The node remains the authority when the upload runs, and devices sharing one filesystem make the check optimistic, which the message says (SPEC 10.4).
+
+### Fixed
+
+- The node's refusal mid-upload reaches the page with its code, device and message. The server had answered and closed a connection whose request body it had not read, which a browser reports as a network failure, dropping the response; the upload handler now reads and discards the rest of the body before answering.
+
+## [b3f3dbf] - 2026-09-19
+
+Pull request #36: Milestone 5: the administration web UI, djbod-ui (SPEC 20.3.1)
+
+### Added
+
+- `djbod-ui`, a crate serving one embedded page and a JSON API under `/api` on a local HTTP port, where every call is one node operation or one membership procedure, so the user interface holds no state of its own and every action it offers is also a command-line operation (SPEC 20.3.1).
+- An Overview of nodes with their document versions and reachability and devices with a used-space meter and state, with set-state, remove and sync.
+- An Objects section listing by prefix with paging, upload, the record and shard placement, download, repair, move-shard and delete.
+- A Maintenance section showing scrub and drain events live as newline-delimited JSON, and a Settings section for the scheme, the limits and the raw cluster document.
+- Object bodies streaming through in both directions without being held, with a download that meets damage cut short of its declared `Content-Length` so the browser reports a failed download rather than saving a wrong file.
+- `djbod-ui --listen`, taking `DJBOD_NODE` and `DJBOD_CLUSTER` like the client and binding to localhost by default. Forced node removal and re-encode stay on the command line, and there is no authentication until the protocol has it.
+
+## [6b3b858] - 2026-09-19
+
+Pull request #40: scripts/djbod-pki.sh: certificate issuing for administrators
+
+### Added
+
+- `scripts/djbod-pki.sh`, wrapping the `openssl` commands of the guide's TLS section as `init-ca`, `node`, `client` and `list`. djbod itself still generates no keys and signs nothing (SPEC 19.1.6.1).
+- `init-ca` creates the authority on the P-256 curve with `CA:TRUE` and `keyCertSign`, keeping the directory and `ca.key` owner-only and `ca.crt` world-readable since it is copied everywhere.
+- `node` issues a certificate with one IP subject alternative name per address given and prints the `[tls]` table to paste, refusing anything that is not an IP address because the document lists nodes by IP and port; `client` issues a `clientAuth` certificate and prints the three `DJBOD_TLS_*` exports.
+- A refusal to overwrite any existing file, and requests made under `umask 077` so keys are never readable by others even briefly.
+
+## [fb4c4de] - 2026-09-19
+
+Pull request #39: Milestone 5 (d): the TLS walkthrough and the spec status
+
+### Added
+
+- A TLS section in the getting-started guide: one certificate authority with `openssl`, a node certificate carrying an IP subject alternative name for the address the document lists and `serverAuth,clientAuth` key usage, a client certificate, installing the files with owner-only permissions, moving a cluster from `plain` to `tls-optional` to `tls` with what each refuses, joining a new node under TLS, and withdrawing a certificate by rotating the authority with a two-root bundle for the transition.
+
+### Changed
+
+- SPEC 19.1.6 and its subsections move from proposed to decided, noting that document addresses are IP and port so node certificates carry IP names, and that an extended key usage extension, where present, must include `serverAuth` for nodes and `clientAuth` for anything connecting. C.4.6 records milestone 5 complete.
+
+## [7572a08] - 2026-09-19
+
+Pull request #38: Milestone 5 (c): every node setting from argument, environment, or file
+
+### Added
+
+- One `ConfigArgs` group shared by `init-cluster`, `join`, `add-device`, `run` and `scrub`, covering the node id, listen and advertised addresses, state directory, devices, bootstrap peers, temporary-file maximum age, the shared-filesystem override and the TLS paths, each with a `DJBOD_` variable. An argument wins over a variable, which wins over the file, and a list given as an argument or a variable replaces the file's list (SPEC 20.6).
+- A node fully describable by its environment: with no `--config`, the node id, state directory and at least one device must come from arguments or the environment, and the error names the flag and the variable that would supply a missing one.
+
+### Changed
+
+- `scrub --device` keeps its meaning of scrubbing only that device but is now the shared device override rather than a separate filter, so the binary has one `--device`.
+- `NodeConfig::read` parses a file without validating it so the overlay can complete it first, while `load` still validates.
+
+## [e02dcdb] - 2026-09-19
+
+Pull request #37: Milestone 5 (b): client certificates in djbod
+
+### Added
+
+- `djbod --tls-ca`, `--tls-cert` and `--tls-key`, global to every subcommand, with `DJBOD_TLS_CA`, `DJBOD_TLS_CERT` and `DJBOD_TLS_KEY` as the environment equivalents; the certificate and key require each other and the authority (SPEC 19.1.6.2, 20.6).
+- Three ways to connect: no authority means plain, the authority alone means Transport Layer Security (TLS) with the server verified but no client certificate presented, which a `tls-optional` cluster accepts and a `tls` cluster refuses, and all three mean mutual TLS.
+- `Connector::from_client_paths` in the transport module, building the anonymous or authenticated client configuration from paths, with the key permission check applied when an identity is given.
+
+### Changed
+
+- Every command uses the connector, the `cluster` subcommands included, and the `Connector::plain()` placeholders are gone.
+
 ## [99bfa9f] - 2026-09-19
 
 Pull request #35: Milestone 5 (a): TLS transport, node certificates, and the three modes
