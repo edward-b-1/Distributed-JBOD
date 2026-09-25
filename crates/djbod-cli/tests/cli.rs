@@ -1408,6 +1408,26 @@ async fn a_destroyed_device_is_reported_unavailable() {
         err.contains("1 device(s) unavailable, not checked"),
         "{err}"
     );
+    // What the device costs, said last and loudly (SPEC 20.1.2.2): the one
+    // object has a shard on it, which is m = 1 out, so it is readable and
+    // one further loss from not being.
+    let last = err.trim_end().lines().last().unwrap_or("");
+    assert!(last.contains("remove-device --force"), "{err}");
+    assert!(
+        err.contains(
+            "WARNING: data at higher risk: 1 of 1 version(s) have a shard on an unavailable device"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("device {}: 1 version(s)", dead.id().0)),
+        "{err}"
+    );
+    assert!(
+        err.contains("1 version(s) can lose no further shard"),
+        "{err}"
+    );
+    assert!(err.contains("0 version(s) are unreadable now"), "{err}");
 
     // A write goes around the device, says so, and exits 2 (SPEC 5.6);
     // nothing is recreated at the dead path.

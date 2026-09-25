@@ -1295,6 +1295,14 @@ $('scrub-go').addEventListener('click', async () => {
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
         case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
+        case 'cross_check_exposure': {
+          // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
+          const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${u.versions.toLocaleString()} version(s)`).join('; ');
+          const limit = e.versions_at_the_limit ? ` ${e.versions_at_the_limit.toLocaleString()} can lose no further shard.` : '';
+          const unreadable = e.versions_unreadable ? ` ${e.versions_unreadable.toLocaleString()} are unreadable now.` : '';
+          logLine(log, `WARNING: data at higher risk: ${e.versions_with_shards_out.toLocaleString()} of ${e.versions_checked.toLocaleString()} version(s) have a shard on an unavailable device (${perDevice}).${limit}${unreadable} Restore the device, or force-remove it and run a repairing scrub.`, 'finding');
+          break;
+        }
         case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':

@@ -625,6 +625,25 @@ pub enum ScrubEvent {
         versions_checked: u64,
         key_hash: KeyHash,
     },
+    /// What the devices the merge could not read cost (20.1.2.2, 5.6),
+    /// sent once when the cross-node phase ends with any device unread.
+    /// Not damage: nothing is known to be wrong with a shard on such a
+    /// device, and no repair can reach it. Exposure: these versions are
+    /// readable only by going around the device, or not at all.
+    CrossCheckExposure {
+        /// The devices whose record streams could not be read, each with
+        /// how many checked versions have a shard on it.
+        unread: Vec<DeviceExposure>,
+        versions_checked: u64,
+        /// Versions with at least one shard on an unread device.
+        versions_with_shards_out: u64,
+        /// Of those, versions with exactly m shards out: readable, and
+        /// one further loss makes them unreadable.
+        versions_at_the_limit: u64,
+        /// Versions with more than m shards out: unreadable until a
+        /// device returns.
+        versions_unreadable: u64,
+    },
     Repaired {
         key: String,
         report: RepairReport,
@@ -633,6 +652,14 @@ pub enum ScrubEvent {
         key: String,
         detail: ErrorDetail,
     },
+}
+
+/// One device the cross-node checks could not read (5.6), and how many
+/// of the versions checked have a shard on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceExposure {
+    pub device: DeviceId,
+    pub versions: u64,
 }
 
 /// One event of a drain (SPEC 18.2.1, 18.2.2): the estimate, then one

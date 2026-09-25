@@ -2216,6 +2216,25 @@ time-based trigger as well was considered and dropped as a second
 mechanism for one feature.) A `--repair` run then repairs each damaged
 key as before.
 
+A device a node cannot read (5.6) has no record stream either, and the
+merge goes on without it: every version that lists the device is checked
+without expecting a copy from it, and nothing is asked about its shard,
+since nothing is known to be wrong with it and no repair can reach it.
+That is not damage, and the run ends as incomplete (20.1.2.3). What the
+device costs is reported instead, once, when the phase ends: for each
+unread device, how many of the versions checked have a shard on it; how
+many versions have any shard on an unread device, and so are readable
+only by going around it; how many of those have exactly m out, so that
+one further loss makes them unreadable; and how many have more than m
+out and are unreadable now. `djbod scrub` prints this as its last
+lines, as a warning that the data is at higher risk, with what to do:
+restore the device, or retire it (18.2.1.1) and run `scrub --repair`.
+The web UI shows the same in the scrub log. The exit code does not
+change for it: exposure is not damage, and the line says which. This is
+the classification of every version against the devices that are out
+(whole, degraded, at the limit, unreadable) computed in the one place
+that already reads every record; a scheduled scrub gets it for free.
+
 A node that cannot be reached, or that refuses or answers out of
 protocol, is not damage and is never reported as damage. In the first
 phase such a node is reported once and the others are scrubbed. In the

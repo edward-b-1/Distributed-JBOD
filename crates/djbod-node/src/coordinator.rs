@@ -28,10 +28,11 @@ use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ShardBlock};
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
-    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, MissingRecordCopy,
-    NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response,
-    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
+    ClusterFinding, DataFrame, DeviceContents, DeviceExposure, DeviceRecord, DeviceStatus,
+    DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message,
+    MissingRecordCopy, NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport,
+    Request, Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
+    UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -3992,6 +3993,65 @@ struct CrossCheckOutcome {
     versions_checked: u64,
     /// `Some(n)` when a stream failed after `n` versions were checked.
     stopped_after: Option<u64>,
+    exposure: Exposure,
+}
+
+/// What the devices the merge could not read (5.6) cost, counted from
+/// the records of every version checked (20.1.2.2): not damage, since
+/// nothing is known to be wrong with a shard on such a device, but the
+/// versions that can be read only by going around it, or not at all.
+#[derive(Default)]
+struct Exposure {
+    /// Checked versions with a shard on each unread device.
+    by_device: BTreeMap<DeviceId, u64>,
+    /// Versions with at least one shard on an unread device.
+    with_shards_out: u64,
+    /// Of those, with exactly m out: one further loss makes them unreadable.
+    at_the_limit: u64,
+    /// With more than m out: unreadable until a device returns.
+    unreadable: u64,
+}
+
+impl Exposure {
+    /// Count one version from its record and the devices not read.
+    fn note(&mut self, record: &MetadataRecord, unread: &BTreeSet<DeviceId>) {
+        let mut out = 0usize;
+        for shard in &record.shards {
+            if unread.contains(&shard.device) {
+                out += 1;
+                *self.by_device.entry(shard.device).or_default() += 1;
+            }
+        }
+        if out == 0 {
+            return;
+        }
+        self.with_shards_out += 1;
+        if out == record.m as usize {
+            self.at_the_limit += 1;
+        } else if out > record.m as usize {
+            self.unreadable += 1;
+        }
+    }
+
+    /// The event for the end of the phase, when any device was unread.
+    fn event(&self, unread: &BTreeSet<DeviceId>, versions_checked: u64) -> Option<ScrubEvent> {
+        if unread.is_empty() {
+            return None;
+        }
+        Some(ScrubEvent::CrossCheckExposure {
+            unread: unread
+                .iter()
+                .map(|device| DeviceExposure {
+                    device: *device,
+                    versions: self.by_device.get(device).copied().unwrap_or(0),
+                })
+                .collect(),
+            versions_checked,
+            versions_with_shards_out: self.with_shards_out,
+            versions_at_the_limit: self.at_the_limit,
+            versions_unreadable: self.unreadable,
+        })
+    }
 }
 
 /// How often the merge reports where it is (20.1.2.2).
@@ -4065,6 +4125,9 @@ async fn merge_sources(
             .map(|h| (h.record.key_hash, h.record.version))
             .min()
         else {
+            if let Some(exposure) = outcome.exposure.event(&unread, outcome.versions_checked) {
+                let _ = events.send(exposure).await;
+            }
             return outcome;
         };
         let mut group: Vec<LocatedRecord> = Vec::new();
@@ -4083,6 +4146,11 @@ async fn merge_sources(
                 });
                 taken.push(index);
             }
+        }
+        // What the unread devices cost this version (5.6), from the copy
+        // at the highest revision, whatever the checks below conclude.
+        if let Some(current) = group.iter().max_by_key(|c| c.record.revision) {
+            outcome.exposure.note(&current.record, &unread);
         }
         for finding in check_group(group, &present, &unread) {
             outcome.findings += 1;
@@ -4116,6 +4184,11 @@ async fn merge_sources(
                 }
                 Err(failure) => {
                     let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
+                    if let Some(exposure) =
+                        outcome.exposure.event(&unread, outcome.versions_checked)
+                    {
+                        let _ = events.send(exposure).await;
+                    }
                     stop(&events, &mut outcome, unreachable).await;
                     return outcome;
                 }
@@ -4348,6 +4421,42 @@ mod tests {
         assert_eq!(outcome.versions_checked, 1, "{events:?}");
         assert_eq!(outcome.stopped_after, None, "{events:?}");
         assert_eq!(outcome.findings, 0, "{events:?}");
+        // Not damage, but exposure, reported once at the end: the one
+        // version has its shard on device 2, which is m = 1 out, so it is
+        // readable and one further loss away from not being.
+        assert_eq!(
+            events,
+            vec![ScrubEvent::CrossCheckExposure {
+                unread: vec![DeviceExposure {
+                    device: device(2),
+                    versions: 1,
+                }],
+                versions_checked: 1,
+                versions_with_shards_out: 1,
+                versions_at_the_limit: 1,
+                versions_unreadable: 0,
+            }]
+        );
+    }
+
+    /// The exposure counts by how many of a version's shards are on
+    /// unread devices against its m: none, within m, at m, beyond m.
+    #[test]
+    fn exposure_classifies_a_version_by_shards_out_against_m() {
+        let mut exposure = Exposure::default();
+        let unread: BTreeSet<DeviceId> = [device(2), device(3)].into_iter().collect();
+        // k = 1, m = 1 on devices 1 and 2: one out is at the limit.
+        exposure.note(&record(1, 0, [1, 2]), &unread);
+        // Devices 1 and 4: nothing out.
+        exposure.note(&record(2, 0, [1, 4]), &unread);
+        // Devices 2 and 3: two out of m = 1, unreadable.
+        exposure.note(&record(3, 0, [2, 3]), &unread);
+        assert_eq!(exposure.with_shards_out, 2);
+        assert_eq!(exposure.at_the_limit, 1);
+        assert_eq!(exposure.unreadable, 1);
+        assert_eq!(exposure.by_device.get(&device(2)), Some(&2));
+        assert_eq!(exposure.by_device.get(&device(3)), Some(&1));
+        assert!(exposure.event(&BTreeSet::new(), 3).is_none());
     }
 
     /// Run a merge over fixed sources and collect its events. The
