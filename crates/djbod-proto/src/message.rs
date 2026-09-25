@@ -571,6 +571,16 @@ pub enum ClusterFinding {
         device: DeviceId,
         shard_index: u8,
     },
+    /// The record places a shard on a device that is `removed` or no
+    /// longer in the cluster document (18.2.1): the shard is lost (18.3),
+    /// and repair rebuilds it onto another device. Not a fault of the
+    /// device that was consulted; the device is gone by decision.
+    ShardLost {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        shard_index: u8,
+    },
     /// A copy of the record at a lower placement revision than the
     /// current one, on a device the current revision no longer lists:
     /// left behind by an interrupted re-placement (SPEC 18.8.1).

@@ -1402,12 +1402,9 @@ async fn a_destroyed_device_is_reported_unavailable() {
     assert!(out.contains("device unavailable"), "{out}");
     assert!(!out.contains("RecordsInconsistent"), "{out}");
     assert!(!out.contains("ShardMissingOnDevice"), "{out}");
-    assert!(err.contains("0 finding(s)"), "{err}");
-    assert!(err.contains("incomplete"), "{err}");
-    assert!(
-        err.contains("1 device(s) unavailable, not checked"),
-        "{err}"
-    );
+    assert!(err.contains("0 findings; incomplete"), "{err}");
+    assert!(!err.contains("repaired"), "{err}");
+    assert!(err.contains("1 device unavailable, not checked"), "{err}");
     // What the device costs, said last and loudly (SPEC 20.1.2.2): the one
     // object has a shard on it, which is m = 1 out, so it is readable and
     // one further loss from not being.
@@ -1415,19 +1412,16 @@ async fn a_destroyed_device_is_reported_unavailable() {
     assert!(last.contains("remove-device --force"), "{err}");
     assert!(
         err.contains(
-            "WARNING: data at higher risk: 1 of 1 version(s) have a shard on an unavailable device"
+            "WARNING: data at higher risk: versions with a shard on an unavailable device: 1 of 1"
         ),
         "{err}"
     );
     assert!(
-        err.contains(&format!("device {}: 1 version(s)", dead.id().0)),
+        err.contains(&format!("device {}: 1 version", dead.id().0)),
         "{err}"
     );
-    assert!(
-        err.contains("1 version(s) can lose no further shard"),
-        "{err}"
-    );
-    assert!(err.contains("0 version(s) are unreadable now"), "{err}");
+    assert!(err.contains("1 version can lose no further shard"), "{err}");
+    assert!(err.contains("no version is unreadable now"), "{err}");
 
     // A write goes around the device, says so, and exits 2 (SPEC 5.6);
     // nothing is recreated at the dead path.
@@ -1496,7 +1490,10 @@ async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
     // reconstructs anything.
     let (ok, _, err) = djbod(&test, &["scrub", "--repair"]);
     assert!(ok, "{err}");
-    assert!(err.contains("1 repair(s)"), "{err}");
+    assert!(
+        err.contains("1 finding in 1 object: 1 shard on a removed device; 1 repaired, 0 failed; complete, everything found was repaired"),
+        "{err}"
+    );
     assert!(
         err.contains("complete, everything found was repaired"),
         "{err}"

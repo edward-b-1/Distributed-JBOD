@@ -4102,6 +4102,10 @@ async fn merge_sources(
     // that fails part way joins the set at that point; the groups before
     // it were checked with its copies present.
     let mut unread: BTreeSet<DeviceId> = BTreeSet::new();
+    // The devices with a stream: a listed device outside this set, and
+    // not unread, is removed or gone from the document, and a shard the
+    // record places on it is lost (18.3), not a copy that went missing.
+    let known: BTreeSet<DeviceId> = sources.iter().map(|s| s.device()).collect();
     let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
     for source in sources.iter_mut() {
         match source.next().await {
@@ -4151,7 +4155,7 @@ async fn merge_sources(
         if let Some(current) = group.iter().max_by_key(|c| c.record.revision) {
             outcome.exposure.note(&current.record, &unread);
         }
-        for finding in check_group(group, &present, &unread) {
+        for finding in check_group(group, &present, &unread, &known) {
             outcome.findings += 1;
             outcome
                 .damaged_keys
@@ -4214,18 +4218,33 @@ async fn stop(
 
 /// The checks for one version from its copies (20.1.2.2): that the
 /// copies of the current revision exist and agree, that no stale copy
-/// remains, and that every listed device also has the shard file.
+/// remains, that every listed device also has the shard file, and that
+/// no shard sits on a device the cluster has given up (18.2.1, 18.3).
 fn check_group(
     group: Vec<LocatedRecord>,
     present: &BTreeMap<DeviceId, bool>,
     unread: &BTreeSet<DeviceId>,
+    known: &BTreeSet<DeviceId>,
 ) -> Vec<ClusterFinding> {
     let mut findings = Vec::new();
     let Some(first) = group.first() else {
         return findings;
     };
     let key = first.record.key.clone();
-    let versions = match versions_of_excluding(&key, group.clone(), unread) {
+    // A listed device with no copy here, no stream, and not unread is
+    // removed or gone from the document: its shard is lost, which is a
+    // finding of its own below, not a copy count that came up short.
+    let lost: BTreeSet<DeviceId> = group
+        .iter()
+        .flat_map(|copy| copy.record.shards.iter().map(|s| s.device))
+        .filter(|device| {
+            !known.contains(device)
+                && !unread.contains(device)
+                && !group.iter().any(|copy| copy.device == *device)
+        })
+        .collect();
+    let not_expected: BTreeSet<DeviceId> = unread.union(&lost).copied().collect();
+    let versions = match versions_of_excluding(&key, group.clone(), &not_expected) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {
@@ -4249,15 +4268,20 @@ fn check_group(
         }
     }
     for record in versions {
-        if record.size == 0 {
-            continue;
-        }
         for shard in &record.shards {
-            // A device the document no longer lists has no stream, so its
-            // copy is absent and the version is already inconsistent
-            // above; here every listed device has a copy, and the
-            // question is only whether it also has the shard file.
-            if present.get(&shard.device) == Some(&false) {
+            if lost.contains(&shard.device) {
+                findings.push(ClusterFinding::ShardLost {
+                    key: key.clone(),
+                    version: record.version,
+                    device: shard.device,
+                    shard_index: shard.index,
+                });
+                continue;
+            }
+            // Every other listed device has a copy or is unread; the
+            // question is only whether it also has the shard file, which
+            // an empty object never has.
+            if record.size > 0 && present.get(&shard.device) == Some(&false) {
                 findings.push(ClusterFinding::ShardMissingOnDevice {
                     key: key.clone(),
                     version: record.version,
@@ -4274,6 +4298,7 @@ fn finding_key(finding: &ClusterFinding) -> &str {
     match finding {
         ClusterFinding::RecordsInconsistent { key, .. }
         | ClusterFinding::ShardMissingOnDevice { key, .. }
+        | ClusterFinding::ShardLost { key, .. }
         | ClusterFinding::StaleCopy { key, .. } => key,
     }
 }
@@ -4392,9 +4417,20 @@ mod tests {
     }
 
     fn fixed(owner: NodeId, items: Vec<Result<StreamedRecord, ErrorDetail>>) -> RecordSource {
+        fixed_on(owner, DeviceId(Uuid::nil()), items)
+    }
+
+    /// A source that stands for `device`'s stream, so that a copy the
+    /// device should have had and does not is a copy gone missing, not a
+    /// device gone from the document.
+    fn fixed_on(
+        owner: NodeId,
+        device: DeviceId,
+        items: Vec<Result<StreamedRecord, ErrorDetail>>,
+    ) -> RecordSource {
         RecordSource::Fixed {
             owner,
-            device: DeviceId(Uuid::nil()),
+            device,
             items: items.into(),
         }
     }
@@ -4526,33 +4562,39 @@ mod tests {
         assert_eq!(events.len(), 2, "{events:?}");
     }
 
-    /// A copy missing on one device is fewer than the record lists, and
-    /// so is a copy on a device the document no longer has, since that
-    /// device has no stream; a run over clean copies reports progress and
-    /// nothing else.
+    /// A copy missing on a device that has a stream is fewer than the
+    /// record lists; a shard placed on a device with no stream, removed
+    /// or gone from the document, is lost (18.3), one finding per shard;
+    /// a run over clean copies reports progress and nothing else.
     #[tokio::test]
-    async fn the_merge_reports_inconsistent_copies_unlisted_devices_and_progress() {
+    async fn the_merge_reports_inconsistent_copies_lost_shards_and_progress() {
         let only_on_one = record(1, 0, [1, 2]);
         let mut on_gone_device = record(2, 0, [1, 3]);
         on_gone_device.key = "gone".to_string();
         on_gone_device.key_hash = hash_key(b"gone");
-        let a = fixed(
+        let a = fixed_on(
             node(1),
+            device(1),
             vec![
                 Ok(streamed(1, &only_on_one, true)),
                 Ok(streamed(1, &on_gone_device, true)),
             ],
         );
-        let b = fixed(node(2), vec![]);
+        let b = fixed_on(node(2), device(2), vec![]);
         let (outcome, events) = merged(vec![a, b]).await;
         assert_eq!(outcome.versions_checked, 2);
         assert_eq!(outcome.stopped_after, None);
-        assert!(events.iter().any(|e| matches!(e,
-            ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, .. }) if key == "k")));
+        assert_eq!(outcome.findings, 2, "{events:?}");
         assert!(
             events.iter().any(|e| matches!(e,
             ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, detail, .. })
-                if key == "gone" && detail.contains("1 record copies found, 2 expected"))),
+                if key == "k" && detail.contains("1 record copies found, 2 expected"))),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e,
+            ScrubEvent::ClusterFinding(ClusterFinding::ShardLost { key, device: d, shard_index: 1, .. })
+                if key == "gone" && *d == device(3))),
             "{events:?}"
         );
 

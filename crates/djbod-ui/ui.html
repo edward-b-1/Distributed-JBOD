@@ -1250,6 +1250,7 @@ $('upload-cancel').addEventListener('click', () => {
 
 // ------------------------------------------------------------ maintenance
 
+function plural(n, one, many = one + 's') { return `${n.toLocaleString()} ${n === 1 ? one : many}`; }
 function describeFinding(f) {
   const skip = new Set(['kind', 'event']);
   return `${f.kind}: ${Object.entries(f).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')}`;
@@ -1307,11 +1308,11 @@ $('scrub-go').addEventListener('click', async () => {
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':
           if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
-          else logLine(log, `scrub finished: ${findings} finding(s), ${repairs} repair(s)`, findings && !repairing ? 'finding' : 'repaired');
+          else logLine(log, `scrub finished: ${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`, findings && !repairing ? 'finding' : 'repaired');
           break;
         default: logLine(log, JSON.stringify(e));
       }
-      $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
+      $('scrub-summary').textContent = `${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`;
     });
   } catch (e) { fail('scrub', e); fill.classList.remove('working'); $('scrub-progress').hidden = true; }
   finally { $('scrub-go').disabled = false; refresh(); }
