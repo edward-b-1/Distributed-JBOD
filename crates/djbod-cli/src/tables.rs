@@ -28,12 +28,16 @@ fn render(mut table: Table, right_aligned: &[usize]) -> String {
     out
 }
 
+/// Labels first, UUIDs beside them (SPEC 6.2.5.1, issue #123): the label
+/// is what the operator reads and types, the UUID what the cluster
+/// records, and both are shown so an unnamed device is still identified.
 pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> String {
     let mut table = Table::new();
     table.set_header([
-        "DEVICE",
         "LABEL",
+        "DEVICE",
         "NODE LABEL",
+        "NODE",
         "STATE",
         "VERSIONS",
         "KEYS",
@@ -42,17 +46,18 @@ pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> S
     ]);
     for c in rows {
         table.add_row([
-            c.device.0.to_string(),
             document
                 .device(c.device)
                 .and_then(|d| d.label.as_deref())
                 .unwrap_or("-")
                 .to_string(),
+            c.device.0.to_string(),
             document
                 .node(c.node)
                 .and_then(|n| n.label.as_deref())
                 .unwrap_or("-")
                 .to_string(),
+            c.node.0.to_string(),
             format!("{:?}", c.state).to_lowercase(),
             c.versions.to_string(),
             c.keys.to_string(),
@@ -60,16 +65,16 @@ pub(super) fn contents(document: &ClusterDocument, rows: &[DeviceContents]) -> S
             human_bytes(c.shard_bytes),
         ]);
     }
-    render(table, &[4, 5, 6, 7])
+    render(table, &[5, 6, 7, 8])
 }
 
 pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
     let mut table = Table::new();
     table.set_header([
-        "DEVICE",
         "LABEL",
-        "NODE",
+        "DEVICE",
         "NODE LABEL",
+        "NODE",
         "NODE BUILD",
         "STATE",
         "TOTAL",
@@ -90,10 +95,10 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
             state.push_str(", unavailable");
         }
         table.add_row([
-            d.device.0.to_string(),
             d.label.as_deref().unwrap_or("-").to_string(),
-            d.node.0.to_string(),
+            d.device.0.to_string(),
             d.node_label.as_deref().unwrap_or("-").to_string(),
+            d.node.0.to_string(),
             build.to_string(),
             state,
             human_bytes(d.total_bytes),
@@ -105,7 +110,7 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
 
 pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument]) -> String {
     let mut table = Table::new();
-    table.set_header(["NODE", "LABEL", "ADDRESS", "BUILD", "VERSION"]);
+    table.set_header(["LABEL", "NODE", "ADDRESS", "BUILD", "VERSION"]);
     for r in reports {
         let version = match &r.result {
             Ok(d) => d.version.to_string(),
@@ -119,8 +124,8 @@ pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument])
         // No build from a node that could not be reached.
         let build = r.build.as_deref().unwrap_or("-");
         table.add_row([
-            r.node.0.to_string(),
             r.label.as_deref().unwrap_or("-").to_string(),
+            r.node.0.to_string(),
             addresses,
             build.to_string(),
             version,

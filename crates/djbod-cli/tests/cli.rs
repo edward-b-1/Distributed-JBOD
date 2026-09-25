@@ -1143,10 +1143,10 @@ async fn text_tables_align_long_unicode_and_missing_labels() {
         assert_table_columns(
             &out,
             &[
-                ("DEVICE", false),
                 ("LABEL", false),
-                ("NODE", false),
+                ("DEVICE", false),
                 ("NODE LABEL", false),
+                ("NODE", false),
                 ("NODE BUILD", false),
                 ("STATE", false),
                 ("TOTAL", true),
@@ -1163,9 +1163,10 @@ async fn text_tables_align_long_unicode_and_missing_labels() {
         assert_table_columns(
             &out,
             &[
-                ("DEVICE", false),
                 ("LABEL", false),
+                ("DEVICE", false),
                 ("NODE LABEL", false),
+                ("NODE", false),
                 ("STATE", false),
                 ("VERSIONS", true),
                 ("KEYS", true),
@@ -1184,8 +1185,8 @@ async fn text_tables_align_long_unicode_and_missing_labels() {
         assert_table_columns(
             &out,
             &[
-                ("NODE", false),
                 ("LABEL", false),
+                ("NODE", false),
                 ("ADDRESS", false),
                 ("BUILD", false),
                 ("VERSION", false),
