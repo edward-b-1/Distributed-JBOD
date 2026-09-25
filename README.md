@@ -64,10 +64,10 @@ target/release/djbod status
 For the web interface, `target/release/djbod-ui` with the same two
 variables set, then open http://127.0.0.1:5264/.
 
-[docs/getting-started.md](docs/getting-started.md) continues from here:
-breaking things on purpose and repairing them, naming, draining, and
-removing disks, adding a second machine, changing the scheme, recovering
-objects with no cluster running, and turning on TLS.
+[docs/guide/README.md](docs/guide/README.md) is the user guide: setup,
+deployments, every command, and what to do when a disk or a machine
+fails. [docs/getting-started.md](docs/getting-started.md) is an earlier
+walkthrough of a one-machine cluster.
 
 ## What you get
 
