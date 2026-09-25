@@ -1,3 +1,190 @@
+## [da9ff6b] - 2026-09-19
+
+Pull request #82: UI: shorter mixed-builds banner
+
+### Changed
+
+- The mixed-builds banner is shorter and no longer repeats what a node does with a document it cannot represent.
+
+## [5ddd227] - 2026-09-19
+
+Pull request #72: UI: a progress bar for the scrub
+
+### Added
+
+- A progress meter under the scrub controls, advancing by device because the node reports each device once, when it has finished it, showing devices done out of the devices to scrub with the bytes read and the rate, then filling for the cross-node phase and any repairs, which have no count in advance, and ending with the time taken, the devices and the bytes read, or the reason for a failure.
+- A moving stripe showing the bar is alive while nothing has changed, held still under `prefers-reduced-motion`. Progress within a device would need the node's local scrub to send progress items as it reads.
+
+## [e11dec5] - 2026-09-19
+
+Pull request #79: UI: show each node's build and the UI's own
+
+### Added
+
+- `build` on each node row of `GET /api/cluster`, null for an unreachable node or one from before builds were sent, and `ui_build` on `GET /api/status`, this server's own build.
+- Each node's build under its document version in the Nodes table, with the build lines marked and the Nodes tile saying how many builds are in use when they differ, a banner naming the builds when they are mixed, and `ui build` beside the transport in the header.
+
+## [140707f] - 2026-09-19
+
+Pull request #78: Refuse a document with a field this build does not know
+
+### Changed
+
+- `ClusterDocument`, `NodeEntry` and `DeviceEntry` refuse a field the build does not know, on the wire and when a node reads its own `cluster.json`, so a node never holds a version it cannot represent. An older node had received a document carrying `NodeEntry.label`, dropped the field and saved the version without it, after which two nodes held version 11 with different content and every further change was refused. Optional fields added later still default when absent, so a document without them is accepted by old and new builds alike (SPEC 6.2.6.4).
+- A request a node cannot decode is answered on the request's id with `ProtocolViolation`, naming the reason, the node's build and its id, before the connection closes, so the proposer's `Superseded` or `Partial` error names the node to upgrade. Until now such a request ended the connection with no reply.
+
+### Added
+
+- `Hello.build`, the crate version plus the git commit, optional in serde so builds before this one send nothing and read it as absent, with a `BUILD` column in `cluster show` and the same string from `djbod-node --version` and `djbod --version`. The commit comes from a `build.rs` running `git rev-parse`, overridden by `DJBOD_GIT_COMMIT` for builds without a checkout.
+- SPEC 6.2.6.4 on mixed builds, stating the rule, the consequence for a rolling upgrade, and that a build from before this change still drops unknown fields, so every node must be upgraded before a change that uses a newer field.
+
+## [2030b3b] - 2026-09-19
+
+Pull request #76: UI: show node labels first, with the UUID in parentheses
+
+### Changed
+
+- The page shows a node's label first with its short UUID in parentheses, and a bare UUID when there is none, across the nodes table, the device table's node column, an object's shard table, the header, the move-shard and drain choices, the scrub and drain logs, and the node field of an error.
+
+### Added
+
+- A Label button on the nodes table, reading Rename once a label is set, backed by `POST /api/nodes/{id}/label`, which calls the same membership procedure as the command.
+
+## [b23eaaa] - 2026-09-19
+
+Pull request #80: The icon: browser tab, page header, and README
+
+### Added
+
+- The application icon in the browser tab, served from the binary with a day's cache so browsers stop asking for a missing favicon; as a 26 px mark beside the page title, with an ink-inverted version chosen under `prefers-color-scheme` for the dark theme; and at the top right of the `README.md`.
+
+## [bc7048d] - 2026-09-19
+
+Pull request #77: Change a node's address after it has joined
+
+### Added
+
+- `djbod cluster set-address <node> <ip:port>[,...]`, replacing a node's address list as a document change like any other, where a node's address could previously enter the document only at `init-cluster` and `join`.
+- Startup adoption that proposes the node's own advertised address when the document disagrees, skipping itself in the proposal because it is not yet serving, adopting and retrying from a change that lands meanwhile, and refusing to start when the proposal fails, since serving where no other node knows the address would be the same as being down (SPEC 18.1.2.1).
+- Validator rules that every node lists at least one address, each an IP address and port, and that no address is listed for two nodes, each with its own error variant.
+- SPEC 6.2.5.2, stating that a node's address list is never empty, is unique, that the first is the one used, the two ways the list changes, and the last resort for moving every node at once, which neither procedure covers.
+
+### Changed
+
+- `cluster show` prints every listed address, with the JSON output gaining an `addresses` array beside the existing `address`.
+
+## [7e10db5] - 2026-09-19
+
+Pull request #75: Flush every frame; abandon a stream that goes silent (SPEC 10.12)
+
+### Fixed
+
+- `PutObject` hung under the TLS transport because `EndOfStream` frames were never flushed: `tokio-rustls` reports plaintext as written even when the encrypted records left the socket pending, and only the next write or a flush sends them. `write_message` now flushes after writing, which covers every frame on every path, since it is the only place the node, the client and the interface server write to a connection. `TcpStream` flushing is a no-op, so plain transport is unchanged (SPEC 10.12).
+- A killed client no longer leaves the holders' `.tmp` files and the coordinator's connections open indefinitely: the new `stream_idle_timeout_secs`, defaulting to 120 and also settable as `--stream-idle-timeout-secs` and `DJBOD_STREAM_IDLE_TIMEOUT_SECS`, bounds how long a holder or the coordinator waits for the next frame. On expiry the holder's write is dropped, which removes its temporary, and the coordinator aborts every holder and reports `WriteFailed`. The timeout is per frame, so a slow but active sender is unaffected.
+
+## [ac29f71] - 2026-09-19
+
+Pull request #74: UI: a blue List button, and space between the upload strip and the filter
+
+### Changed
+
+- The List button takes the accent style, and the filter row sits 20 px below the upload strip so the two read as separate groups.
+
+## [6dd3a03] - 2026-09-19
+
+Pull request #70: UI: upload controls first, the prefix filter under them, with a Clear button
+
+### Changed
+
+- On the Objects page the upload controls form the first row with Upload as its primary button, and the prefix filter and its List button sit beneath, with a Clear button that empties the prefix and lists every key.
+
+## [473cc7b] - 2026-09-19
+
+Pull request #71: Node labels, under the same rules as device labels (SPEC 6.2.5.1)
+
+### Added
+
+- `NodeEntry.label`, omitted from the JSON when absent so existing documents parse unchanged, under the same rules as a device label and unique among nodes. Node labels and device labels are separate namespaces, since no command takes both, so `nas1` may name a node and `nas1-bay0` one of its disks.
+- `djbod cluster set-node-label <node> <label>` and `--clear`, a document proposal like `set-label`, and a UUID or label accepted by `remove-node`, `remove-node --force` and `drain --node-id`. The typed confirmation of a forced removal remains the UUID, as SPEC 6.2.6.3 says.
+- A `NODE LABEL` column in `status` and a `LABEL` column in `cluster show`, both in `--json` output as well, and the `node_by_label`, `node_by_name` and `node_name` helpers on the document.
+
+## [dd15f01] - 2026-09-19
+
+Pull request #61: UI: warn while a link is unencrypted
+
+### Security
+
+- A banner under the header, dismissable for the session, warning while a link is unencrypted: red while the cluster's transport is `plain`, since connections between nodes and from clients are then unencrypted and unauthenticated, amber while it is `tls-optional` as a passing state, and nothing under `tls`, each naming the command that moves it on.
+- A red banner while the page itself is served over plain HTTP from anywhere but the machine the server runs on, since every action then crosses the network in the clear and anyone who can reach the port can administer the cluster; it suggests an SSH tunnel or a reverse proxy with TLS.
+
+## [6c42b2b] - 2026-09-19
+
+Pull request #68: README: written for the person who will run it
+
+### Changed
+
+- The `README.md` is reordered for the person who will run the system rather than for a developer: a quick start of build, configuration, `init-cluster`, `run` and a put, list, get and status in one screen; what you get, in the user's terms, with concrete `3+1`, `4+2` and `1+1` examples; the tools one line each; an honest security section with the default port folded in; the specification, proposals, crates and tests moved to a developer section near the end; and the status last.
+
+## [00fdb23] - 2026-09-19
+
+Pull request #67: UI: remember the section without scrolling to it
+
+### Fixed
+
+- Opening the Objects section no longer scrolls the page down. The page records the open section in the URL fragment so a reload reopens it, but a fragment is also a scroll target and the key list's table body carries the id `objects`; the section is now recorded with `history.replaceState`, which scrolls nothing.
+
+## [6754093] - 2026-09-19
+
+Pull request #64: UI: navigation as a left rail
+
+### Changed
+
+- The four sections move from a row of tabs to a rail down the left, one button each with an icon and, where it means something, a live count: devices on Overview, keys in the current listing on Objects with a `+` when more follow, and on Maintenance the number of objects with a remembered read failure or of draining devices. The rail stays beside the content as it scrolls and becomes a row above the content on a narrow screen.
+
+## [0b7b149] - 2026-09-19
+
+Pull request #55: UI: keep the object panel's width fixed
+
+### Fixed
+
+- Opening the record JSON no longer widens the right column and squeezes the key list. A grid column will not shrink below its widest unbreakable content and the record's lines are long, so both columns of the Objects tab may now shrink below their content, leaving the JSON to scroll sideways in its own box, and the panel stays in view and scrolls on its own when it is taller than the window.
+
+## [2606d6a] - 2026-09-19
+
+Pull request #66: README: say who the system is for and what problem it solves
+
+### Changed
+
+- The `README.md` introduction leads with the problem, a large pool of networked storage from a few commodity machines and whatever disks they have, easy to grow and shrink, then what the system does about it and that the balance between durability and efficiency is configurable.
+
+## [e747fe7] - 2026-09-19
+
+Pull request #63: README: bring it up to date with what is built
+
+### Changed
+
+- The `README.md` is brought up to date with what is built: what the system does, a table of the binaries and tools with their commands and the crate list, what the getting-started walkthrough covers, the status of the milestones and the proposals under `docs/proposals`, and the security posture of plain by default with what TLS does and does not give. Every command and section name was checked against the current binaries and guide.
+
+## [33a4047] - 2026-09-19
+
+Pull request #60: UI: device endpoints accept a label as well as a UUID
+
+### Changed
+
+- The `state`, `label`, `drain` and `remove` device endpoints accept a label as well as a universally unique identifier (UUID), resolved through `membership::resolve_device` as every `djbod` command that takes a device does. The page still sends UUIDs, so this serves anyone calling the interface by hand or from a script, at the cost of one document fetch.
+
+## [c321575] - 2026-09-19
+
+Pull request #59: UI: show the cluster's transport
+
+### Added
+
+- The cluster's `transport` forwarded by the status handler, with `ui_to_node_tls` saying whether this server's own connection to the node uses Transport Layer Security (TLS), shown in the header and in an Overview tile with a line saying what the value means.
+
+### Fixed
+
+- The status handler matched the node's reply with `..` and forwarded four fields, so the `transport` the TLS work added was dropped and the page could not say whether the cluster is `plain`, `tls-optional` or `tls`.
+
 ## [27d9f52] - 2026-09-19
 
 Pull request #58: UI: say whose fault a failed document change is
