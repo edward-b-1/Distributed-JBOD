@@ -1296,6 +1296,11 @@ $('scrub-go').addEventListener('click', async () => {
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
         case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
+        case 'cross_check_availability': {
+          const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
+          logLine(log, `shards available: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
+          break;
+        }
         case 'cross_check_exposure': {
           // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
           const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${u.versions.toLocaleString()} version(s)`).join('; ');

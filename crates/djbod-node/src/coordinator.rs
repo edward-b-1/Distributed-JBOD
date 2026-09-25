@@ -31,8 +31,8 @@ use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceExposure, DeviceRecord, DeviceStatus,
     DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message,
     MissingRecordCopy, NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport,
-    Request, Response, ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd,
-    UnavailableDevice,
+    Request, Response, ScrubEvent, ScrubItem, ShardAvailability, ShardCondition, ShardRepair,
+    StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -3669,6 +3669,9 @@ async fn scrub(
     respond(writer, id, Ok(Response::ScrubStarted)).await?;
     let mut sequence: u64 = 0;
     let mut damaged_keys: BTreeSet<String> = std::collections::BTreeSet::new();
+    // Shards the nodes' own scrubs found damaged, for the availability
+    // count of the cross-node phase (20.1.2.2).
+    let mut damaged_shards: BTreeSet<(VersionId, u8)> = BTreeSet::new();
     let mut failed_nodes = 0usize;
     let mut finding_count = 0usize;
 
@@ -3706,6 +3709,21 @@ async fn scrub(
                 if let Some(key) = finding.repair_key() {
                     damaged_keys.insert(key.to_string());
                 }
+                match finding {
+                    djbod_core::scrub::Finding::ShardUnreadable {
+                        version,
+                        shard_index,
+                        ..
+                    }
+                    | djbod_core::scrub::Finding::ShardBlocksCorrupt {
+                        version,
+                        shard_index,
+                        ..
+                    } => {
+                        damaged_shards.insert((*version, *shard_index));
+                    }
+                    _ => {}
+                }
             }
             ScrubEvent::NodeFailed { .. } => failed_nodes += 1,
             _ => {}
@@ -3719,7 +3737,7 @@ async fn scrub(
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
     let merge = {
         let node = node.clone();
-        tokio::spawn(async move { cross_check(&node, sender).await })
+        tokio::spawn(async move { cross_check(&node, sender, damaged_shards).await })
     };
     while let Some(event) = receiver.recv().await {
         send_event(writer, id, &mut sequence, &event).await?;
@@ -3993,6 +4011,37 @@ struct CrossCheckOutcome {
     /// `Some(n)` when a stream failed after `n` versions were checked.
     stopped_after: Option<u64>,
     exposure: Exposure,
+    /// Versions by (shards total, shards available, k).
+    availability: BTreeMap<(u8, u8, u8), u64>,
+}
+
+impl CrossCheckOutcome {
+    /// The count of every version checked by its shards available, for
+    /// the end of the phase (20.1.2.2). Whole versions first.
+    fn availability_event(&self) -> ScrubEvent {
+        let mut versions: Vec<ShardAvailability> = self
+            .availability
+            .iter()
+            .map(|((total, available, k), count)| ShardAvailability {
+                shards_total: *total,
+                shards_available: *available,
+                k: *k,
+                versions: *count,
+            })
+            .collect();
+        versions.sort_by_key(|v| (v.shards_total, std::cmp::Reverse(v.shards_available)));
+        ScrubEvent::CrossCheckAvailability {
+            versions_checked: self.versions_checked,
+            versions,
+        }
+    }
+}
+
+/// How many of one version's shards are available, and of how many.
+struct ShardCount {
+    total: u8,
+    available: u8,
+    k: u8,
 }
 
 /// What the devices the merge could not read (5.6) cost, counted from
@@ -4061,6 +4110,7 @@ const PROGRESS_EVERY_VERSIONS: u64 = 10_000;
 async fn cross_check(
     node: &Arc<Node>,
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
+    damaged_shards: BTreeSet<(VersionId, u8)>,
 ) -> CrossCheckOutcome {
     let document = node.document();
     let mut sources = Vec::new();
@@ -4083,7 +4133,7 @@ async fn cross_check(
             }
         }
     }
-    merge_sources(sources, events).await
+    merge_sources(sources, events, &damaged_shards).await
 }
 
 /// Merge the sources in (key hash, version) order; each group of equal
@@ -4093,6 +4143,7 @@ async fn cross_check(
 async fn merge_sources(
     mut sources: Vec<RecordSource>,
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
+    damaged_shards: &BTreeSet<(VersionId, u8)>,
 ) -> CrossCheckOutcome {
     let mut outcome = CrossCheckOutcome::default();
     // Record streams that failed because their device could not be read
@@ -4128,6 +4179,7 @@ async fn merge_sources(
             .map(|h| (h.record.key_hash, h.record.version))
             .min()
         else {
+            let _ = events.send(outcome.availability_event()).await;
             if let Some(exposure) = outcome.exposure.event(&unread, outcome.versions_checked) {
                 let _ = events.send(exposure).await;
             }
@@ -4155,7 +4207,14 @@ async fn merge_sources(
         if let Some(current) = group.iter().max_by_key(|c| c.record.revision) {
             outcome.exposure.note(&current.record, &unread);
         }
-        for finding in check_group(group, &present, &unread, &known) {
+        let (findings, shards) = check_group(group, &present, &unread, &known, damaged_shards);
+        if let Some(shards) = shards {
+            *outcome
+                .availability
+                .entry((shards.total, shards.available, shards.k))
+                .or_default() += 1;
+        }
+        for finding in findings {
             outcome.findings += 1;
             outcome
                 .damaged_keys
@@ -4187,12 +4246,14 @@ async fn merge_sources(
                 }
                 Err(failure) => {
                     let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
+                    stop(&events, &mut outcome, unreachable).await;
+                    // What was counted before the stop still stands.
+                    let _ = events.send(outcome.availability_event()).await;
                     if let Some(exposure) =
                         outcome.exposure.event(&unread, outcome.versions_checked)
                     {
                         let _ = events.send(exposure).await;
                     }
-                    stop(&events, &mut outcome, unreachable).await;
                     return outcome;
                 }
             }
@@ -4220,15 +4281,20 @@ async fn stop(
 /// copies of the current revision exist and agree, that no stale copy
 /// remains, that every listed device also has the shard file, and that
 /// no shard sits on a device the cluster has given up (18.2.1, 18.3).
+/// Also how many of the version's shards are available, counting a
+/// shard on an unread or lost device, a missing file, or one the node's
+/// own scrub found damaged as not; `None` when the copies could not be
+/// trusted, since then the version's shards are not known.
 fn check_group(
     group: Vec<LocatedRecord>,
     present: &BTreeMap<DeviceId, bool>,
     unread: &BTreeSet<DeviceId>,
     known: &BTreeSet<DeviceId>,
-) -> Vec<ClusterFinding> {
+    damaged_shards: &BTreeSet<(VersionId, u8)>,
+) -> (Vec<ClusterFinding>, Option<ShardCount>) {
     let mut findings = Vec::new();
     let Some(first) = group.first() else {
-        return findings;
+        return (findings, None);
     };
     let key = first.record.key.clone();
     // A listed device with no copy here, no stream, and not unread is
@@ -4252,10 +4318,29 @@ fn check_group(
                 version: detail.version,
                 detail: detail.message,
             });
-            return findings;
+            return (findings, None);
         }
-        Err(_) => return findings,
+        Err(_) => return (findings, None),
     };
+    // The group is one version, so this is its one trusted record.
+    let shards = versions.first().map(|record| {
+        let unavailable = record
+            .shards
+            .iter()
+            .filter(|shard| {
+                lost.contains(&shard.device)
+                    || unread.contains(&shard.device)
+                    || present.get(&shard.device) == Some(&false)
+                    || damaged_shards.contains(&(record.version, shard.index))
+            })
+            .count();
+        let total = record.k + record.m;
+        ShardCount {
+            total,
+            available: total.saturating_sub(unavailable as u8),
+            k: record.k,
+        }
+    });
     for record in &versions {
         for (device, revision) in stale_copies(record, &group) {
             findings.push(ClusterFinding::StaleCopy {
@@ -4291,7 +4376,7 @@ fn check_group(
             }
         }
     }
-    findings
+    (findings, shards)
 }
 
 fn finding_key(finding: &ClusterFinding) -> &str {
@@ -4458,19 +4543,31 @@ mod tests {
         assert_eq!(outcome.findings, 0, "{events:?}");
         // Not damage, but exposure, reported once at the end: the one
         // version has its shard on device 2, which is m = 1 out, so it is
-        // readable and one further loss away from not being.
+        // readable and one further loss away from not being; the count
+        // by shards available says the same: 1 of 2, at k = 1.
         assert_eq!(
             events,
-            vec![ScrubEvent::CrossCheckExposure {
-                unread: vec![DeviceExposure {
-                    device: device(2),
-                    versions: 1,
-                }],
-                versions_checked: 1,
-                versions_with_shards_out: 1,
-                versions_at_the_limit: 1,
-                versions_unreadable: 0,
-            }]
+            vec![
+                ScrubEvent::CrossCheckAvailability {
+                    versions_checked: 1,
+                    versions: vec![ShardAvailability {
+                        shards_total: 2,
+                        shards_available: 1,
+                        k: 1,
+                        versions: 1,
+                    }],
+                },
+                ScrubEvent::CrossCheckExposure {
+                    unread: vec![DeviceExposure {
+                        device: device(2),
+                        versions: 1,
+                    }],
+                    versions_checked: 1,
+                    versions_with_shards_out: 1,
+                    versions_at_the_limit: 1,
+                    versions_unreadable: 0,
+                },
+            ]
         );
     }
 
@@ -4500,7 +4597,8 @@ mod tests {
     /// sends more events than the buffer holds.
     async fn merged(sources: Vec<RecordSource>) -> (CrossCheckOutcome, Vec<ScrubEvent>) {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
-        let merge = tokio::spawn(merge_sources(sources, sender));
+        let merge =
+            tokio::spawn(async move { merge_sources(sources, sender, &BTreeSet::new()).await });
         let mut events = Vec::new();
         while let Some(event) = receiver.recv().await {
             events.push(event);
@@ -4559,7 +4657,17 @@ mod tests {
             ScrubEvent::CrossCheckStopped { node: n, versions_checked: 2, versions_unchecked: None, .. }
                 if *n == node(2)
         ));
-        assert_eq!(events.len(), 2, "{events:?}");
+        assert!(
+            matches!(
+                &events[2],
+                ScrubEvent::CrossCheckAvailability {
+                    versions_checked: 2,
+                    ..
+                }
+            ),
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 3, "{events:?}");
     }
 
     /// A copy missing on a device that has a stream is fewer than the
@@ -4597,6 +4705,14 @@ mod tests {
                 if key == "gone" && *d == device(3))),
             "{events:?}"
         );
+        // The inconsistent version's shards are not known and not counted;
+        // the lost shard leaves the other version with 1 of 2.
+        assert!(
+            events.iter().any(|e| matches!(e,
+            ScrubEvent::CrossCheckAvailability { versions_checked: 2, versions }
+                if *versions == vec![ShardAvailability { shards_total: 2, shards_available: 1, k: 1, versions: 1 }])),
+            "{events:?}"
+        );
 
         // Progress: two clean streams of PROGRESS_EVERY_VERSIONS + 1 versions.
         let count = PROGRESS_EVERY_VERSIONS + 1;
@@ -4618,10 +4734,13 @@ mod tests {
         assert!(
             matches!(
                 events.as_slice(),
-                [ScrubEvent::CrossCheckProgress { versions_checked, .. }] if *versions_checked == PROGRESS_EVERY_VERSIONS
+                [
+                    ScrubEvent::CrossCheckProgress { versions_checked, .. },
+                    ScrubEvent::CrossCheckAvailability { versions, .. },
+                ] if *versions_checked == PROGRESS_EVERY_VERSIONS
+                    && *versions == vec![ShardAvailability { shards_total: 2, shards_available: 2, k: 1, versions: count }]
             ),
-            "{} event(s)",
-            events.len()
+            "{events:?}"
         );
     }
 

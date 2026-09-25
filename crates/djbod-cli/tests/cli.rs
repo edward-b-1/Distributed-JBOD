@@ -1422,6 +1422,10 @@ async fn a_destroyed_device_is_reported_unavailable() {
     );
     assert!(err.contains("1 version can lose no further shard"), "{err}");
     assert!(err.contains("no version is unreadable now"), "{err}");
+    assert!(
+        err.contains("shards available: 1 object with 2 of 3 (readable, none to spare)"),
+        "{err}"
+    );
 
     // A write goes around the device, says so, and exits 2 (SPEC 5.6);
     // nothing is recreated at the dead path.
@@ -1492,6 +1496,11 @@ async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
     assert!(ok, "{err}");
     assert!(
         err.contains("1 finding in 1 object: 1 shard on a removed device; 1 repaired, 0 failed; complete, everything found was repaired"),
+        "{err}"
+    );
+    // Counted before the repair: 3+1 with one shard lost.
+    assert!(
+        err.contains("shards available: 1 object with 3 of 4 (readable, none to spare)"),
         "{err}"
     );
     assert!(

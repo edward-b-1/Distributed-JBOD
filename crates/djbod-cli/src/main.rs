@@ -924,8 +924,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             // and in how many objects.
             let mut by_kind: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
             let mut damaged_objects: BTreeSet<String> = BTreeSet::new();
-            // Printed last, so that what the unavailable devices cost is
-            // the last thing read (SPEC 20.1.2.2).
+            // Printed after the last line: every version by its shards
+            // available, and then what the unavailable devices cost, so
+            // that is the last thing read (SPEC 20.1.2.2).
+            let mut availability: Option<ScrubEvent> = None;
             let mut exposure: Option<ScrubEvent> = None;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
@@ -1018,6 +1020,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     "cross-node checks: {versions_checked} version(s) checked"
                                 );
                             }
+                            ScrubEvent::CrossCheckAvailability { .. } => availability = Some(event),
                             ScrubEvent::CrossCheckExposure { .. } => exposure = Some(event),
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
@@ -1072,6 +1075,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 if let Some(error) = &end.error {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
+                }
+                if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = &availability {
+                    eprintln!("{}", describe_availability(versions));
                 }
                 if let Some(ScrubEvent::CrossCheckExposure {
                     unread,
@@ -1746,6 +1752,40 @@ fn describe_exposure(
         "restore the device, or retire it with `djbod cluster remove-device --force` and run `djbod scrub --repair` to rebuild what it held".to_string(),
     );
     lines.join("\n")
+}
+
+/// Every version checked by how many of its shards are available (SPEC
+/// 20.1.2.2), against its scheme: whole, readable with so many to
+/// spare, or unreadable.
+fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -> String {
+    if versions.is_empty() {
+        return "shards available: no version checked".to_string();
+    }
+    let parts: Vec<String> = versions
+        .iter()
+        .map(|v| {
+            let state = if v.shards_available == v.shards_total {
+                String::new()
+            } else if v.shards_available >= v.k {
+                match v.shards_available - v.k {
+                    0 => " (readable, none to spare)".to_string(),
+                    spare => format!(
+                        " (readable, {} to spare)",
+                        counted(spare as usize, "shard", "shards")
+                    ),
+                }
+            } else {
+                " (unreadable)".to_string()
+            };
+            format!(
+                "{} with {} of {}{state}",
+                counted(v.versions as usize, "object", "objects"),
+                v.shards_available,
+                v.shards_total
+            )
+        })
+        .collect();
+    format!("shards available: {}", parts.join(", "))
 }
 
 /// The devices a listing went without (SPEC 15.1) and what that means
