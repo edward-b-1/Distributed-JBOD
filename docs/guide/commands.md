@@ -3,8 +3,9 @@
 This is the reference for the four binaries and `scripts/djbod-pki.sh`.
 The procedures that combine them are in [Scenarios](scenarios.md).
 Flags shown on a subcommand are also accepted in front of it. Build
-`79dac71` is the tree these descriptions were taken from. `--help` on
-the binary you installed is the check when the two disagree.
+`1b8e434` (version 0.2.5) is the tree these descriptions were checked
+against. `--help` on the binary you installed is the check when the two
+disagree.
 
 ## `djbod`
 
@@ -18,7 +19,7 @@ djbod [--node ADDR[,ADDR...]] [--cluster UUID] [--json]
 
 | Flag | Environment | Meaning |
 |---|---|---|
-| `--node` | `DJBOD_NODE` | One or more `ip:port` addresses, comma-separated. Tried in order. A request moves to the next address when one fails. |
+| `--node` | `DJBOD_NODE` | One or more `ip:port` addresses, comma-separated. Tried in order. The first that answers is the coordinator for the request: it encodes, fans the work out, and checks checksums. A later failure moves to the next address in this list only. [Concepts](concepts.md#which-node-coordinates) is why the order matters on machines that differ in CPU, link speed, or region. |
 | `--cluster` | `DJBOD_CLUSTER` | Cluster id from `init-cluster`. Required for every command except `identity` and `get-cluster-id`. |
 | `--json` | | One JSON value, or one JSON object per event for streaming commands. |
 | `--tls-ca` | `DJBOD_TLS_CA` | PEM authority or bundle. Alone, the connection is encrypted and presents no certificate. |
@@ -32,19 +33,24 @@ tool are in [Day to day](day-to-day.md#exit-codes).
 
 Every device's state, free space, label, owning node, and that node's
 build. Also the cluster name and id, document version, which node
-answered, the build, and the transport. A device the node cannot read
-is `<state>, unavailable`, and a count is printed on standard error.
-Fails with `NodeUnreachable` if any node in the document does not
-answer.
+answered (`answered by node`, the coordinator), the build, and the
+transport. A device the node cannot read is `<state>, unavailable`, and
+standard error says `1 device is unavailable` or `N devices are
+unavailable`, plus `node <uuid> unreachable:` for each node that did
+not answer. The command still exits 0. A removed device stays in the
+table as `removed`, with no free space and without the `unavailable`
+suffix. Fails with `DocumentVersionMismatch` when a node that answered
+holds a different document version.
 
 ### `contents [DEVICE...] [--node-id NODE]`
 
 Versions, keys, blocks, and shard bytes on each device, counted from
 records without reading payloads. No arguments means every device that
 is not `removed`. A device name is a UUID or a label. `--node-id`
-limits the list to one node's devices. An unreadable device is reported
-on standard error and the others are still printed. A device with zero
-versions is called out as empty.
+limits the list to one node's devices. A device its own node cannot
+read is named on standard error and the others are still printed. A
+node that does not answer fails the command with `NodeUnreachable`. A
+device with zero versions is called out as empty.
 
 ### `get-cluster-id`
 
@@ -62,22 +68,29 @@ build, document version, transport. Does not take `--cluster`.
 Store a file under a key. `FILE` of `-` reads standard input, all of it,
 because the size is sent first. Prints `stored <key> as version <id>`.
 Exit 2 when the object was stored and one or more devices were skipped
-as unavailable. Exit 1 when nothing was stored (`InsufficientDevices`,
-`ObjectTooLarge`, `KeyTooLong`, and the other refusals).
+as unavailable (`placed around 1 unavailable device`, or `devices`).
+Exit 1 when nothing was stored (`InsufficientDevices`,
+`NodeUnreachable` when any node is silent, `ObjectTooLarge`,
+`KeyTooLong`, and the other refusals).
 
 ### `get <KEY> [FILE]`
 
 Fetch an object. `FILE` defaults to `-`, which is standard output. A
 failed fetch to a named file removes the partial file. Exit 2 when the
-bytes are correct and blocks were reconstructed. The damage stays on
-disk until `repair`.
+bytes are correct and blocks were reconstructed, or when a record copy
+could not be read and at least `k` copies agreed. The damage stays on
+disk until `repair`. A node that is down does not by itself fail the
+read; fewer than `k` readable copies, or more than `m` unreadable
+shards, does.
 
 ### `head <KEY>`
 
 The record: key, version, size, created time, checksum, scheme and
 block size, content type if any, and `shard <index> device <uuid>` for
-each shard. Exit 1 with `NotFound` when the key is absent. Exit 1 with
-`RecordsInconsistent` when a record copy is damaged or missing.
+each shard. Exit 1 with `NotFound` when the key is absent. Exit 2 when
+the record was trusted and a copy could not be read. Exit 1 with
+`RecordsInconsistent` when the copies that were read disagree, or fewer
+than `k` of them can be read and the cause is not an unavailable device.
 
 ### `delete <KEY>`
 
@@ -89,7 +102,11 @@ Delete the current version. Prints `deleted <key>`. A missing key is
 Keys in order. Each line is the size, the version id, and the key.
 `--limit` caps the page. A page also stops at 8 MiB of key text.
 Truncation is reported on standard error with the `--start-after` value
-to continue from. `--json` includes a `truncated` field.
+to continue from. Devices that could not be read are named. Exit 2 when
+`k + m` or more are out, because a key stored only there may be missing
+from the page. Exit 0 when fewer are out; the line then says every key
+is still listed, which holds for objects written at the document's
+current scheme. `--json` includes `truncated`, `unread`, and `complete`.
 
 ### `cluster-config`
 
@@ -101,10 +118,12 @@ headroom, the three size limits, transport, nodes, devices.
 Rebuild damaged or missing shards of one object from the intact ones,
 and rewrite a record copy that is missing once a bad record file is out
 of the way. Prints each shard's condition and whether it was rewritten
-or rebuilt onto another device. Fails with `DeviceUnavailable` while a
-disk that holds a shard is still a member and cannot be read. Fails
-with `BlockChecksumMismatch` when a stripe has fewer than `k` usable
-blocks, and changes nothing in that case. See
+or rebuilt onto another device, then `N shards rewritten`. Fails with
+`NodeUnreachable` if any node does not answer. Fails with
+`DeviceUnavailable` while a disk that holds a shard is still a member
+and cannot be read: the replacement would be written back to that disk.
+Fails with `BlockChecksumMismatch` when a stripe has fewer than `k`
+usable blocks, and changes nothing in that case. See
 [Scenarios](scenarios.md#a-bad-block-or-a-missing-shard-file).
 
 ### `move-shard <KEY> <SHARD_INDEX> [--to DEVICE]`
@@ -119,9 +138,12 @@ when the old copy could not be deleted.
 Every node checks its own disks, then the cross-node checks run.
 `--rate-mib` caps each node's read rate. `--repair` rebuilds objects
 the checks found damaged. It does not rebuild a device that is
-unavailable and still a member. Exit codes are 0, 2, 3, and 4, as in
-[Day to day](day-to-day.md#exit-codes). `--json` is one event per line
-and the exit code is the only summary.
+unavailable and still a member. A node that does not answer is named,
+the cross-node checks stop, and the exit code is 3 or 4. Exit codes are
+0, 2, 3, and 4, as in [Day to day](day-to-day.md#exit-codes). The human
+output ends with the outcome, then, when a device was unchecked, how
+many versions have a shard on it. `--json` is one event per line and
+the exit code is the only summary.
 
 ### `cluster`
 
@@ -139,7 +161,7 @@ label.
 | `set-node-label <NODE> [LABEL] [--clear]` | Same rules as a device label, for a node. |
 | `set-address <NODE> <IP:PORT[,IP:PORT...]> ` | Replace the addresses in the document. The node must still answer at its current address. The first address is the one used. A node that has already moved updates the document from its configuration at startup instead. |
 | `drain [DEVICE] [--node-id NODE] [--partial]` | One pass over a device that is already `draining`. Prints an estimate, then `moved`, `skipped`, or `deleted` per version. Exit 2 if the estimate says the remaining active devices are fewer than `k + m` or lack the free space, unless `--partial`, and exit 2 if any version was skipped. `--node-id` repeats the pass for every draining device of that node. |
-| `set-scheme --k K --m M [--block-size BYTES]` | Changes the scheme for new writes. Moves nothing. Refuses when fewer devices are active than the new `k + m`. Reports how many existing objects are on another scheme. Block size, if given, is a multiple of 4096 from 64 KiB to 64 MiB. |
+| `set-scheme --k K --m M [--block-size BYTES]` | Changes the scheme for new writes. Moves nothing. `k` is 1 to 32, `m` is 0 to 8, and `k + m` is at most 64, so `1+0` is legal. Refuses when fewer devices are active than the new `k + m`. Reports how many existing objects are on another scheme (`1 object is stored` or `N objects are stored`). Block size, if given, is a multiple of 4096 from 64 KiB to 64 MiB. A larger block is a larger stripe allocation on the coordinator, bounded by the 64 MiB frame cap. [Concepts](concepts.md#block-size). |
 | `reencode` | Rewrites every object still on another scheme or block size, one at a time, through this client. Safe to interrupt and rerun. Exit 2 if any object failed. |
 | `set-transport <plain\|tls-optional\|tls>` | Changes how connections are made. Leaving `plain` is refused while any node has no TLS material, and the error names the node. See [TLS](tls.md). |
 | `set-limits [--max-key-bytes N] [--max-object-bytes N] [--max-user-metadata-bytes N]` | At least one flag. Applies to new writes. Prints all three values. |
@@ -167,8 +189,8 @@ device id and path.
 | `--name` | none | Display name. `DJBOD_CLUSTER_NAME`. |
 | `--k` | 3 | Data shards. |
 | `--m` | 1 | Parity shards. |
-| `--block-size` | 1048576 | Bytes, multiple of 4096, 64 KiB to 64 MiB. |
-| `--headroom` | 0.05 | Fraction of each filesystem kept free. Cannot be changed later. |
+| `--block-size` | 1048576 | Bytes, multiple of 4096, 64 KiB to 64 MiB. The coordinator's stripe buffer and encoded blocks scale with this, up to the frame cap. [Concepts](concepts.md#block-size). |
+| `--headroom` | 0.05 | Fraction of each filesystem kept free, from 0 to 0.5. Cannot be changed later. [Concepts](concepts.md#headroom). |
 | `--max-key-bytes` | 16384 | |
 | `--max-object-bytes` | 1099511627776 | 1 TiB. |
 | `--max-user-metadata-bytes` | 10485760 | 10 MiB. |
@@ -184,9 +206,13 @@ count is high enough.
 
 Fetch the document from a peer, initialise this node's devices, add this
 node to the document. Prints the node id, the document version, and the
-new device ids. Start the node afterwards with `run` and the same
-config. `--wipe-removed-device` erases devices that were removed from
-this cluster before. A peer in a different cluster is refused.
+new device ids. Does not write `node.toml` and does not set
+`bootstrap_peers`. Every node already in the document has to be
+running; otherwise the proposal fails with `cannot reach`. Start the
+node afterwards with `run` and the same config, and start it before the
+next machine joins. `--wipe-removed-device` erases devices that were
+removed from this cluster before. A peer in a different cluster is
+refused.
 
 ### `add-device --path PATH [--path PATH...] [--peer ADDR]`
 
@@ -238,16 +264,20 @@ when fewer than `k` intact shards exist.
 ## `djbod-ui`
 
 ```text
-djbod-ui --node ADDR --cluster UUID [--listen 127.0.0.1:5264]
+djbod-ui --bootstrap-node ADDR[,ADDR...] --cluster UUID [--listen 127.0.0.1:5264]
          [--host NAME] [--tls-ca FILE] [--tls-cert FILE] [--tls-key FILE]
 ```
 
-Serves the administration page. `--node`, `--cluster`, and the TLS flags
-match `djbod`, including the environment variables. `--listen` defaults
-to `127.0.0.1:5264`. There is no authentication on the HTTP port. `--host`
-adds a DNS name the server will answer, besides IP addresses and
-`localhost`. Other `Host` values get HTTP 403. The page and the `/api/`
-routes are described in [Day to day](day-to-day.md#the-web-ui).
+Serves the administration page. `--bootstrap-node`
+(`DJBOD_BOOTSTRAP_NODE`) is the ordered list of nodes to try. The first
+that answers coordinates the page. After the cluster document has been
+read, the other addresses in it are tried too. `--node` and `DJBOD_NODE`
+are the deprecated spelling: accepted with a warning, and ignored when
+the new spelling is set. `--cluster` and the TLS flags match `djbod`.
+`--listen` defaults to `127.0.0.1:5264`. There is no authentication on
+the HTTP port. `--host` adds a DNS name the server will answer, besides
+IP addresses and `localhost`. Other `Host` values get HTTP 403. The page
+and the `/api/` routes are described in [Day to day](day-to-day.md#the-web-ui).
 
 ## `scripts/djbod-pki.sh`
 
@@ -273,12 +303,12 @@ node, device, key, version, shard, and stripe that the node supplied.
 
 | Code | When it appears | What to do |
 |---|---|---|
-| `NodeUnreachable` | A node in the document did not answer. | `cluster show`. Bring the node back, or [force-remove it](scenarios.md#a-node-will-never-come-back). |
-| `DeviceUnavailable` | A device could not be opened or its identity file could not be read. | [Retire it or mount it](scenarios.md#a-disk-is-unreadable). |
-| `BlockChecksumMismatch` | A block failed its checksum, and not enough intact blocks remained to rebuild. | `repair` when `m` covers it. Otherwise the object is lost. |
-| `RecordsInconsistent` | Record copies disagree, a copy is missing, or a record file is not valid. | [Damaged record](scenarios.md#a-record-file-is-unreadable), or retire the disk that held the missing copy. |
-| `NotFound` | No object under that key. | |
-| `InsufficientDevices` | Fewer than `k + m` devices can take a shard, or a rebuild has nowhere to go. | Add a device or a node before draining or force-removing. |
+| `NodeUnreachable` | A node in the document did not answer, on a command that requires every node: `put`, `delete`, `repair`, `contents`, and membership changes. `status`, `cluster show`, and a `get` that still has `k` copies do not use this as a failure. | `cluster show`. Bring the node back, or [force-remove it](scenarios.md#a-node-will-never-come-back). |
+| `DeviceUnavailable` | A device could not be opened or its identity file could not be read. `repair` returns this while the disk is still a member. | [Retire it or mount it](scenarios.md#a-disk-is-unreadable). |
+| `BlockChecksumMismatch` | A block failed its checksum, and not enough intact blocks remained to rebuild. The message counts `damaged blocks` and says how many usable blocks the stripe had. | `repair` when `m` covers it. Otherwise the object is lost. |
+| `RecordsInconsistent` | The record copies that were read disagree, fewer than `k` can be read, or a record file is not valid. A missing copy that still leaves `k` agreeing copies is exit 2 on `get` and `head`, not this code. | [Damaged record](scenarios.md#a-record-file-is-unreadable). |
+| `NotFound` | No object under that key on the devices that could be read, and fewer than `k + m` devices are out. A `1+0` object on a device that is out can be reported this way after the document scheme has been raised. | `status`, then `reencode` once the device is back, if the object was an older narrower scheme. |
+| `InsufficientDevices` | Fewer than `k + m` devices can take a shard, or a rebuild has nowhere to go. The message names unavailable devices when those are why. | Add a device or a node before draining or force-removing. |
+| `DocumentVersionMismatch` | A node that answered holds a different document version. `status` fails. `cluster show` still prints both versions. | `cluster sync`. `bootstrap_peers` is what avoids this at the next start. |
 | `ObjectTooLarge`, `KeyTooLong`, `MetadataTooLarge` | The write exceeds a limit in the document. | `cluster set-limits`, or send a smaller object. |
 | `TlsRequired` | The transport is `tls` and the connection was plain or had no client certificate. | [TLS](tls.md). |
-| `DocumentVersionMismatch` | Peers disagree about the document. | `cluster show`, then `cluster sync`. |

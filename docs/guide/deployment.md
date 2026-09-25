@@ -14,16 +14,22 @@ repair, not only for the failures you intend to survive on paper.
 
 | You have | A scheme that fits | What you can repair |
 |---|---|---|
-| One server, four or more disks | `3+1` (needs 4) or `2+1` (needs 3) | One dead disk, after `remove-device --force` and `scrub --repair`, as long as `k + m` other disks remain or you add a replacement first. The server itself being off takes the cluster with it. |
-| Three servers, several disks each | `4+2` or `3+1`, with more disks than `k + m` | One or two dead disks, depending on `m`. A server that is off stops every `get`, `put`, and `status` until it returns or you force-remove it. Force-removal rebuilds only onto disks that do not already hold a shard of that object. |
-| Several small machines and you expect one to be off | Keep every machine powered, or plan to force-remove the one that is down. `1+1` does not keep reads working through a missing machine. | A mirror still needs both record copies present to serve the object. A missing node fails the read even when the other copy is on a machine that is up. |
+| One copy is enough, because something else keeps another | `1+0` (needs 1 device) | Checksums tell you a block is bad. Nothing rebuilds it. Add disks later and raise the scheme with `set-scheme` and `reencode` when you want parity. |
+| One server, four or more disks | `3+1` (needs 4) or `2+1` (needs 3) | One dead disk, after `remove-device --force` and `scrub --repair`, as long as a spare disk remains that does not already hold a shard of that object. The server itself being off takes writes with it. Reads of an object that still has `k` copies elsewhere continue and exit 2. |
+| Three servers, several disks each | `4+2` or `3+1`, with more disks than `k + m` | One or two dead disks, depending on `m`. A server that is off does not stop `status` or a `get` that still has `k` copies on the others. It does stop `put` and `repair` until it returns or you force-remove it. Force-removal rebuilds only onto disks that do not already hold a shard of that object. |
+| Several small machines and you expect one to be off | Keep every machine powered, or plan for reads to exit 2 and writes to fail while it is down. `1+1` still needs `k` record copies, which is one, so a read can use the surviving copy and exit 2. `put` still wants every node to answer. | A missing node is not silently ignored for writes. Reads reconstruct when `m` covers the shards on the down machine. |
 
 `4+2` on nine disks is a comfortable pool: a write needs six, and you
 can lose two disks and still have a destination for a rebuild. `3+1`
-on one server with a spare bay is the same idea at smaller scale. You
-can change the scheme later with `djbod cluster set-scheme` and
-`djbod cluster reencode`. Objects written under the old scheme stay
-readable either way.
+on one server with a spare bay is the same idea at smaller scale.
+`1+0` is the scheme with no parity at all: one device holds the only
+copy. You can change the scheme later with `djbod cluster set-scheme`
+and `djbod cluster reencode`. Objects written under the old scheme stay
+readable either way. Changing the block size at the same time changes
+how much RAM the coordinator needs per stripe; that cost is in
+[Concepts](concepts.md#block-size). Headroom, the fraction of each disk
+placement refuses to fill, is in [Concepts](concepts.md#headroom) and is
+fixed when you run `init-cluster`.
 
 Because placement ignores which machine a disk is in, an object can
 land several shards on one server. That is normal. It means a dead
@@ -104,8 +110,48 @@ djbod cluster set-label <device-uuid> nas1-bay0
 
 ## Three servers
 
-Use the same file on each machine. `node_id`, `listen`, and
-`bootstrap_peers` differ. On `nas1` (`10.0.0.1`), with three disks:
+Each machine has its own `/etc/djbod/node.toml`. The file is local. `join`
+does not write it, and it does not fill in any of these fields for you.
+You write all five before you run `join` or `run`.
+
+| Field in `node.toml` | What you put there |
+|---|---|
+| `node_id` | This machine's UUID, from `uuidgen`, chosen once and kept for the life of the machine. `join` does not assign it. |
+| `listen` | The address this process binds. On nas2 that is `10.0.0.2:5263`. |
+| `state_dir` | Where this machine keeps its copy of the cluster document, usually `/var/lib/djbod`. `join` writes `cluster.json` here. It does not create the directory's other contents. |
+| `devices` | The directories on this machine's disks. Each must exist and be empty before `join`. |
+| `bootstrap_peers` | Addresses of other nodes to ask at every startup for a newer cluster document. You maintain this list. See below. |
+
+`bootstrap_peers` is not the membership list, and nothing in the node
+updates it. Membership, which nodes exist and at which addresses, is the
+cluster document. `join` updates that document and saves the new copy
+into `state_dir`. `bootstrap_peers` is only a local hint used when the
+process starts: the node loads the document it already has, then asks
+each peer in the list, and if a peer has a higher document version it
+adopts that copy before it serves. A peer that does not answer is logged
+and skipped. A peer from a different cluster is refused and the node
+does not start.
+
+An empty list means the node starts from its own `cluster.json` and does
+not ask anyone. That is fine for the first node on the day you create
+the cluster. It is a problem when this machine's copy is behind the
+others. Ordinary changes already require every node to answer, so a
+machine that is simply switched off usually blocks the change rather
+than missing it. The copies can still diverge: a proposal that was
+applied to some nodes and then failed, or a node that starts from a
+file the others have moved past. That node serves clients from the old
+copy. The other nodes refuse its node-to-node greeting, `djbod status`
+fails with `DocumentVersionMismatch` and names the node and the two
+version numbers, and `djbod cluster show` still prints, with each node's
+version in the table. `djbod cluster sync` copies the highest version
+onto the nodes that are behind. A `bootstrap_peers` entry that was up
+would have done that copy at startup, and `status` would not have
+failed. Write the other machines' addresses into the file yourself, on
+each machine, and keep the file updated when you add or retire a
+server. `join --peer` is the one-time address used to enter the
+cluster. It is not copied into `bootstrap_peers`.
+
+On nas1 (`10.0.0.1`), three disks, the file is:
 
 ```toml
 node_id = "5f0c1d2e-8a9b-4c3d-9e1f-2a3b4c5d6e7f"
@@ -127,8 +173,20 @@ with `InsufficientDevices` until the others have joined. That refusal
 stores nothing. It is the expected state of a half-built cluster, not
 a fault in the disks.
 
-On `nas2` and `nas3`, with their own `node_id`, `listen`, and device
-paths, and with the first node running:
+On nas2 the same five fields are a different file, at
+`/etc/djbod/node.toml` on that machine:
+
+```toml
+node_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"   # a new uuidgen, not nas1's
+listen = "10.0.0.2:5263"
+state_dir = "/var/lib/djbod"
+devices = ["/mnt/disk0/djbod", "/mnt/disk1/djbod", "/mnt/disk2/djbod"]
+bootstrap_peers = ["10.0.0.1:5263", "10.0.0.3:5263"]
+```
+
+nas3 is the same shape again: its own `node_id`, `listen` of
+`10.0.0.3:5263`, its own disk paths, and `bootstrap_peers` listing nas1
+and nas2. With nas1 running:
 
 ```sh
 djbod-node join --config /etc/djbod/node.toml \
@@ -136,13 +194,25 @@ djbod-node join --config /etc/djbod/node.toml \
 djbod-node run --config /etc/djbod/node.toml
 ```
 
-`join` fetches the document, initialises each empty device directory,
-and proposes a new document version that lists this node and its
-devices. Every node already in the cluster has to accept it. The
-command prints the new document version and the new device ids, and
-tells you to start the node with the same config file.
+`join` reads that file. It fetches the document from `--peer`,
+initialises each empty device directory named in `devices`, and proposes
+a new document version that lists this `node_id` and those devices.
+Every node already in the cluster has to accept it, so each of those
+nodes has to be running. Start nas2 with `djbod-node run` before you
+join nas3. A member that has joined and is not running cannot accept
+the next proposal, and that `join` fails with `cannot reach` and
+`Connection refused`. The same rule applies to later membership
+changes. The command prints the new document version and the new device
+ids, and tells you to start the node with the same config file. It does
+not edit `node.toml`. A `join` that stops at `cannot reach` has not
+added the machine; start the node that was down and run `join` again
+before `run`.
 
-From an administration machine:
+From an administration machine, point `--node` at the machine you want
+coordinating, then the others as fallback. The first that answers does
+the encoding and the fan-out. On a cluster with one fast server and two
+small ones, or with a machine in another region, the fast local server
+belongs first. [Concepts](concepts.md#which-node-coordinates) is why.
 
 ```sh
 export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263

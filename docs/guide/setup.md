@@ -80,7 +80,10 @@ devices /path/a and /path/b are on the same filesystem; two configured devices m
 Create the cluster. `--k 2 --m 1` needs three devices and survives one
 lost shard. Four directories leave one spare, which you will want as
 soon as you try to drain a disk. The defaults, if you omit `--k` and
-`--m`, are `3+1`.
+`--m`, are `3+1`. `--k 1 --m 0` is legal: one copy, no parity, and a
+single device is enough to store and read. [Concepts](concepts.md#objects-shards-and-k--m)
+is the rest of the range, and what a later change of scheme does to
+objects that were written as `1+0`.
 
 ```sh
 target/release/djbod-node init-cluster \
@@ -141,9 +144,17 @@ works. `--json` on `get-cluster-id` adds the name and the build.
 
 `status` needs both variables. It prints who answered, then one row per
 device: id, label, owning node, that node's build, state, filesystem
-total, and free space after headroom. Several addresses may be given,
-comma-separated. They are tried in order, and a request moves to the
-next when one fails:
+total, and free space after headroom. The node that answered is the
+coordinator: it does the encoding, the fan-out, and the checksums for
+the requests this client sends. Several addresses may be given,
+comma-separated. They are tried in order, and the first that accepts
+the connection is the coordinator. A later failure moves to the next
+address in the list. Put a machine that has the CPU, the RAM, and a
+wide path to the disks first. A small board, or a machine in another
+region, can stay in the list so the client has somewhere to go, and it
+should not be the one that decodes every large read.
+[Concepts](concepts.md#which-node-coordinates) is the full account,
+including why the block size changes how much RAM that machine needs.
 
 ```sh
 export DJBOD_NODE=127.0.0.1:9,127.0.0.1:5263
@@ -238,10 +249,14 @@ says exactly which file, because `repair` names it and then stops.
 ## The web UI on a trial
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264
+target/release/djbod-ui --listen 127.0.0.1:5264 --bootstrap-node 127.0.0.1:5263
 ```
 
-It uses `DJBOD_NODE` and `DJBOD_CLUSTER`. Open `http://127.0.0.1:5264/`.
+`--bootstrap-node` is the ordered list of nodes to try, the same choice
+as `djbod --node`. `DJBOD_BOOTSTRAP_NODE` is its variable. `--node` and
+`DJBOD_NODE` still work and print a warning. It also needs
+`DJBOD_CLUSTER`. Open `http://127.0.0.1:5264/`.
+
 The page has no login. Leave it on localhost. [Day to day](day-to-day.md#the-web-ui)
 describes what the page can and cannot do.
 
@@ -279,10 +294,17 @@ explicitly. When `listen` is a wildcard, set `advertise` to the address
 other nodes should dial. The cluster document stores the advertised
 address, not the wildcard.
 
-`bootstrap_peers` is consulted at startup. A node that was off while the
-document changed adopts a newer copy from a peer. The first node, the
-one you ran `init-cluster` on, can leave the list empty until other
-machines exist. After that, list the other machines.
+`bootstrap_peers` is consulted at startup and is not filled in by
+`join`. The node loads its own `cluster.json`, then asks each address
+in the list, and adopts a copy whose document version is higher. A peer
+that does not answer is logged and skipped. The first node, the one you
+ran `init-cluster` on, can leave the list empty until other machines
+exist. After that, list the other machines. An empty list on a node
+whose saved document is behind the others makes it serve the old copy;
+`status` then fails with `DocumentVersionMismatch` until `djbod cluster
+sync` or a restart with a peer that has the new copy.
+[Deployment](deployment.md#three-servers) is the same field on several
+machines.
 
 `temporary_max_age_secs` defaults to 3600. Temporary files older than
 that are deleted when the node starts. `stream_idle_timeout_secs`
@@ -292,10 +314,17 @@ long is abandoned.
 `init-cluster` also takes the scheme and the limits. Defaults are `k` 3,
 `m` 1, block size 1048576, headroom 0.05, maximum key 16384 bytes,
 maximum object 1 TiB (`1099511627776`), maximum user metadata 10 MiB
-(`10485760`). `--name` is optional. User metadata is carried by the
-Rust and Python clients. `djbod put` records a content type and does not
-attach metadata of its own. The metadata limit still applies to clients
-that set it.
+(`10485760`). `--block-size` is a multiple of 4096 from 64 KiB to 64
+MiB. Raising it multiplies the memory the coordinating node uses for
+each stripe, up to the frame limit that stops the block at 64 MiB.
+[Concepts](concepts.md#block-size) is that cost. `--headroom` is the
+fraction of each filesystem that placement will not fill, from 0 to
+0.5. There is no later command to change it.
+[Concepts](concepts.md#headroom) is what the fraction is subtracted
+from, and how it stacks with the filesystem's own reserve. `--name` is
+optional. User metadata is carried by the Rust and Python clients.
+`djbod put` records a content type and does not attach metadata of its
+own. The metadata limit still applies to clients that set it.
 
 `djbod cluster-config` prints the document as JSON, which is the way to
 see the limits, the headroom, and the transport that are in force.

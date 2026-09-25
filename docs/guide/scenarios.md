@@ -17,44 +17,69 @@ second one shows the `LOST` line.
 
 The disk failed, the filesystem is not mounted, or the device directory
 was replaced by an empty mount point. The node process is still running
-and its other disks are fine.
+and its other disks are fine. If the node was started while the path was
+already empty, its log says the path has no identity file and that the
+device was not opened.
 
-`djbod status` shows that device as `active, unavailable`, with zero
-total and zero free, and prints:
-
-```text
-1 device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed)
-```
-
-The document still says `active`. You have not decided anything yet.
-
-A `get` of an object that had a record on that disk fails, rather than
-returning reconstructed bytes:
+`djbod status` still exits 0. That device is `active, unavailable`, with
+zero total and zero free. Standard error says:
 
 ```text
-error: RecordsInconsistent: 2 record copies found, 3 expected (revision 0)
+1 device is unavailable: its node cannot read it (disk failed, not mounted, or destroyed) or cannot be reached
 ```
 
-`djbod repair <key>` also fails, with `DeviceUnavailable` and the path,
-while the disk is still a member. Repair will not rebuild onto other
-disks until the membership change says the disk is gone.
+Two or more devices use `devices are` and `their nodes`. There is no
+`node ... unreachable` line when the process itself answered. The
+document still says `active`. You have not decided anything yet.
 
-A `put` can succeed by avoiding the disk. It stores the object, names
-the device, and exits 2. `djbod contents` prints `unavailable` for that
-device and continues with the others. `djbod scrub` reports the device
-once, reads nothing from it, and exits 3:
+A `get` of an object that still has `k` agreeing record copies, and at
+most `m` shards on that disk, writes the correct bytes and exits 2. It
+names the block it reconstructed and the record copy it could not read:
 
 ```text
-device unavailable: device at /mnt/disk2/djbod is unavailable: its directory or identity file cannot be read
-...
-incomplete, no damage seen; run it again
-1 device(s) unavailable, not checked: restore or retire them, then run again
+photos/cat.bin: 1 block reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair photos/cat.bin` runs
+  stripe 0  shard 1  device <uuid>  unavailable, perhaps for now: ...
+photos/cat.bin: 1 of 3 record copies could not be read; the record was trusted on the copies that agree, and `djbod repair photos/cat.bin` rewrites the missing ones
+  record copy  device <uuid>  unavailable, perhaps for now: ...
 ```
 
-If the disk might come back, mount it and leave the document alone. The
-next `status` shows it `active` again, and the node logs `device
-available again`. Reads of the objects that failed start working,
-because the missing record copy is back. Do not format the disk.
+`head` prints the record and the same missing-copy line, and exits 2.
+`djbod repair <key>` fails with `DeviceUnavailable` and the device id
+while the disk is still a member. Repair writes a replacement back onto
+the device the record names. It does not choose another disk until the
+membership change says this one is gone.
+
+A `put` skips the disk. When `k + m` other devices are usable it stores
+the object, names the disk, and exits 2. When the cluster has only
+`k + m` devices and one of them is dead, the write stores nothing:
+
+```text
+error: InsufficientDevices: 2 active devices have <n> bytes free; 3 are needed; 1 active device unavailable: <uuid>
+```
+
+The numbers are your scheme and your free space. `djbod contents` prints
+`unavailable` for that device, continues with the others, and exits 0.
+`djbod scrub` reports the device, reads nothing from it, and exits 3.
+Damage and the unchecked device are counted apart, and the run ends by
+saying what the gap costs:
+
+```text
+device unavailable: not opened at startup: no configured path holds this device (SPEC 5.6)
+0 findings; incomplete, no damage seen; run it again
+1 device unavailable, not checked: restore or retire them, then run again
+WARNING: data at higher risk: versions with a shard on an unavailable device: <n> of <n>
+  device <uuid>: <n> version
+  <n> version can lose no further shard: one more device out makes it unreadable
+  no version is unreadable now
+restore the device, or retire it with `djbod cluster remove-device --force` and run `djbod scrub --repair` to rebuild what it held
+```
+
+If the node had the device open and the identity file becomes readable
+again, the next `status` shows the device `active` and the log says
+`device available again`. Reads that were exiting 2 go back to exiting
+0, because the missing copy is back. If the node was started while the
+path was empty, it never opened the device; mount the disk and restart
+that node. Do not format the disk.
 
 If the disk is dead:
 
@@ -63,36 +88,46 @@ djbod cluster remove-device nas1-bay2 --force
 ```
 
 The command prints whether the node can still read the device, how many
-active devices would remain, and how many shards `m` allows you to lose.
-It then waits for you to type the device id. A wrong id changes nothing.
-`--yes` skips the prompt for a script. With `--json` the same facts are
-one JSON object before the confirmation.
+shards `m` allows you to lose, and a warning when the devices that would
+remain are fewer than `k + m`. It then waits for you to type the device
+id. A wrong id changes nothing. `--yes` skips the prompt for a script.
+With `--json` the same facts are one JSON object before the confirmation.
 
 ```text
 device <uuid> on node <uuid> is active and its node cannot read it
 marking it removed loses every shard on it: versions with at most m = 1 shards there are rebuilt from the others by `djbod scrub --repair`; any with more are lost. Nothing is checked or moved now.
+warning: 2 active devices would remain and every version needs 3; nothing can be rebuilt until a device is added
 type the device id to mark it removed:
 ```
 
-After you confirm, the device is `removed` in the document and nothing
-has been copied yet. Rebuild:
+The warning is omitted when a spare device remains. After you confirm,
+the device is `removed` in the document and nothing has been copied yet.
+`status` keeps listing it, as `removed`, with no free space and without
+the `unavailable` suffix. Rebuild:
 
 ```sh
 djbod scrub --repair
 ```
 
-For each object that had a shard there, the scrub reports
-`RecordsInconsistent` (fewer record copies than the record listed) and
-then `repaired <key>: 1 shard(s) rewritten`. A clean finish is exit 0
-and the line `complete, everything found was repaired`. Then:
+The scrub reports each shard that sat on the removed device as a shard
+on a removed device, then tries to rebuild it onto a device that does
+not already hold a shard of that object. With room, the line is
+`repaired <key>: 1 shard rewritten` (or `shards` when several were
+rewritten). A clean finish is exit 0 and `complete, everything found
+was repaired`. Without room the repair of that key fails with
+`InsufficientDevices`, the summary says some damage could not be
+repaired, and the command also prints `scrub incomplete: WriteFailed`.
+The exit code is 2. Add a device and run `scrub --repair` again; the
+removed device's shards are still the ones to rebuild.
+
+Then:
 
 ```sh
 djbod get <a key that lived on that disk> /tmp/check.bin
 djbod scrub
 ```
 
-`get` should exit 0. `scrub` should exit 0. `status` shows the device
-as `removed` until you restart the node.
+After a rebuild that had room, `get` exits 0 and `scrub` exits 0.
 
 Take the path out of that machine's `devices` list and restart the node.
 An empty directory left at the old path is tolerated: the node logs that
@@ -122,12 +157,14 @@ corrupt, or the `.shard` file has been deleted.
 `djbod get` writes the correct bytes and exits 2:
 
 ```text
-photos/cat.bin: 1 block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair photos/cat.bin` runs
+photos/cat.bin: 1 block reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair photos/cat.bin` runs
   stripe 0  shard 0  device <uuid>  checksum mismatch
 ```
 
 A deleted shard file uses the same shape with the fault `missing`.
-`head` still works. Repair that key:
+`head` still works. A bad parity shard that this read did not have to
+open leaves `get` at exit 0; `repair` and `scrub` still see it. Repair
+that key:
 
 ```sh
 djbod repair photos/cat.bin
@@ -135,7 +172,8 @@ djbod get photos/cat.bin /tmp/check.bin
 ```
 
 Repair prints each shard as `intact` or as the damage it found, and
-`-> rewritten` on the ones it replaced. The following `get` exits 0.
+`-> rewritten` on the ones it replaced. The last line is `1 shard
+rewritten`, or `N shards rewritten`. The following `get` exits 0.
 The checksum of the file matches the original.
 
 `djbod scrub` finds this before a client does. `djbod scrub --repair`
@@ -166,13 +204,23 @@ With `2+1`, two bad shards is enough. `djbod get` exits 1 and, when the
 output was a file, deletes the partial file:
 
 ```text
-BlockChecksumMismatch: 2 damaged block(s) in stripe 0, 1 usable of 2 needed
+error: fetching photos/two.bin; partial output /tmp/two.bin removed: BlockChecksumMismatch: 2 damaged blocks in stripe 0, 1 usable of 2 needed; first: ChecksumMismatch { stored: BlockChecksum(<hex>), computed: BlockChecksum(<hex>) }
+  key:     photos/two.bin
+  stripe:  0
 ```
 
-`djbod repair` exits 1 and names the stripe and the damaged shard
-indexes. It does not write a replacement. The object is gone unless you
-have another copy outside the cluster, or `djbod-recover` can see `k`
-intact shard files on disks you can still mount. Deleting the key
+`djbod repair` exits 1 and does not write a replacement:
+
+```text
+error: BlockChecksumMismatch: stripe 0 has 1 usable blocks of 2 needed; 2 damaged shards: [0, 1]
+  key:     photos/two.bin
+  stripe:  0
+```
+
+The wording `1 usable blocks` is what the command prints. The object is
+gone unless you have another copy outside the cluster, or
+`djbod-recover` can see `k` intact shard files on disks you can still
+mount. Deleting the key
 succeeds even in this state, if you want the damaged version gone:
 
 ```sh
@@ -197,7 +245,7 @@ djbod head photos/rec.bin
 ```
 
 Repair then succeeds. When the shard data was fine, the report can say
-`0 shard(s) rewritten` and still have restored the record. `head`
+`0 shards rewritten` and still have restored the record. `head`
 showing the key again is the check. `djbod scrub` should then exit 0.
 
 If two intact copies of the same revision disagree with each other,
@@ -217,8 +265,10 @@ Schedule the first form. Treat a non-zero exit as the alert. The second
 form is what you run after you have read the findings, or from a job
 that is allowed to rewrite data. An unavailable device makes the exit
 code 3 or 4 until you restore the disk or retire it. A node that does
-not answer fails the scrub with `NodeUnreachable` the same way a `get`
-fails. Scrub is not a way to work around a missing machine.
+not answer is reported in the scrub (`could not be scrubbed`), the
+cross-node checks stop, and the exit code is 3 when no damage was seen.
+Scrub is not a way to work around a missing machine: `repair` from that
+run still needs every node.
 
 ## Add a device
 
@@ -234,7 +284,7 @@ djbod-node add-device --config /etc/djbod/node.toml --path /mnt/disk4/djbod
 ```
 
 The command prints the new document version and `restart the node to
-serve the new device(s)`. A path that is not in the configuration is
+serve what was added`. A path that is not in the configuration is
 refused. A device that is already in the document is refused. A
 directory that is not empty is refused.
 
@@ -256,9 +306,9 @@ With exactly `k + m` devices, marking one `draining` and running drain
 exits 2 without moving anything:
 
 ```text
-draining <uuid> on node <node>: 2 version(s), 18.4 KiB to move; ... free on 2 active device(s), 3 needed per version
+draining <uuid> on node <node>: 1 version, 13.8 KiB to move; <free> free on 2 active devices, 3 needed per version
 0 moved, 0 skipped, 0 deleted meanwhile
-drain of <uuid> incomplete: InsufficientDevices: 2 active device(s), but every version needs 3; no version has a legal target; add capacity, or pass --partial to move what fits
+drain of <uuid> incomplete: InsufficientDevices: 2 active devices, but every version needs 3; no version has a legal target; add capacity, or pass --partial to move what fits
 ```
 
 The device stays `draining`. Put it back if you are not ready:
@@ -310,9 +360,13 @@ draining for you.
 ## Add a node
 
 A new machine, with its own `node_id`, its own disks mounted, and an
-empty device directory on each. The configuration lists
-`bootstrap_peers` so that later restarts can catch up. With any existing
-node running:
+empty device directory on each. Those five fields go in that machine's
+`node.toml`, which you write yourself. `join` does not create the file
+and does not fill `bootstrap_peers`. The list is there so a later
+restart can adopt a newer cluster document.
+[Deployment](deployment.md#three-servers) is which field is which. Every
+node already in the cluster has to be running, because the proposal is
+accepted by all of them:
 
 ```sh
 djbod-node join --config /etc/djbod/node.toml \
@@ -379,19 +433,43 @@ after its process has exited.
 
 Leave it in the document. While it is down:
 
-- `djbod cluster show` prints the node as `unreachable:` and the reason
-  (`Connection refused` if nothing is listening).
-- `djbod status`, `djbod get`, and `djbod put` exit 1 with
-  `NodeUnreachable` and the node id. This includes objects that have no
-  shard on that machine.
+- `djbod status` exits 0. The node's devices are `active, unavailable`
+  with no free space. Standard error says `1 device is unavailable`
+  (or `N devices are`) and then `node <uuid> unreachable:` with
+  `Connection refused` when nothing is listening.
+- `djbod cluster show` exits 0 and prints `unreachable:` plus the reason
+  in that node's version column.
+- `djbod get` and `djbod head` of an object that still has `k` agreeing
+  copies return the record, name the copy on the down node, and exit 2.
+  `get` also reconstructs a shard that lived there, when `m` covers it,
+  and the bytes are the original ones. An object whose every copy is on
+  the down node fails. When the document's `k + m` is larger than the
+  number of devices out, that failure can be `NotFound`.
+  [Concepts](concepts.md#objects-shards-and-k--m) is when.
+- `djbod list` names the unreadable devices. It exits 0 while fewer than
+  `k + m` devices are out, and exits 2 once that many are out.
+- `djbod put`, `djbod delete`, `djbod repair`, and `djbod contents` exit
+  1 with `NodeUnreachable` and the node id. A write will not place
+  shards, and repair will not rewrite an object, while a node that might
+  hold a copy is silent.
+- `djbod scrub` names the node, stops the cross-node checks, and exits 3
+  when it saw no damage.
 - `djbod identity --node <an address that is up>` still answers.
+- A membership change, including `set-scheme` and the next `join`, fails
+  until the node answers. The document does not move without it.
 
-Start the node again. It adopts a newer document from its bootstrap
-peers if the cluster changed, and the `get` that failed works again
-without `repair`. If `cluster show` then shows different document
-versions, `djbod cluster sync` copies the highest version to every node
-that answers. `sync` exits 2 if any node is still unreachable. It
-prints `updated`, `already current`, or `unreachable` for each.
+Start the node again. It reads its saved document and, when
+`bootstrap_peers` lists a node that is up, adopts a higher document
+version before it serves. A `get` that was exiting 2 because of this
+node goes back to exiting 0 without `repair`.
+
+If the node starts from an older copy, because `bootstrap_peers` was
+empty and the others have moved on, `cluster show` lists both versions
+and `status` fails with `DocumentVersionMismatch` and the two numbers.
+`djbod cluster sync` copies the highest version to every node that
+answers and prints `updated`, `already current`, or `unreachable` for
+each. `sync` exits 2 if any node is still unreachable. Filling in
+`bootstrap_peers` is what makes the next restart do this itself.
 
 Do not force-remove a node you expect to boot. Force-removal drops its
 devices from the document. The disks will not simply rejoin.
@@ -421,10 +499,10 @@ spare device remained on a live node, printed:
 
 ```text
 node <uuid> at 10.0.0.2:5263 does not answer: cannot reach peer 10.0.0.2:5263: I/O error: Connection refused (os error 111)
-it holds 1 device(s); 1 version(s) have shards there
+it holds 1 device; 1 version has shards there
 every one of them can be rebuilt from the other shards (at most m = 1 on the dead node)
-node <uuid> removed (document version 3); rebuilding 1 version(s)
-rebuilt  keep/obj.bin  1 shard(s) placed on other devices
+node <uuid> removed (document version 3); rebuilding 1 version
+rebuilt  keep/obj.bin  1 shard placed on other devices
 1 rebuilt, 0 lost
 ```
 
@@ -435,10 +513,10 @@ A run that removed a node without leaving a free device lost the object
 instead, and exited 2:
 
 ```text
-it holds 2 device(s); 1 version(s) have shards there
+it holds 2 devices; 1 version has shards there
 every one of them can be rebuilt from the other shards (at most m = 1 on the dead node)
-node <uuid> removed (document version 3); rebuilding 1 version(s)
-LOST     keep/obj.bin  InsufficientDevices: 1 shard(s) are on devices no longer in the cluster, but only 0 active device(s) with 6160 bytes free hold no shard of this version
+node <uuid> removed (document version 3); rebuilding 1 version
+LOST     keep/obj.bin  InsufficientDevices: 1 shard is on devices no longer in the cluster, but only 0 active devices with 6160 bytes free hold no shard of this version
 0 rebuilt, 1 lost
 ```
 
@@ -479,27 +557,45 @@ success it moves no data. New writes use the new scheme. The command
 reports how many objects are still on another scheme:
 
 ```text
-scheme is now 1+1 with 1048576 byte blocks (document version 21); new writes use it
-3 object(s) are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them
+scheme is now 1+0 with 1048576 byte blocks (document version 4); new writes use it
+1 object is stored at another scheme and stays readable as it is; `djbod cluster reencode` rewrites it
 ```
 
+Two or more objects use `objects are stored ... as they are`. Zero
+objects prints `every object is at this scheme`. `--k 1 --m 0` is
+accepted. A new `put` then stores one copy, and `head` shows `1+0`.
+
 `--block-size` is optional and must be a multiple of 4096 between 64 KiB
-and 64 MiB. Omit it to keep the current block size.
+and 64 MiB. Omit it to keep the current block size. The coordinator
+holds a stripe of `k` blocks and the `k + m` encoded blocks while it
+writes, so a larger block size is a larger allocation on that machine,
+bounded by the frame limit that stops the block at 64 MiB.
+[Concepts](concepts.md#block-size) is the scaling, and
+[which node coordinates](concepts.md#which-node-coordinates) is why you
+point the client at a machine that can hold it. Existing objects keep
+the block size they were written with until `reencode`, which rewrites
+them at the new size and allocates for that size while it does.
 
 ```sh
 djbod cluster reencode
 ```
 
 This streams each object through the client and writes it back under the
-current scheme. A re-encoded object gets a new version id. The command
-prints one line per object (`2+1 -> 1+1` and the old and new version
-ids) and a total. It is safe to interrupt and run again. A rerun
-rewrites only what is still on the old scheme. Exit 2 means at least
-one object failed. Those lines say why.
+current scheme and block size. The client is the coordinator for each
+object, so the machine in `--node` needs the memory the new block size
+requires. A re-encoded object gets a new version id. The command prints
+one line per object (`2+1 -> 1+0` and the old and new version ids) and a
+total, `N objects examined, N re-encoded, N failed`. It is safe to
+interrupt and run again. A rerun rewrites only what is still on the old
+scheme or the old block size. Exit 2 means at least one object failed.
+Those lines say why.
 
-You can run with a mixture of schemes for as long as you like. `head`
-shows the scheme of the object you asked about, which can differ from
-`cluster-config`.
+Do the reencode before you depend on reads and listings going around a
+failed disk. Until then an object still stored as `1+0` has one copy,
+and a listing that says every key is present can omit it while its
+device is out. `head` shows the scheme of the object you asked about,
+which can differ from `cluster-config` for as long as you leave the
+mixture in place.
 
 ## Change the size limits
 
@@ -549,8 +645,9 @@ djbod-recover extract photos/cat.jpg --out /tmp/cat.jpg \
 
 `list` prints every key and version it can find, the record revision,
 the size, how many shards are present out of how many the record wants,
-and `recoverable` or a reason. The summary line is `<n> version(s), <n>
-not recoverable, <n> problem(s)`. Exit 2 means something was short of
+and `recoverable` or a reason. The summary line is `<n> versions, <n>
+not recoverable, <n> problems`, with `version` and `problem` when the
+count is one. Exit 2 means something was short of
 `k` shards or a file could not be read. A shard whose record is missing
 is listed under the key hash, because the key itself was in the record.
 
