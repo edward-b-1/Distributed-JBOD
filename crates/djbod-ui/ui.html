@@ -1298,7 +1298,7 @@ $('scrub-go').addEventListener('click', async () => {
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
         case 'cross_check_availability': {
           const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
-          logLine(log, `shards available: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
+          logLine(log, `${e.after_repair ? 'shards available after repair' : 'shards available'}: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
           break;
         }
         case 'cross_check_exposure': {

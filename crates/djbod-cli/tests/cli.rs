@@ -1495,11 +1495,12 @@ async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
         err.contains("1 finding in 1 object: 1 shard on a removed device; 1 repaired, 0 failed; complete, everything found was repaired"),
         "{err}"
     );
-    // Counted before the repair: 3+1 with one shard lost.
+    // Counted as the run leaves it: the lost shard was rebuilt.
     assert!(
-        err.contains("shards available: 1 object with 3 of 4 (readable, none to spare)"),
+        err.contains("shards available after repair: 1 object with 4 of 4"),
         "{err}"
     );
+    assert!(!err.contains("scrub incomplete"), "{err}");
     assert!(
         err.contains("complete, everything found was repaired"),
         "{err}"

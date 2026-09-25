@@ -638,12 +638,15 @@ pub enum ScrubEvent {
     /// Every version checked, counted by how many of its shards are
     /// available against how many it has (20.1.2.2): a shard is not
     /// available when its device is unread or removed, its file is
-    /// missing, or the node's own scrub found it damaged. Sent once when
-    /// the cross-node phase ends, whatever it found: the answer to "what
-    /// state is my data in" in one line.
+    /// missing, or the node's own scrub found it damaged. Sent once at
+    /// the end of the run, whatever it found, and after the repairs of a
+    /// `--repair` run, counting each repaired version as whole: the
+    /// answer to "what state is my data in" in one line.
     CrossCheckAvailability {
         versions_checked: u64,
         versions: Vec<ShardAvailability>,
+        /// Whether the count follows the run's repairs.
+        after_repair: bool,
     },
     /// What the devices the merge could not read cost (20.1.2.2, 5.6),
     /// sent once when the cross-node phase ends with any device unread.

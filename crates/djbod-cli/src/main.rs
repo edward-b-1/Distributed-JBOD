@@ -1079,11 +1079,22 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         counted(unavailable_devices, "device", "devices")
                     );
                 }
-                if let Some(error) = &end.error {
+                // A stream that ended only because repairs failed is a
+                // complete run (20.1.2.3), and the verdict has the count.
+                if let Some(error) = end
+                    .error
+                    .as_ref()
+                    .filter(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed)
+                {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
                 }
-                if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = &availability {
-                    eprintln!("{}", describe_availability(versions));
+                if let Some(ScrubEvent::CrossCheckAvailability {
+                    versions,
+                    after_repair,
+                    ..
+                }) = &availability
+                {
+                    eprintln!("{}", describe_availability(versions, *after_repair));
                 }
                 if let Some(ScrubEvent::CrossCheckExposure {
                     unread,
@@ -1767,9 +1778,17 @@ fn describe_exposure(
 /// Every version checked by how many of its shards are available (SPEC
 /// 20.1.2.2), against its scheme: whole, readable with so many to
 /// spare, or unreadable.
-fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -> String {
+fn describe_availability(
+    versions: &[djbod_proto::message::ShardAvailability],
+    after_repair: bool,
+) -> String {
+    let label = if after_repair {
+        "shards available after repair"
+    } else {
+        "shards available"
+    };
     if versions.is_empty() {
-        return "shards available: no version checked".to_string();
+        return format!("{label}: no version checked");
     }
     let parts: Vec<String> = versions
         .iter()
@@ -1795,7 +1814,7 @@ fn describe_availability(versions: &[djbod_proto::message::ShardAvailability]) -
             )
         })
         .collect();
-    format!("shards available: {}", parts.join(", "))
+    format!("{label}: {}", parts.join(", "))
 }
 
 /// The devices a listing went without (SPEC 15.1) and what that means
