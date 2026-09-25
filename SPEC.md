@@ -1798,10 +1798,12 @@ coordinator, and those nodes send to each other. Every response is either
   document version, coordinator node
   UUID, every node asked with whether it answered, the build it
   reported if so (6.2.6.4) and why not if not, and for every device in
-  the cluster: UUID, owning node, state, whether its node can read it
-  (5.6), total bytes, free bytes. Implemented by broadcasting
-  `LocalStatus`; a node that cannot be reached does not fail it, and its
-  devices are listed from the document as unavailable with no space.
+  the cluster document, removed ones included (18.2.1): UUID, owning
+  node, state, whether its node can read it (5.6), total bytes, free
+  bytes. Implemented by broadcasting `LocalStatus`; a node that cannot
+  be reached does not fail it, and its devices are listed from the
+  document as unavailable with no space. Whether to show removed devices
+  is the reader's choice, not the report's.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and

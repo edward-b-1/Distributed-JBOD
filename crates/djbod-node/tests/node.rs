@@ -1072,4 +1072,32 @@ async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
     assert_eq!(write.unavailable[0].device, dead);
     assert_eq!(write.unavailable[0].node, reopened.id());
     assert!(!dead_root.exists());
+
+    // Retired with --force (18.2.1.1), the never-opened device stays in
+    // the status as removed, like any other device in the document.
+    let (document, changed) = djbod_client::admin::remove_device_forced(
+        &djbod_node::transport::Connector::plain(),
+        addr,
+        reopened.cluster_id(),
+        dead,
+    )
+    .await
+    .expect("forced removal");
+    assert!(changed);
+    assert_eq!(
+        document.device(dead).map(|d| d.state),
+        Some(DeviceState::Removed)
+    );
+    let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
+        .await
+        .expect("connect");
+    match conn.request(Request::Status).await.expect("status") {
+        Response::Status { devices, .. } => {
+            assert_eq!(devices.len(), 4, "{devices:?}");
+            let retired = devices.iter().find(|d| d.device == dead).expect("listed");
+            assert_eq!(retired.state, DeviceState::Removed);
+            assert!(!retired.available);
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
 }

@@ -332,14 +332,21 @@ async fn local_status(node: &Arc<Node>) -> Result<Response, Failure> {
             free_bytes: space.free_bytes,
         });
     }
-    // Listed for this node but not opened (5.6): shown, with nothing free.
-    for id in node.unavailable_devices() {
+    // Listed for this node but not opened (5.6): shown, with nothing
+    // free, whatever the state. A removed device that was never opened
+    // is still a device in the document (18.2.1), and the status lists
+    // every one of those; hiding it is the reader's choice.
+    for entry in document
+        .devices
+        .iter()
+        .filter(|d| d.node == node.id() && node.device(d.id).is_none())
+    {
         devices.push(DeviceStatus {
-            device: id,
+            device: entry.id,
             node: node.id(),
-            state: state_of(id),
+            state: entry.state,
             available: false,
-            label: document.device(id).and_then(|d| d.label.clone()),
+            label: entry.label.clone(),
             node_label: node_label.clone(),
             total_bytes: 0,
             free_bytes: 0,
