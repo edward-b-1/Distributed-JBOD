@@ -1597,7 +1597,7 @@ fn describe_unread(page: &djbod_client::ListPage) -> String {
     let devices: Vec<String> = page
         .unread
         .iter()
-        .map(|u| format!("{} on node {}", u.device.0, u.node))
+        .map(|u| format!("{} on node {}", u.device.0, u.node.0))
         .collect();
     let consequence = if page.complete {
         "every key is still listed, since fewer than k+m devices are out"

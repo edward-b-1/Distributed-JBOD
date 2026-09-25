@@ -306,7 +306,7 @@ async fn lookup_reachable(node: &Arc<Node>, key_hash: KeyHash) -> Result<Lookup,
                         device,
                         (
                             ErrorCode::DeviceUnavailable,
-                            format!("device {device} is unavailable on node {target} (5.6)"),
+                            format!("{device} is unavailable on {target} (5.6)"),
                         ),
                     );
                 }
@@ -335,7 +335,7 @@ async fn lookup_reachable(node: &Arc<Node>, key_hash: KeyHash) -> Result<Lookup,
         if device.state == DeviceState::Removed {
             found.unread.entry(device.id).or_insert((
                 ErrorCode::DeviceUnavailable,
-                format!("device {} was removed from the cluster (18.2.1)", device.id),
+                format!("{} was removed from the cluster (18.2.1)", device.id),
             ));
         }
     }
@@ -674,7 +674,7 @@ async fn newest_readable_version(
             };
         } else if document.device(copy.device).is_none() {
             copy.fault = RecordCopyFault::Unavailable {
-                reason: format!("device {} is not in the cluster document", copy.device),
+                reason: format!("{} is not in the cluster document", copy.device),
             };
         }
     }

@@ -568,6 +568,15 @@ impl IntoResponse for ApiError {
                     | ErrorCode::ObjectTooLarge
                     | ErrorCode::MetadataTooLarge
                     | ErrorCode::ProtocolViolation => StatusCode::BAD_REQUEST,
+                    // The cluster answered and refused one object because a
+                    // node or device it needs is out (9.4.4, 11.4): a
+                    // refusal by the store, not a gateway failure, which is
+                    // what a 502 means to the page.
+                    ErrorCode::NodeUnreachable | ErrorCode::DeviceUnavailable
+                        if detail.key.is_some() =>
+                    {
+                        StatusCode::CONFLICT
+                    }
                     _ => StatusCode::BAD_GATEWAY,
                 };
                 (status, json!({ "error": detail }))
