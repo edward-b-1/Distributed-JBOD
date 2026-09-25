@@ -1,4 +1,7 @@
-# Changelog
+# Development history to 0.2.0, summarised
+
+This file summarises the whole development history up to 0.2.0 in one section.
+`CHANGELOG.md` is the commit-by-commit record.
 
 All notable changes to Distributed-JBOD are recorded in this file.
 
