@@ -1,3 +1,193 @@
+## [e88bb62] - 2026-09-20
+
+Pull request #101: Fix the title on the unhyphenated inline lockups
+
+### Fixed
+
+- The unhyphenated inline lockups carried the hyphenated `<title>`, so their accessible name contradicted the artwork. `inline_src` in `docs/brand/build.sh` had hardcoded the hyphenated title for all four inline lockups and now takes the title as an argument alongside the joiner, so the two spellings cannot drift apart again.
+
+## [50c4936] - 2026-09-20
+
+Pull request #98: docs: add six alternative logo concepts under docs/brand/concepts
+
+### Added
+
+- Six exploratory logo directions under `docs/brand/concepts`, none wired into the application: Mosaic Pool, Lattice, Stripe D, Bunch of Disks, Block Hyphen and Erasure D, each with standalone marks and lockups for light and dark, Inkscape exports, the editable design boards, and a `README.md` describing each concept, its accent colour and the shared type and colour system.
+
+## [ddb12cc] - 2026-09-20
+
+Pull request #99: Add one-line lockups, hyphenated and not
+
+### Added
+
+- One-line lockups in both spellings of the name, `Distributed-JBOD` matching the repository name and `Distributed JBOD`, each with a dark-surface variant, and a contact sheet of all four. The mark sits at 76 px against a 48 px setting, optically centred on the cap height rather than the em box, and the type is converted to outlines as with the rest of the kit.
+- Generation of the new lockups in `build.sh`, so the whole kit still rebuilds from scratch with one command and a rebuild reproduces every pre-existing asset byte for byte, with the brand `README.md` gaining rows for the new files, a note on choosing between the inline and two-line lockups, and a minimum width of 200 px for the inline one.
+
+## [ec9094c] - 2026-09-20
+
+Pull request #97: Docs: the design comparisons behind the UI's choices
+
+### Added
+
+- The four comparison pages shown during the interface work, saved under `docs/design` so the decisions and the alternatives they beat are on record: how the sections are presented, how the page says whether nodes agree, how to get from the card to each node, and one family of status marks. Each page is self-contained HTML with no build step, drawn in the console's own colour tokens with light and dark side by side, and the `README.md` there lists the question and the decision for each.
+
+## [617b7e2] - 2026-09-20
+
+Pull request #96: UI: status marks are shapes, drawn in CSS
+
+### Changed
+
+- One family of status marks across the page, drawn in CSS from the existing `ok`, `bad`, `warn` and `state` classes: a dot for pass or active, a square for fail, a triangle for warning or draining, and a ring for off or removed, in green, red, amber and grey, so the shape carries the meaning as well as the colour.
+
+### Removed
+
+- The font glyphs used until now, which a font draws inconsistently, and the health card's typed check, exclamation and identity marks.
+
+## [97da9e5] - 2026-09-20
+
+Pull request #95: Use the brand kit: lockup in the header and README, favicon and app icon
+
+### Changed
+
+- The header shows the horizontal lockup at 34 px high, with the on-dark variant under a dark colour scheme, in place of the mark beside the typed name.
+- The browser tab uses the 2 by 2 reduced favicon meant for 16 to 24 px, with a 32 px PNG as the fallback for browsers without SVG favicons, and the 256 px application icon as the touch icon for home screens.
+- The `README.md` opens with the lockup, in its dark variant under GitHub's dark scheme, instead of the mark at the right.
+
+### Removed
+
+- The second copy of the mark under `crates/djbod-ui/icon`, since the files are embedded from `docs/brand` at build time.
+
+## [354db81] - 2026-09-20
+
+Pull request #94: Add a logo, brand kit, and new app icon
+
+### Added
+
+- `docs/brand`, holding the mark, the horizontal and stacked lockups for light and dark surfaces, one-colour variants, reduced marks for small sizes, an application icon and PNG exports from 16 px to 1024 px, with a `README.md` covering the palette, the clear space and the minimum sizes. The mark is four columns of pill-shaped slabs, where a column is a node and a slab a chunk of capacity, the columns are deliberately of different heights, and one orange slab per column steps diagonally across the array for the parity striped over every node.
+- `docs/brand/gen.awk` holding the geometry and `docs/brand/build.sh` driving Inkscape to regenerate every asset, with the type converted to outlines so the SVG files render without Segoe UI installed.
+
+### Changed
+
+- The application icon is the new mark in place of the placeholder node graph, keeping the light and dark pair at 256 by 256 on transparent.
+
+## [c1374bb] - 2026-09-20
+
+Pull request #93: UI: the Reachable column says ping ok or ping failed
+
+### Changed
+
+- The nodes table's Reachable column reads "ping ok" and, on a failure, "ping failed" with the error, in place of "answers" and "unreachable". The check is unchanged: the interface server opens a connection to the node and fetches its document on every page refresh. No age is shown, because the check runs only on refresh and would always equal the refresh time in the header.
+
+## [8085a6f] - 2026-09-20
+
+Pull request #92: UI: one nodes table with every check and the node's devices
+
+### Changed
+
+- One nodes table combines the plain table and the closed health-checks table, with columns for the node, its addresses, whether it answers, its document version and what to do when it is behind, its build, its Transport Layer Security mode, and its devices with an indicator, the count, the free space and the active and draining counts. Each check cell is a pass, warning or fail mark with the value it judged and, when not a pass, why.
+
+## [71ba68b] - 2026-09-20
+
+Pull request #89: UI: a Nodes tab for the nodes and devices tables; the Overview is the summary
+
+### Changed
+
+- The Overview becomes the summary page, holding the health card and the tiles alone, with the nodes table and its Sync button and the devices table moved unchanged to a new Nodes tab between Overview and Objects. Its rail count shows the number of nodes, or the number off in red when any node is unreachable or at another document version.
+- Nothing is shown in two places: the card summarises and the Nodes tab holds the detail, with the card's Sync link still running the same sync.
+
+## [04f1a8d] - 2026-09-20
+
+Pull request #91: UI: the Nodes and Devices tiles open the Nodes tab
+
+### Changed
+
+- The Nodes and Devices tiles on the Overview are links to the Nodes tab, with an arrow after the label and the accent outline on hover, opening on a click or on Enter. A tile becomes a link only when the tab that holds its detail exists on the page.
+
+## [c2d6341] - 2026-09-20
+
+Pull request #90: UI: a wider sidebar with a collapse toggle
+
+### Changed
+
+- The navigation rail grows from 184 px to 232 px, and a chevron at its foot collapses it to 60 px of icons with each section's label as a tooltip and the counts hidden, remembered per browser. On a narrow screen, where the rail is already a row above the content, the toggle is hidden.
+
+## [102b696] - 2026-09-20
+
+Pull request #83: UI: a health card at the top of the Overview
+
+### Added
+
+- A full-width health card leading the Overview and answering one question, whether all nodes hold the same configuration: green when every node listed in the document answered and holds the document's version; red naming the nodes that do not and the version they hold, with a Sync documents link, or naming the unreachable nodes with their addresses and errors; and amber when the nodes agree but their builds differ, saying to upgrade before the next change to the document (SPEC 6.2.6, 6.2.6.4).
+- A Details link that scrolls to the Nodes table.
+
+## [a823f69] - 2026-09-20
+
+Pull request #85: UI: no document version in the header
+
+### Removed
+
+- The document version from the web interface header, since it is the version held by whichever node answered the status request, which the Nodes table reports per node and the health card judges.
+
+## [ec4d2f2] - 2026-09-20
+
+Pull request #88: README: a typical multi-node deployment
+
+### Added
+
+- A `README.md` section extending the quick start from one node with directories to the intended shape of one node per machine with its own disks: three machines with three disks each, through mounting the disks, the configuration file with the `listen` against `advertise` note, `init-cluster --name home-nas --k 4 --m 2` with what the scheme costs and tolerates, `join` on the others, running each under a service manager, and using the cluster from any machine.
+- A "What to expect" ending: shards are placed per disk without regard to machine, so a machine that is switched off can take three shards of an object with it and, under `4+2`, that object is unreadable until the machine returns, with nothing lost.
+
+## [6131634] - 2026-09-20
+
+Direct commit: README: "Built with Rust", and the alternatives section reworded
+
+### Changed
+
+- The `README.md` tagline says the language, and the comparison section is headed "Alternatives?" with an opening that names the use case: non-uniform nodes with non-uniform storage devices.
+
+## [fb6c470] - 2026-09-20
+
+Pull request #87: README: why not MinIO, Garage, SeaweedFS, or Ceph
+
+### Added
+
+- A `README.md` section stating the job Distributed-JBOD is built for, then one paragraph each on MinIO, Garage, SeaweedFS and Ceph saying what each is good at and why it does not fit that job, the bare-disk recovery story none of them offer, and a plain statement of where they win and that this project is young.
+
+## [dd3238d] - 2026-09-20
+
+Pull request #86: License: AGPL-3.0-only
+
+### Added
+
+- `LICENSE`, the canonical text of the GNU Affero General Public License (AGPL) version 3 from gnu.org, with a License section in the `README.md` stating the terms in plain words, including what the network clause asks of anyone offering a modified djbod to others, and SPEC 21.5 recording the decision and the reasoning.
+- `THIRD-PARTY-NOTICES`, the copyright and licence notices of all 181 dependencies, generated by the new `scripts/third-party-notices.py` from `Cargo.lock` and the local registry. Every dependency is permissive and AGPL-compatible, and their one condition is that these notices travel with binaries. Identical texts are written once with the packages they apply to, and the two packages that ship no licence file have theirs named instead.
+- A `source` link to the repository in the web interface header, the usual way to satisfy the AGPL's requirement to offer remote users the source.
+
+### Changed
+
+- The licence is `AGPL-3.0-only` in the workspace `Cargo.toml`, inherited by every crate; it had said MIT while the repository carried no licence text at all.
+
+## [f2fdc63] - 2026-09-20
+
+Pull request #81: A human-readable cluster name: proposal and implementation
+
+### Added
+
+- `docs/proposals/cluster-name.md` and its implementation: `ClusterDocument.name`, optional and validated with the label rules, so an existing document is valid and unnamed. A node on an older build refuses a document carrying a name, so `set-name` needs every node upgraded first (SPEC 6.2.6.4).
+- `djbod-node init-cluster --name <name>` or `DJBOD_CLUSTER_NAME` at creation, and `djbod cluster set-name <name>` and `set-name --clear` afterwards, through `membership::set_cluster_name`.
+- The name beside the id in `djbod status` and `cluster show`, as `cluster_name` in `--json`, in the web interface header and tab title, in the node's running log line, and in the refusal a node gives a client of another cluster.
+- Optional `cluster_name` on `Status` and on a node's `Hello`, both ignored by older readers, with SPEC 6.2.5.3 added and 6.2.2, 19.1.3 and 19.1.5 listing the new fields.
+
+## [4d8ab2e] - 2026-09-19
+
+Pull request #65: Spec: the web UI's browser link, its checks, and its state
+
+### Added
+
+- SPEC 20.3.2, recording the browser link as it is: plain HTTP, no authentication, localhost by default, with the same-origin check on changes and the host-name check on every request, and the statement that these are the browser's own word and not authentication.
+- SPEC 20.3.3 and open question 21.4, recording the two routes to encrypting and authenticating that link, a Transport Layer Security (TLS) reverse proxy or TLS terminated by `djbod-ui` with a browser client certificate, and deferring the choice to the users-and-permissions item.
+- A note in SPEC 20.3.1 that the web interface is a client like `djbod`, so a `tls` cluster requires it to hold a certificate, and C.4.7 listing what the interface has gained since its first version.
+
 ## [da9ff6b] - 2026-09-19
 
 Pull request #82: UI: shorter mixed-builds banner
