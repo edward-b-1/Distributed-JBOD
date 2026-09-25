@@ -1,3 +1,53 @@
+## [3e55cc5] - 2026-09-25
+
+Pull request #221: docs: versions versus revisions
+
+### Added
+
+- `docs/versions-and-revisions.md`, a one-page note on the two counters a metadata record carries: the version is which body, a ULID per `PUT` with at most one kept per key and reads taking the newest; the revision is where the body sits, counting placements within one version with the body and version id unchanged. It says why a read counts lower-revision copies of the same body as vouchers during an interrupted re-placement and why the highest revision is the one to trust, and distinguishes the two meanings of stale in a report: a `stale` record-copy fault is the same version at an older placement, while a stale version found by the scrub is a different object whose deletion did not finish.
+
+## [92c4f75] - 2026-09-25
+
+Pull request #220: Reads trust k agreeing record copies and report the ones they went without
+
+### Changed
+
+- A read trusts the metadata record on the terms repair always had: the copies that arrived agree, each comes from a listed device, and at least k vouch for the body, counting lower-revision copies of the same body. A read had demanded all k+m copies before it would look at a shard, so one lost device within m made every object with a record copy on it unreadable until each had been repaired (SPEC 9.4.4, 18.4.2, 18.8.1) (#174).
+- Every copy that did not arrive is reported beside the body, as reconstructed blocks are, as `missing`, `stale` or `unavailable`, and nothing is written. Fewer than k copies, or copies that disagree, is still refused, with the first unavailable device's own code when there is one and `RecordsInconsistent` otherwise. A key found nowhere is `NotFound` while fewer than k+m devices are out, and the outage's own code otherwise, since a version may be entirely out of view (SPEC 13.3).
+- Every operation other than a read keeps the strict rule and still fails on an unreachable node: delete, the write collision check, move-shard and the scrub's report.
+- `Device::read_records` tells a missing key directory from a missing device tree and returns `Unavailable` for the latter, so the coordinator can tell a device that is out from a copy that is gone; before, a dead device silently contributed no copies. `LocalLookup` skips such a device and names it in `unread` on every page.
+
+### Added
+
+- `missing_records` on `Response::HeadObject` and on `StreamEnd`, and `unread` on `Response::LocalLookup`, all required (SPEC 19.1.5.2).
+- `missing_records` on `ObjectRead`, with `Client::head` returning an `ObjectRead` rather than a bare record; the same field on the Python `ObjectInfo`, with `DegradedRead` raised for either cause and by `head` too; and `djbod get` and `djbod head` printing the copies on standard error and exiting 2.
+- The same note beside the key in the web interface for a download, verify or head with missing copies that a reconstruction leaves, with the head endpoint returning `missing_records` with the record.
+
+## [b928225] - 2026-09-25
+
+Pull request #216: Web UI: mark an unavailable device with the failure square, not the active dot
+
+### Fixed
+
+- A device whose node cannot read it or cannot be reached takes the failure square whatever the document's state, in the device table and in the record view's shard table, through one `stateCell` helper with a tooltip saying why. The Overview had listed such devices as `active, unavailable` with the green active dot beside them (#215).
+- The Devices card counts the unavailable devices when there are any, and the Nodes table's devices cell says how many are unavailable, in red.
+
+## [dffe86d] - 2026-09-25
+
+Pull request #214: Version 0.2.0
+
+### Changed
+
+- The workspace version goes from 0.1.0 to 0.2.0. Every crate inherits it, the Python package reads it through maturin, and the build id becomes `0.2.0+<commit>`, which `--version`, `identity`, `status` and `cluster show` all print. `Cargo.lock` is refreshed for the workspace members alone, with no dependency changes.
+
+## [ad9bfa3] - 2026-09-25
+
+Pull request #212: Tests spawn the binaries with the developer's DJBOD_* settings removed
+
+### Fixed
+
+- Every spawn of `djbod` in the command-line tests goes through one `djbod_command()` helper that removes every `DJBOD_*` variable, as the node's tests already did, and the offline scrub test does the same. On a machine whose shell had sourced a cluster's settings, `DJBOD_CLUSTER` was exported, `--cluster` took it from the environment as designed, and `get_cluster_id_needs_no_cluster_id` saw the test node's refusal instead of the expected message. The command was behaving correctly; the test was relying on a clean shell.
+
 ## [d0b8133] - 2026-09-25
 
 Pull request #211: Status reports an unreachable node instead of failing (SPEC 19.1.3, 5.6)
