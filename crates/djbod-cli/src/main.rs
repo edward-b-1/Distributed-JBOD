@@ -39,6 +39,7 @@ use djbod_proto::message::{
     RecordCopyFault,
 };
 
+mod names;
 mod tables;
 
 #[derive(Parser)]
@@ -358,7 +359,13 @@ async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Resul
     }
     let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
     options.cluster = cluster;
-    Client::connect(options).await.map_err(client_err)
+    let mut client = Client::connect(options).await.map_err(client_err)?;
+    // The document names devices and nodes for everything this command
+    // prints (6.2.5.1); without it, they are UUIDs, and nothing fails.
+    if let Ok(document) = client.cluster_document().await {
+        names::remember(document);
+    }
+    Ok(client)
 }
 
 /// A node that answers, and the cluster id, for the membership
@@ -408,10 +415,10 @@ fn describe_error(e: &ConnectionError) -> String {
 fn describe_detail(detail: &ErrorDetail) -> String {
     let mut out = format!("{:?}: {}", detail.code, detail.message);
     if let Some(node) = detail.node {
-        out.push_str(&format!("\n  node:    {}", node.0));
+        out.push_str(&format!("\n  node:    {}", names::node_identity(node)));
     }
     if let Some(device) = detail.device {
-        out.push_str(&format!("\n  device:  {}", device.0));
+        out.push_str(&format!("\n  device:  {}", names::device_identity(device)));
     }
     if let Some(key) = &detail.key {
         out.push_str(&format!("\n  key:     {key}"));
@@ -679,7 +686,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             None => println!("cluster   {cluster_id}"),
                         }
                         println!("document  version {document_version}");
-                        println!("answered  by node {}", coordinator.0);
+                        println!("answered  by node {}", names::node_identity(coordinator));
                         println!("build     {}", build_text(&build, djbod_client::BUILD));
                         println!("transport {transport}");
                         println!();
@@ -704,7 +711,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         for n in nodes.iter().filter(|n| !n.reachable) {
                             eprintln!(
                                 "node {} unreachable: {}",
-                                n.node.0,
+                                names::node_identity(n.node),
                                 n.error.as_deref().unwrap_or("no answer")
                             );
                         }
@@ -760,7 +767,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let devices: Vec<String> = write
                     .unavailable
                     .iter()
-                    .map(|u| format!("{} on node {}", u.device.0, u.node.0))
+                    .map(|u| names::device_and_node(u.device))
                     .collect();
                 eprintln!(
                     "{key}: placed around {}: {}; run `djbod status`",
@@ -846,7 +853,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             println!("content-type  {ct}");
                         }
                         for shard in &record.shards {
-                            println!("shard {:<3}     device {}", shard.index, shard.device.0);
+                            println!(
+                                "shard {:<3}     {}",
+                                shard.index,
+                                names::device_and_node(shard.device)
+                            );
                         }
                     }
                 }
@@ -1332,8 +1343,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     };
                     let mut all_moved = true;
                     for device in devices {
-                        all_moved &=
-                            drain_device(&cli, &document, DeviceId(device), *partial).await?;
+                        all_moved &= drain_device(&cli, DeviceId(device), *partial).await?;
                     }
                     if !all_moved {
                         std::process::exit(2);
@@ -1833,7 +1843,7 @@ fn describe_unread(page: &djbod_client::ListPage) -> String {
     let devices: Vec<String> = page
         .unread
         .iter()
-        .map(|u| format!("{} on node {}", u.device.0, u.node.0))
+        .map(|u| names::device_and_node(u.device))
         .collect();
     let consequence = if page.complete {
         "every key is still listed, since fewer than k+m devices are out"
@@ -2169,18 +2179,12 @@ async fn force_remove_node(
     Ok(())
 }
 
-/// Run one drain and print its progress. Returns whether every version
-/// was moved.
 /// Run one drain and print it: names where the document has them, the
 /// full identity where it matters (SPEC 6.2.5.1), and the source beside
 /// every destination so each line says where a shard went from and to.
-async fn drain_device(
-    cli: &Cli,
-    document: &djbod_core::cluster::ClusterDocument,
-    device: DeviceId,
-    partial: bool,
-) -> anyhow::Result<bool> {
-    let source = device_and_node(document, device);
+/// Returns whether every version was moved.
+async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
+    let source = names::device_and_node(device);
     let mut client = connect(cli).await?;
     let mut run = client.drain(device, partial).await.map_err(client_err)?;
     let mut moved = 0usize;
@@ -2212,8 +2216,8 @@ async fn drain_device(
                     } => {
                         println!(
                             "draining {} on node {}: {}, {} to move; {} free on {}, {required_devices} needed per version",
-                            device_identity(document, device),
-                            node_identity(document, node),
+                            names::device_identity(device),
+                            names::node_identity(node),
                             counted(versions as usize, "version", "versions"),
                             human_bytes(shard_bytes),
                             human_bytes(target_free_bytes),
@@ -2230,7 +2234,7 @@ async fn drain_device(
                         moved += 1;
                         println!(
                             "moved    {key}  shard {shard_index}  {source} -> {}{}",
-                            device_and_node(document, destination),
+                            names::device_and_node(destination),
                             if rebuilt { " (rebuilt)" } else { "" }
                         );
                     }
@@ -2256,43 +2260,12 @@ async fn drain_device(
     if let Some(error) = &end.error {
         eprintln!(
             "drain of {} incomplete: {}",
-            device_identity(document, device),
+            names::device_identity(device),
             describe_detail(error)
         );
         return Ok(false);
     }
     Ok(true)
-}
-
-/// A device's full identity for lines that matter (SPEC 6.2.5.1): its
-/// label with the UUID in brackets, or the UUID alone when it has none.
-fn device_identity(document: &djbod_core::cluster::ClusterDocument, id: DeviceId) -> String {
-    match document.device(id).and_then(|d| d.label.as_deref()) {
-        Some(label) => format!("{label} ({})", id.0),
-        None => id.0.to_string(),
-    }
-}
-
-/// A node's full identity, as `device_identity`.
-fn node_identity(document: &djbod_core::cluster::ClusterDocument, id: NodeId) -> String {
-    match document.node(id).and_then(|n| n.label.as_deref()) {
-        Some(label) => format!("{label} ({})", id.0),
-        None => id.0.to_string(),
-    }
-}
-
-/// Where a shard is, as a person reads it: "node devbox4 device
-/// devbox4-d0", each by its label or, without one, its UUID. A device
-/// the document no longer lists has no node to name.
-fn device_and_node(document: &djbod_core::cluster::ClusterDocument, id: DeviceId) -> String {
-    match document.device(id) {
-        Some(entry) => format!(
-            "node {} device {}",
-            document.node_name(entry.node),
-            document.device_name(id)
-        ),
-        None => format!("device {}", id.0),
-    }
 }
 
 fn short(id: &Uuid) -> String {
@@ -2322,7 +2295,10 @@ fn describe_missing_records(
                 format!("unavailable, perhaps for now: {reason}")
             }
         };
-        lines.push(format!("  record copy  device {}  {fault}", copy.device.0));
+        lines.push(format!(
+            "  record copy  {}  {fault}",
+            names::device_and_node(copy.device)
+        ));
     }
     lines.join("\n")
 }
@@ -2357,8 +2333,9 @@ fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> Strin
             )
         };
         lines.push(format!(
-            "  {where_}  shard {}  device {}  {fault}",
-            r.shard_index, r.device.0
+            "  {where_}  shard {}  {}  {fault}",
+            r.shard_index,
+            names::device_and_node(r.device)
         ));
     }
     lines.join("\n")

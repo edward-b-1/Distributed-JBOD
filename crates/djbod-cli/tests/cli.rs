@@ -767,8 +767,14 @@ async fn devices_can_be_labelled_and_named_by_label() {
     let (ok, out, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "draining"]);
     assert!(ok, "{err}");
     assert!(out.contains(&device), "{out}");
-    let (ok, _, err) = djbod(&test, &["cluster", "drain", "nas1-bay1"]);
+    // Output names the device by its label where it has one (6.2.5.1):
+    // the full identity where it matters, the label alone per line.
+    let (ok, out, err) = djbod(&test, &["cluster", "drain", "nas1-bay1"]);
     assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!("draining nas1-bay1 ({device}) on node")),
+        "{out}"
+    );
     let (ok, _, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "active"]);
     assert!(ok, "{err}");
     let (ok, _, err) = djbod(&test, &["cluster", "set-state", "no-such-label", "active"]);
@@ -1561,8 +1567,9 @@ async fn status_names_an_unreachable_node_and_still_succeeds() {
     let (ok, out, err) = djbod(&test, &["status"]);
     assert!(ok, "{err}");
     assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
+    // Named by its label with the UUID beside it (6.2.5.1).
     assert!(
-        err.contains(&format!("node {} unreachable", ghost.0)),
+        err.contains(&format!("node ghost ({}) unreachable", ghost.0)),
         "{err}"
     );
     assert!(err.contains("127.0.0.1:1"), "{err}");
