@@ -2234,10 +2234,22 @@ out and are unreadable now. `djbod scrub` prints this as its last
 lines, as a warning that the data is at higher risk, with what to do:
 restore the device, or retire it (18.2.1.1) and run `scrub --repair`.
 The web UI shows the same in the scrub log. The exit code does not
-change for it: exposure is not damage, and the line says which. This is
-the classification of every version against the devices that are out
-(whole, degraded, at the limit, unreadable) computed in the one place
-that already reads every record; a scheduled scrub gets it for free.
+change for it: exposure is not damage, and the line says which.
+
+The phase also ends, every time, with every version it checked counted
+by how many of its shards are available against how many it has, at
+its scheme: a shard is not available when its device is unread or
+removed, its file is missing, or the node's own scrub found it damaged.
+`djbod scrub` prints it as one line after the verdict, for example
+`shards available: 245756 objects with 2 of 3 (readable, none to
+spare)`, with whole objects first and unreadable ones last, so the
+state of the data is read in the scheme's own terms: how many shards
+each object has left, and how many it can still lose. A version whose
+copies could not be trusted is not counted, its shards being unknown.
+This is the classification of every version against what is out (whole,
+degraded with so much to spare, at the limit, unreadable) computed in
+the one place that already reads every record; a scheduled scrub gets
+it for free.
 
 A node that cannot be reached, or that refuses or answers out of
 protocol, is not damage and is never reported as damage. In the first
