@@ -2180,7 +2180,7 @@ async fn drain_device(
     device: DeviceId,
     partial: bool,
 ) -> anyhow::Result<bool> {
-    let source = document.device_name(device);
+    let source = device_and_node(document, device);
     let mut client = connect(cli).await?;
     let mut run = client.drain(device, partial).await.map_err(client_err)?;
     let mut moved = 0usize;
@@ -2230,7 +2230,7 @@ async fn drain_device(
                         moved += 1;
                         println!(
                             "moved    {key}  shard {shard_index}  {source} -> {}{}",
-                            document.device_name(destination),
+                            device_and_node(document, destination),
                             if rebuilt { " (rebuilt)" } else { "" }
                         );
                     }
@@ -2278,6 +2278,20 @@ fn node_identity(document: &djbod_core::cluster::ClusterDocument, id: NodeId) ->
     match document.node(id).and_then(|n| n.label.as_deref()) {
         Some(label) => format!("{label} ({})", id.0),
         None => id.0.to_string(),
+    }
+}
+
+/// Where a shard is, as a person reads it: "node devbox4 device
+/// devbox4-d0", each by its label or, without one, its UUID. A device
+/// the document no longer lists has no node to name.
+fn device_and_node(document: &djbod_core::cluster::ClusterDocument, id: DeviceId) -> String {
+    match document.device(id) {
+        Some(entry) => format!(
+            "node {} device {}",
+            document.node_name(entry.node),
+            document.device_name(id)
+        ),
+        None => format!("device {}", id.0),
     }
 }
 
