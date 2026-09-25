@@ -1299,12 +1299,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if changed {
                         println!(
                             "device {} is now {state_name} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     } else {
                         println!(
                             "device {} was already {state_name}; nothing changed",
-                            device_id.0
+                            names::device_identity(device_id)
                         );
                     }
                 }
@@ -1511,14 +1512,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if !changed {
                         println!("nothing changed");
                     } else if let Some(label) = label {
+                        // The identity before the change: the old label, if
+                        // any, beside the UUID, then what it is called now.
                         println!(
                             "device {} is now labelled {label} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     } else {
                         println!(
                             "label cleared from device {} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     }
                 }
@@ -1585,12 +1590,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if let Some(label) = label {
                         println!(
                             "node {} is now labelled {label} (document version {})",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     } else {
                         println!(
                             "label cleared from node {} (document version {})",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     }
                 }
@@ -1620,7 +1627,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!(
                             "node {} is now reached at {} (document version {})",
-                            id.0,
+                            names::node_identity(id),
                             addresses.join(", "),
                             document.version
                         );
@@ -1659,11 +1666,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     } else if changed {
                         println!(
-                            "device {device} removed (document version {}); take it out of its node's configuration and restart that node",
+                            "device {} removed (document version {}); take it out of its node's configuration and restart that node",
+                            names::device_identity(device_id),
                             document.version
                         );
                     } else {
-                        println!("device {device} was already removed; nothing changed");
+                        println!(
+                            "device {} was already removed; nothing changed",
+                            names::device_identity(device_id)
+                        );
                     }
                 }
                 ClusterCommand::RemoveNode {
@@ -1687,7 +1698,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!(
                             "node {} removed (document version {}); its process stops on its own, and its devices can be reused with `djbod-node join --wipe-removed-device`",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     }
                 }
@@ -1716,13 +1728,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!("highest version  {}", report.highest_version);
                         for n in &report.updated {
-                            println!("updated          {}", n.0);
+                            println!("updated          {}", names::node_identity(*n));
                         }
                         for n in &report.already_current {
-                            println!("already current  {}", n.0);
+                            println!("already current  {}", names::node_identity(*n));
                         }
                         for (n, reason) in &report.unreachable {
-                            println!("unreachable      {}  {reason}", n.0);
+                            println!("unreachable      {}  {reason}", names::node_identity(*n));
                         }
                         if !report.unreachable.is_empty() {
                             std::process::exit(2);
@@ -2024,8 +2036,8 @@ async fn force_remove_device(
     } else {
         println!(
             "device {} on node {} is {}{}",
-            device_id.0,
-            entry.node.0,
+            names::device_identity(device_id),
+            names::node_identity(entry.node),
             format!("{:?}", entry.state).to_lowercase(),
             if readable {
                 " and its node can still read it"
@@ -2067,12 +2079,13 @@ async fn force_remove_device(
     } else if changed {
         println!(
             "device {} removed (document version {}); run `djbod scrub --repair` to rebuild what it held, then take it out of its node's configuration and restart that node",
-            device_id.0, document.version
+            names::device_identity(device_id),
+            document.version
         );
     } else {
         println!(
             "device {} was already removed; nothing changed",
-            device_id.0
+            names::device_identity(device_id)
         );
     }
     Ok(())
@@ -2108,7 +2121,9 @@ async fn force_remove_node(
     } else {
         println!(
             "node {} at {} does not answer: {}",
-            node_id.0, plan.address, plan.unreachable_because
+            names::node_identity(node_id),
+            plan.address,
+            plan.unreachable_because
         );
         println!(
             "it holds {}; {} shards there",
@@ -2141,7 +2156,7 @@ async fn force_remove_node(
     if !cli.json {
         println!(
             "node {} removed (document version {}); rebuilding {}",
-            node_id.0,
+            names::node_identity(node_id),
             document.version,
             counted(plan.affected.len(), "version", "versions")
         );
