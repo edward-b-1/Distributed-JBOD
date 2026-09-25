@@ -853,6 +853,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut repairs = 0usize;
             let mut repair_failures = 0usize;
             let mut unavailable_devices = 0usize;
+            // Printed last, so that what the unavailable devices cost is
+            // the last thing read (SPEC 20.1.2.2).
+            let mut exposure: Option<ScrubEvent> = None;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
@@ -938,6 +941,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     "cross-node checks: {versions_checked} version(s) checked"
                                 );
                             }
+                            ScrubEvent::CrossCheckExposure { .. } => exposure = Some(event),
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
                                     report.shards.iter().filter(|s| s.rewritten).count();
@@ -972,6 +976,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
                 if let Some(error) = &end.error {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
+                }
+                if let Some(ScrubEvent::CrossCheckExposure {
+                    unread,
+                    versions_checked,
+                    versions_with_shards_out,
+                    versions_at_the_limit,
+                    versions_unreadable,
+                }) = &exposure
+                {
+                    eprintln!(
+                        "{}",
+                        describe_exposure(
+                            unread,
+                            *versions_checked,
+                            *versions_with_shards_out,
+                            *versions_at_the_limit,
+                            *versions_unreadable
+                        )
+                    );
                 }
             }
             if code != 0 {
@@ -1589,6 +1612,41 @@ async fn all_keys(cli: &Cli) -> anyhow::Result<Vec<String>> {
         }
     }
     Ok(listing.keys.into_iter().map(|e| e.key).collect())
+}
+
+/// What the devices a scrub could not read cost (SPEC 20.1.2.2): the
+/// data is at higher risk, and this says how much and what to do. Not
+/// damage, which the findings and the exit code already carry.
+fn describe_exposure(
+    unread: &[djbod_proto::message::DeviceExposure],
+    versions_checked: u64,
+    with_shards_out: u64,
+    at_the_limit: u64,
+    unreadable: u64,
+) -> String {
+    let mut lines = vec![format!(
+        "WARNING: data at higher risk: {with_shards_out} of {versions_checked} version(s) have a shard on an unavailable device"
+    )];
+    for entry in unread {
+        lines.push(format!(
+            "  device {}: {} version(s)",
+            entry.device.0, entry.versions
+        ));
+    }
+    if at_the_limit > 0 {
+        lines.push(format!(
+            "  {at_the_limit} version(s) can lose no further shard: one more device out makes them unreadable"
+        ));
+    }
+    lines.push(if unreadable > 0 {
+        format!("  {unreadable} version(s) are unreadable now: more than m shards out")
+    } else {
+        "  0 version(s) are unreadable now".to_string()
+    });
+    lines.push(
+        "restore the device, or retire it with `djbod cluster remove-device --force` and run `djbod scrub --repair` to rebuild what it held".to_string(),
+    );
+    lines.join("\n")
 }
 
 /// The devices a listing went without (SPEC 15.1) and what that means
