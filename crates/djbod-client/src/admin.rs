@@ -887,6 +887,42 @@ fn still_referenced(what: String, references: &[VersionReference]) -> AdminError
 
 /// Mark a device `removed` (18.2.1) once no current record names it.
 /// Returns the document and whether anything changed.
+/// `remove-device --force` (18.2.1.1): mark a device `removed` without
+/// draining it or scanning for references, for a device the cluster can
+/// no longer read. An ordinary proposal, since its node is alive. Nothing
+/// is moved: a shard on a removed device is lost (18.3), and `scrub
+/// --repair` rebuilds it elsewhere. Returns the document and whether it
+/// changed; a device already removed changes nothing.
+pub async fn remove_device_forced(
+    connector: &Connector,
+    peer: SocketAddr,
+    cluster_id: Uuid,
+    device: DeviceId,
+) -> Result<(ClusterDocument, bool), AdminError> {
+    for _ in 0..MAX_PROPOSAL_ATTEMPTS {
+        let current = fetch_document(connector, peer, cluster_id).await?;
+        let Some(entry) = current.device(device) else {
+            return Err(AdminError::UnknownDevice(device));
+        };
+        if entry.state == DeviceState::Removed {
+            return Ok((current, false));
+        }
+        let mut next = current.clone();
+        next.version += 1;
+        for candidate in next.devices.iter_mut() {
+            if candidate.id == device {
+                candidate.state = DeviceState::Removed;
+            }
+        }
+        match propose(connector, &current, &next).await {
+            Ok(()) => return Ok((next, true)),
+            Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
+}
+
 pub async fn remove_device(
     connector: &Connector,
     peer: SocketAddr,

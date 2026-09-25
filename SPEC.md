@@ -273,8 +273,8 @@ the node is up. The consequences:
 - The node logs the loss once when first seen and once when the device
   is readable again.
 
-Retiring an unavailable device is the forced removal of 6.2.6.3 at
-node level today; the device-level equivalent is proposed.
+Retiring an unavailable device is `remove-device --force` (18.2.1.1);
+`scrub --repair` then rebuilds what it held.
 
 ## 6. Configuration
 
@@ -1479,7 +1479,8 @@ inspected before the next is run:
 - As built, `remove-device` leaves the device in the document in state
   `removed`, so that a later attempt to add the same disk is recognised
   (6.2.6.3), and the administrator takes it out of the node's
-  configuration at the next restart; `remove-node` drops the node and its
+  configuration at the next restart; a removed device is never written
+  to or cleaned again, and a shard or record copy on it is lost (18.3); `remove-node` drops the node and its
   devices, and the node, having acknowledged a document that no longer
   lists it, stops accepting connections and its process exits. Both scans
   are `membership::scan_references` (18.5). Removing the last node is
@@ -1513,6 +1514,23 @@ the `DeviceContents` operation (19.1.3), `djbod contents` at the command
 line, and `Client::device_contents` in the library. Zero versions means
 the device holds nothing and `remove-device` will not find it referenced.
 
+18.2.1.1 [D] **A device that cannot be drained.** A device the cluster
+cannot read (5.6), or one the administrator has given up on, holds
+shards that no drain can copy. `djbod cluster remove-device <device>
+--force` marks it `removed` anyway: an ordinary proposal, since the
+node is alive, with no reference scan and nothing moved. The command
+says what that means before asking for the device id to be typed back
+(`--yes` for scripts): every version with a shard on the device loses
+that shard; those with at most m shards there are rebuilt from the
+others by `djbod scrub --repair`, since a shard on a removed device is
+lost (18.3); any with more are lost for good. It warns when fewer than
+k+m active, available devices would remain, since no rebuild has a
+legal target until a device is added. The rebuild is deliberately not
+part of the command: the scrub already finds every version that lost a
+copy and repairs it, and a scan of every record to count the cost first
+would take as long as the scrub itself. The device-level analogue of
+6.2.6.3 without its step 3.
+
 18.2.2 [D] **Running out of room.** Re-placement chooses a target exactly
 as a write does (10.4, 10.5): an `active` device with room for the shard
 file within its headroom, not already holding a shard of that version.
@@ -1532,7 +1550,8 @@ unless `--partial` is given.
 18.3 [D] **Repair after loss.** Identical to drain except that the shard is
 reconstructed from k surviving shards rather than copied. `RepairObject`
 does this on its own for a shard whose device is no longer in the cluster
-document (condition `Lost`): it chooses a new device as a write would
+document, or is listed in it as `removed` (18.2.1.1), condition `Lost`:
+it chooses a new device as a write would
 (10.4, 10.5), rebuilds the shard there, and writes the record at the next
 revision to the new device first, then the others, exactly as a
 re-placement does (18.8.2). A shard on a device that is still listed but

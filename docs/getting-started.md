@@ -439,7 +439,22 @@ target/release/djbod cluster remove-device <device-uuid>
 
 The device stays listed as `removed` so the cluster recognises the disk
 if it ever comes back; remove the path from that node's configuration and
-restart the node. A whole node goes the same way: drain each of its
+restart the node.
+
+A disk that has died cannot be drained. `djbod status` shows it as
+`active, unavailable`; reads and writes go around it, and the scrub exits
+3 until it is dealt with. Retire it with
+
+```sh
+target/release/djbod cluster remove-device <device-uuid> --force
+```
+
+which marks it `removed` without draining, after telling you what that
+means and asking for the id back (`--yes` in a script). Nothing is moved
+by the command itself. Run `djbod scrub --repair` afterwards: every
+object that had a shard on the disk is rebuilt from its other shards onto
+the remaining disks. An object that had more than `m` shards on the disk
+cannot be, and the scrub says so. A whole node goes the same way: drain each of its
 devices, then
 
 ```sh

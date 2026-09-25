@@ -2,7 +2,7 @@
 
 use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_client::admin::NodeDocument;
-use djbod_core::cluster::ClusterDocument;
+use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_proto::message::{DeviceContents, DeviceStatus, KeyEntry, NodeStatus};
 
 use super::human_bytes;
@@ -82,9 +82,11 @@ pub(super) fn status(devices: &[DeviceStatus], nodes: &[NodeStatus]) -> String {
             .find(|n| n.node == d.node)
             .map(|n| n.build.as_str())
             .unwrap_or("-");
-        // The document's state, and whether the node can read it (5.6).
+        // The document's state, and whether the node can read it (5.6);
+        // a removed device is retired, and its readability is nobody's
+        // concern.
         let mut state = format!("{:?}", d.state).to_lowercase();
-        if !d.available {
+        if !d.available && d.state != DeviceState::Removed {
             state.push_str(", unavailable");
         }
         table.add_row([
