@@ -188,7 +188,9 @@ async fn put_head_get_list_delete_round_trip() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let names: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(
                 names,
@@ -208,7 +210,9 @@ async fn put_head_get_list_delete_round_trip() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let names: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(names, vec!["data/object-3", "data/object-4"]);
             assert!(!truncated);
@@ -1592,7 +1596,9 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             .await
             .expect("list")
         {
-            Response::ListKeys { keys, truncated } => {
+            Response::ListKeys {
+                keys, truncated, ..
+            } => {
                 pages += 1;
                 let bytes: usize = keys.iter().map(|k| k.key.len()).sum();
                 assert!(bytes <= MAX_LIST_PAGE_BYTES, "page of {bytes} bytes");
@@ -1628,7 +1634,9 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
                 .await
                 .expect("list")
             {
-                Response::ListKeys { keys, truncated } => {
+                Response::ListKeys {
+                    keys, truncated, ..
+                } => {
                     pages += 1;
                     assert!(!keys.is_empty(), "a page never comes back empty");
                     assert!(keys.len() <= limit.max(1) as usize);

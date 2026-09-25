@@ -224,6 +224,8 @@ async fn object_round_trip_through_http() {
     assert_eq!(json["keys"].as_array().unwrap().len(), 1);
     assert_eq!(json["keys"][0]["key"], key);
     assert_eq!(json["truncated"], false);
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["unread"].as_array().unwrap().len(), 0);
     let (_, json) = get_json(&test, "/api/objects?prefix=other/").await;
     assert_eq!(json["keys"].as_array().unwrap().len(), 0);
 

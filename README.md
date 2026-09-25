@@ -172,7 +172,10 @@ copies that disagree, fails the read. A write is
 placed on the emptiest disks the cluster can read, skipping ones it
 cannot, is attempted once, and fails with the node's own words if a
 disk refuses it; there is no second guess at another disk. When a write
-had to go around a dead disk, it says so.
+had to go around a dead disk, it says so. A listing goes around a dead
+disk or machine as well and names it; it is complete while fewer than
+`k + m` disks are out, and says so when that many are and an object
+could be hidden.
 
 There is no alerting subsystem, no notification hook, no health daemon,
 and none is planned. The alarm is the operation. The reconstruction, the

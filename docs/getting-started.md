@@ -158,7 +158,10 @@ deleted, goes on with the copies that remain, names the disk on standard
 error, and exits 2 as well; `repair` rewrites a deleted copy, and a dead
 disk mends nothing until it is back or removed. A `put` that had to go
 around a disk the cluster cannot read stores the object on the others,
-names the disk on standard error, and exits 2 for the same reason.
+names the disk on standard error, and exits 2 for the same reason. A
+`list` names the disks it could not read too; it exits 0 while fewer
+than k+m are out, since every object still has a record on a disk that
+was read, and 2 once that many are out and an object could be hidden.
 
 ```sh
 ```

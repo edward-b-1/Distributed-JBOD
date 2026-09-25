@@ -18,7 +18,7 @@ use djbod_node::transport::Connector;
 use djbod_proto::frame::{Frame, MessageType};
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DrainEvent, ErrorCode, Message, RecordCopyFault, Request, Response, ShardCondition,
+    DrainEvent, ErrorCode, ListQuery, Message, RecordCopyFault, Request, Response, ShardCondition,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -333,6 +333,37 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
         other => panic!("expected NotFound, got {other:?}"),
     }
+    // A listing goes around b too (15.1): two of four devices out is
+    // fewer than k+m, so every key still appears, and the page names
+    // b's devices as the ones it went without.
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: None,
+            start_after: None,
+            limit: None,
+        }))
+        .await
+    {
+        Ok(Response::ListKeys {
+            keys,
+            unread,
+            complete,
+            ..
+        }) => {
+            assert_eq!(
+                keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+                vec!["k"]
+            );
+            assert!(complete, "{unread:?}");
+            let mut named: Vec<DeviceId> = unread.iter().map(|u| u.device).collect();
+            named.sort();
+            let mut on_b_node: Vec<DeviceId> = b.node.devices().iter().map(|d| d.id()).collect();
+            on_b_node.sort();
+            assert_eq!(named, on_b_node);
+            assert!(unread.iter().all(|u| u.node == b.node.id()));
+        }
+        other => panic!("expected ListKeys, got {other:?}"),
+    }
     // Every other operation that must reach b fails, naming it (16.1, 16.2).
     match client.put_object("k2", &body, 100_000, None).await {
         Err(ConnectionError::StreamFailed(detail)) => {
@@ -354,6 +385,56 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
     let mut client = a.client().await;
     let (_, got) = client.get_object("k").await.expect("get after restart");
     assert_eq!(got, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
+    // 1+1: two record copies per version over four devices, three of
+    // them on b. With b down, three devices are out, more than k+m, so a
+    // version with both copies on b leaves no trace on a: the listing
+    // shows what a holds and says it may be incomplete (15.1, 13.3).
+    let a = first_node(1, 1, 1).await;
+    let mut b = joined_node(3, &a).await;
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 8, 300).await;
+    let on_a = a.node.devices()[0].id();
+    let mut visible: Vec<String> = records
+        .iter()
+        .filter(|r| r.shard_on(on_a).is_some())
+        .map(|r| r.key.clone())
+        .collect();
+    visible.sort();
+    assert!(
+        visible.len() < records.len(),
+        "placement over four equal devices alternates pairs, so some versions have no copy on a"
+    );
+
+    b.stop();
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: None,
+            start_after: None,
+            limit: None,
+        }))
+        .await
+    {
+        Ok(Response::ListKeys {
+            keys,
+            truncated,
+            unread,
+            complete,
+        }) => {
+            assert!(!complete);
+            assert!(!truncated);
+            assert_eq!(unread.len(), 3, "{unread:?}");
+            assert!(unread.iter().all(|u| u.node == b.node.id()));
+            assert_eq!(
+                keys.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
+                visible
+            );
+        }
+        other => panic!("expected ListKeys, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1435,7 +1516,6 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
-    use djbod_proto::message::ListQuery;
     let a = first_node(1, 2, 1).await;
     let b = joined_node(1, &a).await;
     let c = joined_node(1, &b).await;
@@ -1459,7 +1539,9 @@ async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
                 .await
                 .expect("list")
             {
-                Response::ListKeys { keys, truncated } => {
+                Response::ListKeys {
+                    keys, truncated, ..
+                } => {
                     assert!(!keys.is_empty());
                     assert!(keys.len() <= limit as usize);
                     start_after = keys.last().map(|k| k.key.clone());
@@ -1484,7 +1566,9 @@ async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let got: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(got, vec!["obj-5", "obj-6"]);
             assert!(!truncated);
@@ -1581,7 +1665,9 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
             .await
             .expect("list")
         {
-            Response::ListKeys { keys, truncated } => {
+            Response::ListKeys {
+                keys, truncated, ..
+            } => {
                 if first {
                     assert_eq!(keys.len(), 8, "first page stops at the horizon");
                     assert!(keys.last().expect("non-empty").key.starts_with("a7-"));

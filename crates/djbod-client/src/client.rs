@@ -16,6 +16,7 @@ use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
     NodeStatus, ObjectRead, ObjectWrite, RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    UnavailableDevice,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -169,6 +170,14 @@ impl<E: serde::de::DeserializeOwned> EventRun<E> {
 pub struct ListPage {
     pub keys: Vec<KeyEntry>,
     pub truncated: bool,
+    /// The devices whose records did not contribute (SPEC 5.6, 15.1):
+    /// on a node that could not be reached, or unreadable by their node.
+    pub unread: Vec<UnavailableDevice>,
+    /// Whether every key can nonetheless appear: true while fewer than
+    /// k+m devices are unread, since every version has a record copy on
+    /// k+m devices; false once that many are out, when a key stored only
+    /// on them cannot be seen.
+    pub complete: bool,
 }
 
 impl ListPage {
@@ -427,15 +436,32 @@ impl Client {
     /// One page of keys (15.2.1).
     pub async fn list(&mut self, query: ListQuery) -> Result<ListPage, ClientError> {
         match self.request(Request::ListKeys(query), true).await? {
-            Response::ListKeys { keys, truncated } => Ok(ListPage { keys, truncated }),
+            Response::ListKeys {
+                keys,
+                truncated,
+                unread,
+                complete,
+            } => Ok(ListPage {
+                keys,
+                truncated,
+                unread,
+                complete,
+            }),
             other => Err(Self::unexpected("ListKeys", other)),
         }
     }
 
-    /// Every key under `prefix`, page after page. Holds them all in
+    /// Every key under `prefix`, page after page, as one page that is
+    /// never truncated: `unread` is every device any page went without
+    /// and `complete` holds only if every page was. Holds them all in
     /// memory; for large listings page with [`Client::list`].
-    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
-        let mut keys = Vec::new();
+    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<ListPage, ClientError> {
+        let mut all = ListPage {
+            keys: Vec::new(),
+            truncated: false,
+            unread: Vec::new(),
+            complete: true,
+        };
         let mut start_after: Option<String> = None;
         loop {
             let page = self
@@ -446,9 +472,15 @@ impl Client {
                 })
                 .await?;
             start_after = page.next_start_after().map(str::to_string);
-            keys.extend(page.keys);
+            all.keys.extend(page.keys);
+            for device in page.unread {
+                if !all.unread.contains(&device) {
+                    all.unread.push(device);
+                }
+            }
+            all.complete &= page.complete;
             if start_after.is_none() {
-                return Ok(keys);
+                return Ok(all);
             }
         }
     }

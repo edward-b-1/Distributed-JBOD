@@ -362,6 +362,7 @@
         <span class="hint" id="list-count"></span>
       </div>
       <div class="hint" id="list-cursor" style="margin:0 0 8px"></div>
+      <div class="hint" id="list-note" style="margin:0 0 8px"></div>
       <div class="scroll">
         <table>
           <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
@@ -438,7 +439,7 @@ const PAGE_SIZE = 100;
 // The listing is paged through the node's own cursor (SPEC 15.2.1): page
 // n starts after the last key of page n-1, and `after` remembers each
 // page's starting key so Previous can go back the same way.
-const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, page: 1, after: [null] }, selectedKey: null, failures: {} };
+const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null] }, selectedKey: null, failures: {} };
 
 // ------------------------------------------------------------ helpers
 
@@ -957,6 +958,7 @@ async function list(page = 1) {
     if (startAfter) params.set('start_after', startAfter);
     const r = await api('/objects?' + params);
     listing.keys = r.keys; listing.truncated = r.truncated; listing.page = page;
+    listing.unread = r.unread || []; listing.complete = r.complete !== false;
     if (r.truncated && r.keys.length) listing.after[page] = r.keys.at(-1).key;
     renderListing();
     document.querySelector('.scroll').scrollTop = 0;
@@ -977,6 +979,13 @@ function renderListing() {
   const cursor = after[page - 1];
   $('list-count').textContent = `${keys.length} key(s) on this page`;
   $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
+  // The listing went around devices the cluster cannot read (SPEC 15.1):
+  // complete while fewer than k+m are out, possibly short once that many are.
+  const { unread, complete } = state.listing;
+  const devices = unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
+  $('list-note').replaceChildren(unread.length === 0 ? '' : complete
+    ? el('span', {}, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
+    : el('span', { class: 'bad' }, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
 }
 $('list-go').addEventListener('click', () => list());
 $('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });

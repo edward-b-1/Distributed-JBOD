@@ -521,6 +521,11 @@ fn every_response_round_trips() {
         Response::ListKeys {
             keys: vec![entry.clone()],
             truncated: false,
+            unread: vec![UnavailableDevice {
+                device: device(2),
+                node: node(1),
+            }],
+            complete: true,
         },
         Response::RepairObject(RepairReport {
             key: "k".to_string(),
@@ -594,6 +599,7 @@ fn every_response_round_trips() {
         Response::LocalList {
             entries: vec![entry],
             truncated: true,
+            unread: vec![device(2)],
         },
         Response::PutShardReady,
         Response::PutShardDone,

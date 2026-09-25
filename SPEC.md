@@ -1163,9 +1163,26 @@ versioning and are deferred with it.
 ## 15. Listing
 
 15.1 [D] Listing keys, optionally by prefix, broadcasts to every node.
-Each node scans the metadata records on each of its devices and returns
-matching keys. The coordinator merges, deduplicates (since each record
-exists on k+m devices), sorts, and returns.
+Each node scans the metadata records on each of its devices it can read
+and returns matching keys, naming the devices it cannot read (5.6). The
+coordinator merges, deduplicates (since each record exists on k+m
+devices), sorts, and returns.
+
+15.1.1 [D] **A listing goes around what cannot be read.** A node that
+cannot be reached contributes no keys and does not fail the listing, as
+it does not fail a read (13.1); its devices, and every device a node
+named as unreadable, are returned with the page as the devices the
+listing went without. The page also says whether it is complete. It is
+while fewer than k+m devices went without, because every version has a
+record copy on k+m devices and so at least one on a device that was
+read; once k+m or more are out, a version may have every copy on them
+and leave no trace, and the page says it may be incomplete. Removed
+devices (18.2.1) are expected to hold nothing and are not counted.
+`djbod list` prints the devices on standard error and exits 2 only when
+the listing may be incomplete; the whole-space walks (`reencode`) refuse
+an incomplete listing rather than report a job done on part of the
+data; the Python client raises an `IncompleteListing` warning; the web
+UI notes it above the listing.
 
 15.2 [D] This is a full scan of every device and is accepted as slow.
 
@@ -1353,7 +1370,9 @@ to the client:
   administrator makes to find out what is wrong; and except for
   `GetObject` and `HeadObject`, which go around it when the record copies
   and shards that remain suffice (9.4.4, 11.4) and report it, and are
-  refused with `NodeUnreachable` when they do not.
+  refused with `NodeUnreachable` when they do not; and except for
+  `ListKeys`, which lists what the reachable devices hold, names the rest,
+  and says whether a key could be hidden (15.1.1).
 - More than m of an object's shards cannot be read at all, whether
   missing, unreadable, or on a device or node that cannot be reached
   (11.4); fewer are reconstructed around, served, and reported.
@@ -1815,9 +1834,11 @@ coordinator, and those nodes send to each other. Every response is either
 
 `ListKeys`
 : Request: optional prefix, optional start-after key, optional limit.
-  Response: sorted list of keys and, for each, size and version id; plus a
-  flag saying whether more remain. A page holds at most 8 MiB of key text
-  whatever the limit (15.2.2). Section 15.
+  Response: sorted list of keys and, for each, size and version id; a
+  flag saying whether more remain; the devices the listing went without,
+  each with its node (5.6, 15.1.1); and whether the listing is complete.
+  A page holds at most 8 MiB of key text whatever the limit (15.2.2).
+  Section 15.
 
 `RepairObject`
 : Request: key. Response: a report listing every shard of the newest
@@ -1885,10 +1906,11 @@ coordinator, and those nodes send to each other. Every response is either
 
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.
-  Response: for each matching record on any local device, the key, size,
-  and version id, in pages of at most 8 MiB of key text with a flag
-  saying more follow (15.2.2). Duplicates across devices are the
-  coordinator's problem.
+  Response: for each matching record on any local device the node can
+  read, the key, size, and version id, in pages of at most 8 MiB of key
+  text with a flag saying more follow (15.2.2), and the local devices
+  the node cannot read (5.6), named on every page. Duplicates across
+  devices are the coordinator's problem.
 
 `LocalRecords`
 : Request: device UUID, optional cursor (the last key hash and version of

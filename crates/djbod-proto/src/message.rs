@@ -450,9 +450,16 @@ pub enum Response {
         missing_records: Vec<MissingRecordCopy>,
     },
     DeleteObject,
+    /// A page of keys (15.1). `unread` names the devices whose records
+    /// did not contribute, on a node that could not be reached or
+    /// unreadable by their node (5.6); `complete` says whether every key
+    /// can nonetheless appear, which holds while fewer than k+m devices
+    /// are unread, every version having a record copy on k+m devices.
     ListKeys {
         keys: Vec<KeyEntry>,
         truncated: bool,
+        unread: Vec<UnavailableDevice>,
+        complete: bool,
     },
     RepairObject(RepairReport),
     MoveShard {
@@ -492,10 +499,12 @@ pub enum Response {
         unread: Vec<DeviceId>,
     },
     /// A page of at most `MAX_LIST_PAGE_BYTES` of keys; `truncated` says
-    /// whether more follow after the last entry.
+    /// whether more follow after the last entry. `unread` names the
+    /// node's devices it could not read (5.6), the same on every page.
     LocalList {
         entries: Vec<KeyEntry>,
         truncated: bool,
+        unread: Vec<DeviceId>,
     },
     /// A page of records; `truncated` says whether more follow after the
     /// last one.
@@ -747,9 +756,10 @@ pub enum RecordCopyFault {
     Unavailable { reason: String },
 }
 
-/// A device left out of a write's placement because its node could not
-/// read it (SPEC 5.6), reported with the version so the client knows
-/// the write went around it. Nothing is wrong with the object.
+/// A device an operation went around because its node could not read it
+/// or could not be reached (SPEC 5.6): left out of a write's placement,
+/// reported with the version so the client knows; or absent from a
+/// listing, reported with the page. Nothing is wrong with the object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnavailableDevice {
     pub device: DeviceId,

@@ -30,6 +30,17 @@ class NotFound(NodeError):
     """No object under that key."""
 
 
+class IncompleteListing(Warning):
+    """A listing went around devices the cluster cannot read (SPEC 15.1),
+    and enough of them, k+m or more, that a key stored only on them cannot
+    be seen. The keys returned are real; some may be missing. `unread`
+    lists each device as a dict: device, node."""
+
+    def __init__(self, message: str, unread: list):
+        super().__init__(message)
+        self.unread = unread
+
+
 class DegradedWrite(Warning):
     """A write was placed around devices the cluster cannot read (SPEC
     5.6). The object is stored, on the other devices; `key` and `version`

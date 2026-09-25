@@ -480,7 +480,10 @@ async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Fail
     // shards of one version has several copies of its record), sort,
     // then apply start_after and limit. See SPEC 15.2.1 for the scaling
     // question this leaves open.
+    // A device this node cannot read (5.6) contributes no keys and is
+    // named instead, so the coordinator can say what the listing lacks.
     let mut entries: Vec<KeyEntry> = Vec::new();
+    let mut unread = node.unavailable_devices();
     for device in node.devices() {
         let id = device.id();
         let prefix = query.prefix.clone();
@@ -506,12 +509,15 @@ async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Fail
             )?;
             Ok(out)
         })
-        .await
-        .map_err(|f| match f {
-            Failure::Error(d) => Failure::Error(with_device(d, id)),
-            other => other,
-        })?;
-        entries.extend(found);
+        .await;
+        match found {
+            Ok(found) => entries.extend(found),
+            Err(Failure::Error(detail)) if detail.code == ErrorCode::DeviceUnavailable => {
+                unread.push(id);
+            }
+            Err(Failure::Error(detail)) => return Err(Failure::Error(with_device(detail, id))),
+            Err(other) => return Err(other),
+        }
     }
     entries.sort_by(|a, b| a.key.cmp(&b.key).then(a.version.cmp(&b.version)));
     entries.dedup_by(|a, b| a.key == b.key && a.version == b.version);
@@ -519,7 +525,11 @@ async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Fail
         entries.retain(|e| e.key.as_str() > after.as_str());
     }
     let (entries, truncated) = page_of_keys(entries, query.limit);
-    Ok(Response::LocalList { entries, truncated })
+    Ok(Response::LocalList {
+        entries,
+        truncated,
+        unread,
+    })
 }
 
 /// The first page of `entries`: at most `limit` of them, and at most

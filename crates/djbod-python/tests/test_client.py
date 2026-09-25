@@ -49,6 +49,7 @@ def test_objects_round_trip(client, tmp_path):
     assert len(page.keys) == 1 and page.truncated and page.next_start_after == page.keys[0].key
     rest = client.list(start_after=page.next_start_after)
     assert not rest.truncated
+    assert rest.complete and rest.unread == []
     assert [k.key for k in page.keys + rest.keys] == ["big", "photos/cat.jpg"]
 
     report = client.repair("big")

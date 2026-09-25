@@ -23,6 +23,8 @@ class KeyEntry:
 class ListPage:
     keys: list[KeyEntry]
     truncated: bool
+    unread: list[dict[str, Any]]
+    complete: bool
     @property
     def next_start_after(self) -> Optional[str]: ...
 
