@@ -882,7 +882,7 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
     let error = end.error.expect("incomplete scrub is reported");
     assert_eq!(error.code, ErrorCode::NodeUnreachable);
     assert!(
-        error.message.contains("stopped after 0 version(s)"),
+        error.message.contains("stopped after 0 versions"),
         "{}",
         error.message
     );

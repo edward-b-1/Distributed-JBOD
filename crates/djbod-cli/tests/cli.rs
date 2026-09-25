@@ -248,10 +248,7 @@ async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_
         .expect("run djbod");
     let err = String::from_utf8_lossy(&run.stderr);
     assert_eq!(run.status.code(), Some(2), "{err}");
-    assert!(
-        err.contains("1 block(s) reconstructed from parity"),
-        "{err}"
-    );
+    assert!(err.contains("1 block reconstructed from parity"), "{err}");
     assert!(err.contains("stripe 3  shard 0"), "{err}");
     assert_eq!(std::fs::read(&output).expect("output"), body);
 
@@ -317,7 +314,7 @@ async fn set_state_and_drain_from_the_command_line() {
 
     let (ok, out, err) = djbod(&test, &["cluster", "drain", &device]);
     assert!(ok, "{out}{err}");
-    assert!(out.contains("1 version(s)"), "{out}");
+    assert!(out.contains("1 version, "), "{out}");
     assert!(out.contains("moved    k  shard 0 -> "), "{out}");
     assert!(err.contains("1 moved, 0 skipped"), "{err}");
     let (ok, out, err) = djbod(&test, &["--json", "head", "k"]);
@@ -359,7 +356,7 @@ async fn remove_device_from_the_command_line() {
     let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &device]);
     assert!(!ok);
     assert!(
-        err.contains("still named by the current record of 1 version(s)"),
+        err.contains("still named by the current record of 1 version"),
         "{err}"
     );
     assert!(err.contains("\"k\""), "{err}");
@@ -417,7 +414,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let (ok, _, err) = djbod(&test, &["cluster", "set-scheme", "--k", "5", "--m", "2"]);
     assert!(!ok);
     assert!(
-        err.contains("6 active device(s) but scheme 5+2 needs 7"),
+        err.contains("6 active devices but scheme 5+2 needs 7"),
         "{err}"
     );
 
@@ -426,7 +423,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     assert!(ok, "{out}{err}");
     assert!(out.contains("scheme is now 4+2"), "{out}");
     assert!(
-        out.contains("3 object(s) are stored at another scheme"),
+        out.contains("3 objects are stored at another scheme"),
         "{out}"
     );
     let (ok, out, _) = djbod(&test, &["--json", "head", "big"]);
@@ -446,7 +443,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     assert_eq!(out.matches("re-encoded  ").count(), 3, "{out}");
     assert!(out.contains("re-encoded  big  3+1 -> 4+2"), "{out}");
     assert!(
-        err.contains("3 object(s) examined, 3 re-encoded, 0 failed"),
+        err.contains("3 objects examined, 3 re-encoded, 0 failed"),
         "{err}"
     );
 
@@ -493,7 +490,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let (ok, _, err) = djbod(&test, &["cluster", "reencode"]);
     assert!(ok, "{err}");
     assert!(
-        err.contains("3 object(s) examined, 0 re-encoded, 0 failed"),
+        err.contains("3 objects examined, 0 re-encoded, 0 failed"),
         "{err}"
     );
 
@@ -1028,7 +1025,7 @@ async fn contents_show_what_each_device_holds() {
     let (ok, out, err) = djbod(&test, &["contents"]);
     assert!(ok, "{err}");
     assert!(out.contains("VERSIONS"), "{out}");
-    assert!(err.contains("3 device(s) hold nothing"), "{err}");
+    assert!(err.contains("3 devices hold nothing"), "{err}");
 
     let dir = tempfile::tempdir().expect("temp dir");
     let source = dir.path().join("in.bin");
@@ -1303,7 +1300,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     let (ok, out, err) = djbod(&test, &["status"]);
     assert!(ok, "{err}");
     assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
-    assert!(err.contains("1 device(s) unavailable"), "{err}");
+    assert!(err.contains("1 device is unavailable"), "{err}");
     let (ok, out, err) = djbod(&test, &["--json", "status"]);
     assert!(ok, "{err}");
     let json: serde_json::Value = serde_json::from_str(&out).expect("json");
@@ -1371,7 +1368,10 @@ async fn a_destroyed_device_is_reported_unavailable() {
     let (ok, out, err) = djbod(&test, &["list"]);
     assert!(ok, "{err}");
     assert!(out.contains('k'), "{out}");
-    assert!(err.contains("listed around 1 device(s)"), "{err}");
+    assert!(
+        err.contains("listed around 1 device the cluster cannot read"),
+        "{err}"
+    );
     assert!(err.contains(&dead.id().0.to_string()), "{err}");
     assert!(err.contains("every key is still listed"), "{err}");
     let (ok, out, err) = djbod(&test, &["--json", "list"]);
@@ -1432,10 +1432,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     let (ok, out, err) = djbod(&test, &["put", "k2", source.to_str().unwrap()]);
     assert!(!ok, "{out}{err}");
     assert!(out.contains("stored k2 as version"), "{out}");
-    assert!(
-        err.contains("placed around 1 unavailable device(s)"),
-        "{err}"
-    );
+    assert!(err.contains("placed around 1 unavailable device"), "{err}");
     assert!(err.contains(&dead.id().0.to_string()), "{err}");
     assert!(!root.exists(), "{} was recreated", root.display());
 }

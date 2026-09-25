@@ -99,7 +99,8 @@ pub enum AdminError {
     #[error("{0} is not in the cluster document")]
     UnknownNode(NodeId),
     #[error(
-        "{what} is still named by the current record of {versions} version(s), for example {examples:?}; drain it first (`djbod cluster set-state`, `djbod cluster drain`)"
+        "{what} is still named by the current record of {}, for example {examples:?}; drain it first (`djbod cluster set-state`, `djbod cluster drain`)",
+        djbod_core::text::counted(*.versions, "version", "versions")
     )]
     StillReferenced {
         what: String,
@@ -111,7 +112,8 @@ pub enum AdminError {
     )]
     DeviceActive(DeviceId),
     #[error(
-        "{node} still has active device(s) {devices:?}; set each draining and drain it first (`djbod cluster set-state`, `djbod cluster drain`)"
+        "{node} still has {} active: {devices:?}; set each draining and drain it first (`djbod cluster set-state`, `djbod cluster drain`)",
+        djbod_core::text::counted(.devices.len(), "device", "devices")
     )]
     NodeHasActiveDevices {
         node: NodeId,
@@ -132,7 +134,8 @@ pub enum AdminError {
         transport: djbod_core::cluster::Transport,
     },
     #[error(
-        "the cluster has {active} active device(s) but scheme {k}+{m} needs {needed}; add devices first"
+        "the cluster has {} but scheme {k}+{m} needs {needed}; add devices first",
+        djbod_core::text::counted(*.active, "active device", "active devices")
     )]
     TooFewActiveDevices {
         active: usize,

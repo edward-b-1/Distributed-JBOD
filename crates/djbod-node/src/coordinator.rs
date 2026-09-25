@@ -26,6 +26,7 @@ use djbod_core::record::{
 };
 use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ShardBlock};
+use djbod_core::text::counted;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceExposure, DeviceRecord, DeviceStatus,
@@ -653,7 +654,8 @@ async fn newest_readable_version(
                 ..ErrorDetail::new(
                     code,
                     format!(
-                        "no copy of key {key:?} on the devices that could be read, and {out} device(s) could not be, enough to hold every copy of a version: {reason}"
+                        "no copy of key {key:?} on the devices that could be read, and {} not be, enough to hold every copy of a version: {reason}",
+                        counted(out, "device could", "devices could")
                     ),
                 )
             }));
@@ -1482,8 +1484,8 @@ async fn get_object(
                     ..ErrorDetail::new(
                         ErrorCode::BlockChecksumMismatch,
                         format!(
-                            "{} damaged block(s) in stripe {stripe}, {usable} usable of {needed} needed; first: {:?}",
-                            faults.len(),
+                            "{} in stripe {stripe}, {usable} usable of {needed} needed; first: {:?}",
+                            counted(faults.len(), "damaged block", "damaged blocks"),
                             first.kind
                         ),
                     )
@@ -1628,8 +1630,8 @@ fn place(
             String::new()
         } else {
             format!(
-                "; {} active device(s) unavailable: {}",
-                unavailable.len(),
+                "; {} unavailable: {}",
+                counted(unavailable.len(), "active device", "active devices"),
                 unavailable.join(", ")
             )
         };
@@ -2421,8 +2423,8 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                     ..ErrorDetail::new(
                         ErrorCode::BlockChecksumMismatch,
                         format!(
-                            "stripe {stripe} has {usable} usable blocks of {needed} needed; {} damaged shard(s): {:?}",
-                            faults.len(),
+                            "stripe {stripe} has {usable} usable blocks of {needed} needed; {}: {:?}",
+                            counted(faults.len(), "damaged shard", "damaged shards"),
                             faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
                         ),
                     )
@@ -2582,9 +2584,10 @@ async fn relocate_lost_shards(
             ..ErrorDetail::new(
                 ErrorCode::InsufficientDevices,
                 format!(
-                    "{} shard(s) are on devices no longer in the cluster, but only {} active device(s) with {shard_bytes} bytes free hold no shard of this version",
-                    lost.len(),
-                    ranked.len()
+                    "{} on devices no longer in the cluster, but only {} with {shard_bytes} bytes free {} no shard of this version",
+                    counted(lost.len(), "shard is", "shards are"),
+                    counted(ranked.len(), "active device", "active devices"),
+                    if ranked.len() == 1 { "holds" } else { "hold" }
                 ),
             )
         }));
@@ -3111,8 +3114,8 @@ async fn drain(
     .await?;
     let shortfall = if (active.len() as u64) < required_devices {
         Some(format!(
-            "{} active device(s), but every version needs {required_devices}; no version has a legal target",
-            active.len()
+            "{}, but every version needs {required_devices}; no version has a legal target",
+            counted(active.len(), "active device", "active devices")
         ))
     } else if target_free_bytes < shard_bytes {
         Some(format!(
@@ -3181,7 +3184,8 @@ async fn drain(
             ..ErrorDetail::new(
                 ErrorCode::WriteFailed,
                 format!(
-                    "{skipped} of {total} version(s) could not be moved; the device stays draining and serves what it holds"
+                    "{skipped} of {} could not be moved; the device stays draining and serves what it holds",
+                    counted(total as usize, "version", "versions")
                 ),
             )
         })
@@ -3781,20 +3785,23 @@ async fn scrub(
     let end = if failed_nodes > 0 || check_stopped.is_some() {
         let checks = match check_stopped {
             Some(checked) => format!(
-                "the cross-node checks stopped after {checked} version(s), the rest unchecked"
+                "the cross-node checks stopped after {}, the rest unchecked",
+                counted(checked as usize, "version", "versions")
             ),
             None => "every version was checked".to_string(),
         };
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::NodeUnreachable,
             format!(
-                "{failed_nodes} node(s) could not be scrubbed; {checks}; {finding_count} finding(s) where checks ran"
+                "{} not be scrubbed; {checks}; {} where checks ran",
+                counted(failed_nodes, "node could", "nodes could"),
+                counted(finding_count, "finding", "findings")
             ),
         ))
     } else if repair_failures > 0 {
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::WriteFailed,
-            format!("{repair_failures} repair(s) failed"),
+            format!("{} failed", counted(repair_failures, "repair", "repairs")),
         ))
     } else {
         StreamEnd::ok()
@@ -4486,7 +4493,7 @@ mod tests {
             Err(Failure::Error(detail)) => {
                 assert_eq!(detail.code, ErrorCode::InsufficientDevices);
                 assert!(
-                    detail.message.contains("1 active device(s) unavailable"),
+                    detail.message.contains("1 active device unavailable"),
                     "{}",
                     detail.message
                 );
