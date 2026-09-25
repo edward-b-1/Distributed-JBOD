@@ -1,3 +1,211 @@
+## [be4ed14] - 2026-09-23
+
+Pull request #149: Remove the stale device.json name; the identity file is DISTRIBUTED-JBOD-DEVICE.json
+
+### Removed
+
+- `layout::DEVICE_IDENTITY_FILE`, which still named `device.json`. Nothing referenced it, but `layout` is public and is where the other on-disk names live, so a new caller could have picked it up and then failed to find any device. The one remaining definition is `device::DEVICE_IDENTITY_FILE`, `DISTRIBUTED-JBOD-DEVICE.json` (#148).
+
+### Fixed
+
+- The uppercase name corrected in the `layout` module's diagram, the `DeviceId` doc comment, the SPEC 9.1 on-disk layout diagram and the milestone 2 note.
+
+## [d9601b7] - 2026-09-21
+
+Pull request #120: The client's last three methods: move_shard, scrub, drain
+
+### Added
+
+- `Client::scrub` and `Client::drain`, returning an `EventRun` that owns the connection for the run and yields events through `next_event()` until the stream's end, whose error says whether the run failed, after which the client reconnects for whatever follows.
+- `Client::move_shard`, returning a `MoveShardReport` with the record at its new revision, the source device, whether the source copy was cleaned and whether the shard was rebuilt rather than copied.
+- The same three on the blocking facade, whose `EventRun` blocks on each event using the client's runtime.
+
+### Removed
+
+- The raw-connection seam: `raw_connection` in the tool and `into_connection` in the library are gone and `Client::connection()` is private, so the tool touches nothing below the client API. Re-encode uses two clients for its concurrent read and write instead of two bare connections.
+
+## [27d82c7] - 2026-09-21
+
+Pull request #119: djbod contents: what each device holds, counted from its records
+
+### Added
+
+- `DeviceContents`, a client-facing operation that fetches a device's record copies from its node page by page and reports the versions with a shard on the device, the distinct keys, the blocks and the shard bytes computed from each record's size and scheme. No shard is read, so it is a directory walk on one node rather than a scrub, and an unknown device is `NotFound` (SPEC 19.1.3).
+- `djbod contents [<device>...] [--node-id <node>]`, printing device, label, node label, state, versions, keys, blocks and shard bytes, covering every device that is not removed when given no arguments, accepting a UUID or label, saying on stderr how many devices hold nothing, and giving the rows under `--json`.
+- `Client::device_contents` in the Rust library, in the blocking facade too, and `client.device_contents(device)` in Python.
+- SPEC 18.2.3 stating why records rather than free space are the measure, with 18.2.1 listing the command among the drain steps. `djbod status` reports each device's bytes from `statvfs`, which counts the whole filesystem and so cannot say whether a device is empty.
+
+## [6f4d6a3] - 2026-09-21
+
+Pull request #117: Error names by the workspace convention: ConnectionError and ClientError
+
+### Changed
+
+- `connection::ClientError` becomes `ConnectionError`, what one connection can meet, and `client::Error` becomes `ClientError`, what the client API can meet, whose `Connection` variant wraps the former. The client crate's error types are now `WireError`, `TlsError`, `ConnectionError`, `ClientError` and `AdminError`, one per module.
+
+## [e893ec2] - 2026-09-21
+
+Pull request #116: Error names by the workspace convention: AdminError and MembershipError
+
+### Changed
+
+- The client's `membership` module is renamed `admin`, since administration is what it holds, and its error becomes `AdminError`, following the workspace's `<Thing>Error` convention.
+- The node's `membership` module keeps its name, since it now holds exactly this node's own membership, and its error takes the plain `MembershipError` back, with an `Admin(AdminError)` variant for the network step and the rest the node's own.
+
+## [06f318f] - 2026-09-21
+
+Pull request #115: Administration in the client library
+
+### Changed
+
+- The purely network membership procedures move from `djbod-node` to `djbod_client::membership`: every change to the cluster document and everything built on them, including `propose`, `sync`, the `set_*` procedures, `resolve_device`, `resolve_node`, `remove_device`, `remove_node`, `scan_references` and the forced-removal pair (SPEC 6.2.6). The node keeps only what touches its own state directory: `join`, `add_devices`, `adopt_from_peers`, the startup address adoption and `connector_for`.
+- `MembershipError` in the client is what a client can meet, with the node-only variants gone and a `Document` variant replacing the old detour through `NodeError::InvalidDocument`, while `djbod_node::membership::LocalMembershipError` wraps it plus the node's own.
+- `djbod-cli` and `djbod-ui` depend on `djbod-client` alone, so the crates line up as core, proto, client, node and the front ends.
+
+## [89edbfd] - 2026-09-21
+
+Pull request #114: djbod on the client library: a node list, failover, no raw requests
+
+### Changed
+
+- `djbod` is built on `djbod_client::Client`, retiring the last duplicated client code. `--node` and `DJBOD_NODE` take a comma-separated list of addresses tried in order, with the library's rule about what may be retried, and one address behaves as before.
+- Every command uses the client's methods rather than building raw requests and matching on responses, and the tool's own paging loop is gone. The event streams, `move-shard` and the re-encode pipe take a connection from the client through `Client::into_connection`.
+- The `cluster` commands still take one peer address but use the node the client reached, so a dead first address is skipped there too.
+- `get-cluster-id` and `identity` ask each configured node in turn, and when a node runs a build from before the nil-id ask, its refusal names its cluster, so the id is read from that message, printed as usual, and a note on stderr says the node wants upgrading (SPEC 19.1.5.1).
+
+## [84f2bb5] - 2026-09-21
+
+Pull request #118: README: the system runs on three machines
+
+### Changed
+
+- The `README.md` status section says that a cluster of three machines with six disks between them is running, in place of the statement that the system had not yet run for long on several real machines, and keeps a caution since the software is young.
+
+## [458a4e8] - 2026-09-20
+
+Pull request #112: The djbod Python package: the blocking client wrapped with PyO3
+
+### Added
+
+- `crates/djbod-python`, wrapping `djbod_client::blocking::Client` with PyO3 and built by maturin as an `abi3` extension module, so one wheel serves Python 3.10 and later.
+- `Client(nodes, cluster=None, tls_ca=None, tls_cert=None, tls_key=None)`, taking what the `djbod` command takes, with failover and cluster-id discovery from the Rust client. Every method blocks and releases the interpreter lock while it waits on the network, and `put_file` and `get_to_file` stream with one chunk in memory.
+- Exceptions defined in Python so they subclass naturally: `Error`, `Unreachable` with the addresses tried, `NodeError` with the code and detail as the node reported them, and `NotFound` as its subclass, with bad inputs raising `ValueError`.
+- Results with structure of their own returned as plain dicts with the JSON field names, so what the command prints and what Python sees are the same, with `ObjectInfo`, `KeyEntry`, `ListPage`, `Status` and `Identity` as small classes, plus type stubs and `py.typed`.
+- `scripts/python-tests.sh`, which builds the node, makes a virtual environment, runs `maturin develop` and runs a pytest suite against a real `djbod-node`.
+
+## [ebc4340] - 2026-09-20
+
+Pull request #111: The Rust client API: node addresses with failover, one method per operation
+
+### Added
+
+- `djbod_client::Client`: `ClientOptions::new` takes several node addresses tried in order, since any node answers any request, with the cluster id given by `.cluster(id)` or learned from the first node that answers, and Transport Layer Security set by `.connector(...)` (SPEC 19.1.5.1).
+- Failover over one kept connection: when it fails, the next request goes over a fresh connection to the next address, and only requests safe to repeat are retried on the client's own initiative, which is reads, `head`, listing, `status` and the document. A write, a delete, a repair or a refusal by the node is never repeated.
+- One method per operation: `put` and `put_from_reader`, `get` and `get_to_writer`, `head`, `delete`, `list` with `ListPage::next_start_after` or `list_all`, `repair`, `status`, `identity` and `cluster_document`.
+- `Error::detail()`, giving the node's `ErrorDetail` when the node answered with one, `is_not_found()` for the common case, and `Unreachable` listing every address tried and why it failed (SPEC 16.2).
+- `djbod_client::blocking::Client`, the same client without `async`, running on a current-thread runtime it owns and using `std::io::Read` and `Write` for the streaming methods.
+- SPEC 20.8 stating the library's obligations and 20.8.1 the bindings plan, with the protocol remaining the contract for native clients.
+
+## [dfb98ce] - 2026-09-20
+
+Pull request #109: UI: a dark theme switch in the header
+
+### Added
+
+- A dark theme switch at the right of the header, a moon reading "Dark" on the light theme and a sun reading "Light" on the dark one, remembered per browser and applied by a one-line script before the first paint so there is no flash. With nothing chosen the system's preference applies as before, and the tooltip says so.
+
+### Changed
+
+- The dark tokens gain a `data-theme="dark"` selector beside the media query, `color-scheme` follows so form controls and scrollbars match, and the header's lockup is swapped by script rather than by a media query, which cannot see a manual choice.
+
+## [75cdbf2] - 2026-09-20
+
+Pull request #110: Extract the djbod-client crate
+
+### Added
+
+- `crates/djbod-client`, holding the code that had lived inside `djbod-node`: `wire`, frames over tokio streams; `connection`, the `Hello` exchange, requests, responses, the streaming object operations and the node-to-node shard transfers, which are the same conversation; the client half of `transport`; and `build.rs` with the `BUILD` constant, since the build id travels in `Hello`. The crate depends on `djbod-core`, `djbod-proto`, tokio and rustls alone, so a client program no longer pulls in the server, clap, toml or tracing.
+
+### Changed
+
+- The node's `transport` keeps `TlsMaterial`, its own certificate which both accepts and connects, and `accept`, and re-exports the client half those are built on. Everything else in the node uses `djbod_client` directly, with no other re-export shims.
+
+## [7da535a] - 2026-09-20
+
+Pull request #108: Yellow parity slabs everywhere; the glowing status-light lockup in the web UI's header
+
+### Changed
+
+- The web interface header uses the status-light one-line unhyphenated lockup, light and on-dark, whose yellow parity slabs carry the glow filter, and everything else uses the plain yellow kit: the tab favicon as SVG and 32 px PNG, the application icon, and the `README.md` lockup in both schemes. The routes and build-versioned paths are unchanged, so browsers pick the new files up without a hard reload.
+
+## [05c09ca] - 2026-09-20
+
+Pull request #102: Match the logo blue to the UI accent, with yellow and status-light alternates
+
+### Changed
+
+- The mark uses the web interface's `--accent` in both tones, in place of the cyan-leaning sky blue chosen before there was anything to match, so the logo and the running application are no longer visibly different blues. The brand `README.md` records where the values come from so the two cannot quietly drift again.
+
+### Added
+
+- Two parity-colour alternates beside the orange in use, all three shipped so they can be judged side by side with a proof sheet showing them on both surfaces: a yellow set using the interface's own `--warning`, and a status-light set that brightens it and puts a soft glow behind the parity slabs so the diagonal reads as a row of lit indicators. The glow holds down to 16 px and below about 32 px simply warms the colour.
+- Palette, glow and output directory taken from the environment in `build.sh`, so every variant comes off one code path, with `gen.awk`'s `stack()` gaining an optional filter id that leaves the output byte-identical when unset.
+
+## [32ca228] - 2026-09-20
+
+Pull request #107: UI: the pagination key on its own line, and no 'more follow'
+
+### Changed
+
+- The paging row says only how many keys are on this page, since the Next button already says whether more follow, and the cursor moves to a line of its own beneath the row, empty on the first page.
+
+## [6a062f3] - 2026-09-20
+
+Pull request #106: UI: the key table scrolls in its own box and pages with Previous and Next
+
+### Changed
+
+- The key table scrolls in its own box rather than with the window, with its header held in place, taking the height left under the controls.
+- The list pages 100 keys at a time with Previous and Next in place of a More button that appended keys without end, showing the page number, how many keys the page holds and whether more follow, and the key the page starts after, which is the node's own paging cursor (SPEC 15.2.1). Going back reuses the cursors already seen, so Previous is exact, and changing the prefix or pressing List returns to page 1.
+
+## [f80202a] - 2026-09-20
+
+Pull request #105: djbod get-cluster-id and identity: ask a node who it is
+
+### Added
+
+- A handshake in which a client sends the nil universally unique identifier (UUID) as its cluster id to ask who is there; a node accepts that from a client only, never from a node, answers with its own `Hello` carrying the id, the cluster's name and its build, and closes the connection. Nothing else is served to a client that did not name the cluster, so a client pointed at the wrong cluster still fails before it can act (SPEC 19.1.5.1).
+- `djbod get-cluster-id --node <addr>`, needing no `--cluster` and printing the id alone so it can be captured in a shell variable, with `--json` adding the cluster name, the node and the build.
+- `djbod identity --node <addr>`, which asks the same way, connects with the answer and fetches the document to say in words who is there: the cluster, the node and its address, the build, the document version and the transport.
+
+### Changed
+
+- The nil UUID is never a cluster id, and the document validator refuses it (SPEC 6.2.1). A node from before this change refuses the nil id as a mismatch, and its refusal message names the cluster it serves, so the id is learned either way.
+
+## [ebf522e] - 2026-09-20
+
+Pull request #104: UI: destructive buttons are filled red, styled like the primary button
+
+### Changed
+
+- Delete on an object, and Remove and Remove node on the Nodes tab, are filled with the page's red and white text in the shape of the primary buttons, so every button on the page is plain, primary blue or destructive red. Primary and destructive buttons darken slightly on hover, and a disabled Remove node keeps its faded look.
+
+## [66f733a] - 2026-09-20
+
+Pull request #103: UI: the rail's head has a title at the left and the toggle at the right
+
+### Changed
+
+- The top of the navigation rail is a head row carrying a small uppercase title at the left and the collapse chevron at the right, so the row is filled rather than a lone button. Collapsed, the title is hidden like the section labels and the chevron sits centred.
+
+## [3b7b5d8] - 2026-09-20
+
+Pull request #100: UI: the one-line unhyphenated lockup in the header
+
+### Changed
+
+- The header shows the one-line unhyphenated lockup, and its on-dark variant under a dark colour scheme, in place of the two-line horizontal one, at 48 px high and so 203 px wide, above the kit's 200 px minimum for the inline lockup. The `README.md` keeps the two-line lockup, which the kit names for that use.
+
 ## [e88bb62] - 2026-09-20
 
 Pull request #101: Fix the title on the unhyphenated inline lockups
