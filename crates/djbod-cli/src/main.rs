@@ -806,7 +806,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             limit,
         } => {
             let mut client = connect(&cli).await?;
-            let djbod_client::ListPage { keys, truncated } = client
+            let page = client
                 .list(ListQuery {
                     prefix: prefix.clone(),
                     start_after: start_after.clone(),
@@ -814,25 +814,31 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 })
                 .await
                 .map_err(client_err)?;
-            {
-                {
-                    if cli.json {
-                        println!(
-                            "{}",
-                            serde_json::to_string_pretty(&serde_json::json!({
-                                "keys": keys,
-                                "truncated": truncated,
-                            }))?
-                        );
-                    } else {
-                        print!("{}", tables::list(&keys));
-                        if truncated {
-                            eprintln!(
-                                "(more keys follow; use --start-after {:?})",
-                                keys.last().map(|k| k.key.as_str()).unwrap_or("")
-                            );
-                        }
-                    }
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "keys": page.keys,
+                        "truncated": page.truncated,
+                        "unread": page.unread,
+                        "complete": page.complete,
+                    }))?
+                );
+            } else {
+                print!("{}", tables::list(&page.keys));
+                if page.truncated {
+                    eprintln!(
+                        "(more keys follow; use --start-after {:?})",
+                        page.keys.last().map(|k| k.key.as_str()).unwrap_or("")
+                    );
+                }
+            }
+            // The listing went around devices the cluster cannot read
+            // (SPEC 15.1): say so, and exit 2 when a key may be hidden.
+            if !page.unread.is_empty() {
+                eprintln!("{}", describe_unread(&page));
+                if !page.complete {
+                    std::process::exit(2);
                 }
             }
         }
@@ -1568,11 +1574,41 @@ fn at_current_scheme(
     record.k == document.k && record.m == document.m && record.block_size == document.block_size
 }
 
-/// Every key in the cluster, in pages.
+/// Every key in the cluster, for the whole-space walks. A listing that
+/// may be missing keys (SPEC 15.1) is refused: a walk that skipped
+/// objects without knowing would report a job done that was not.
 async fn all_keys(cli: &Cli) -> anyhow::Result<Vec<String>> {
     let mut client = connect(cli).await?;
-    let keys = client.list_all(None).await.map_err(client_err)?;
-    Ok(keys.into_iter().map(|e| e.key).collect())
+    let listing = client.list_all(None).await.map_err(client_err)?;
+    if !listing.unread.is_empty() {
+        eprintln!("{}", describe_unread(&listing));
+        if !listing.complete {
+            anyhow::bail!(
+                "the listing may be incomplete; bring the devices back or remove them from the cluster first"
+            );
+        }
+    }
+    Ok(listing.keys.into_iter().map(|e| e.key).collect())
+}
+
+/// The devices a listing went without (SPEC 15.1) and what that means
+/// for the keys shown.
+fn describe_unread(page: &djbod_client::ListPage) -> String {
+    let devices: Vec<String> = page
+        .unread
+        .iter()
+        .map(|u| format!("{} on node {}", u.device.0, u.node))
+        .collect();
+    let consequence = if page.complete {
+        "every key is still listed, since fewer than k+m devices are out"
+    } else {
+        "keys stored only on those devices cannot be seen, so the listing may be incomplete"
+    };
+    format!(
+        "listed around {} device(s) the cluster cannot read: {}; {consequence}; run `djbod status`",
+        page.unread.len(),
+        devices.join(", ")
+    )
 }
 
 /// How many objects are stored at a scheme or block size other than the

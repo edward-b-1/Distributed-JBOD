@@ -1365,6 +1365,25 @@ async fn a_destroyed_device_is_reported_unavailable() {
         "{err}"
     );
 
+    // A listing goes around the dead device (SPEC 15.1): one of four out
+    // is fewer than k+m, so every key is listed, the note names the
+    // device, and the exit code stays 0.
+    let (ok, out, err) = djbod(&test, &["list"]);
+    assert!(ok, "{err}");
+    assert!(out.contains('k'), "{out}");
+    assert!(err.contains("listed around 1 device(s)"), "{err}");
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(err.contains("every key is still listed"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "list"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["keys"].as_array().expect("keys").len(), 1);
+    assert_eq!(
+        json["unread"][0]["device"].as_str(),
+        Some(dead.id().0.to_string().as_str())
+    );
+
     // The device's contents were not checked: not damage, an incomplete
     // run, exit 3, and no per-key noise for the copies it held.
     let scrub = djbod_command()

@@ -166,12 +166,36 @@ impl KeyEntry {
     }
 }
 
-/// One page of a listing; `next_start_after` continues it.
+/// One page of a listing; `next_start_after` continues it. `unread` lists
+/// the devices whose records did not contribute (SPEC 15.1), each a dict
+/// of device and node; `complete` says whether every key can still
+/// appear, which holds while fewer than k+m devices are unread.
 #[pyclass(frozen, get_all)]
 struct ListPage {
     keys: Vec<Py<KeyEntry>>,
     truncated: bool,
     next_start_after: Option<String>,
+    unread: Py<PyAny>,
+    complete: bool,
+}
+
+/// An `IncompleteListing` warning (SPEC 15.1) when a listing went around
+/// so many devices that a key may be hidden. Nothing is wrong with the
+/// keys returned; the cluster needs attention.
+fn warn_if_incomplete(py: Python<'_>, page: &djbod_client::ListPage) -> PyResult<()> {
+    if page.complete {
+        return Ok(());
+    }
+    let message = format!(
+        "listed around {} device(s) the cluster cannot read, enough to hide a key: the listing may be incomplete",
+        page.unread.len()
+    );
+    let warning = py
+        .import("djbod.errors")?
+        .getattr("IncompleteListing")?
+        .call1((message, pythonize(py, &page.unread)?))?;
+    py.import("warnings")?.call_method1("warn", (warning,))?;
+    Ok(())
 }
 
 #[pyclass(frozen, get_all)]
@@ -410,9 +434,12 @@ impl Client {
                 limit,
             })
         })?;
+        warn_if_incomplete(py, &page)?;
         Ok(ListPage {
             next_start_after: page.next_start_after().map(str::to_string),
             truncated: page.truncated,
+            unread: pythonize(py, &page.unread)?.unbind(),
+            complete: page.complete,
             keys: page
                 .keys
                 .into_iter()
@@ -421,11 +448,13 @@ impl Client {
         })
     }
 
-    /// Every key under `prefix`, page after page.
+    /// Every key under `prefix`, page after page. Warns with
+    /// `IncompleteListing` when a key may be hidden (SPEC 15.1).
     #[pyo3(signature = (prefix=None))]
     fn list_all(&self, py: Python<'_>, prefix: Option<String>) -> PyResult<Vec<KeyEntry>> {
-        let keys = self.call(py, |inner| inner.list_all(prefix.as_deref()))?;
-        Ok(keys.into_iter().map(KeyEntry::from_proto).collect())
+        let listing = self.call(py, |inner| inner.list_all(prefix.as_deref()))?;
+        warn_if_incomplete(py, &listing)?;
+        Ok(listing.keys.into_iter().map(KeyEntry::from_proto).collect())
     }
 
     /// What one device holds, by UUID: versions, keys, blocks and shard

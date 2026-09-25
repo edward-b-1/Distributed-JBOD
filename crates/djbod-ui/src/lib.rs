@@ -899,9 +899,14 @@ async fn list_objects(State(app): State<Arc<App>>, Query(params): Query<ListPara
         limit: params.limit,
     };
     match conn.request(Request::ListKeys(query)).await? {
-        Reply::ListKeys { keys, truncated } => {
-            Ok(Json(json!({ "keys": keys, "truncated": truncated })))
-        }
+        Reply::ListKeys {
+            keys,
+            truncated,
+            unread,
+            complete,
+        } => Ok(Json(
+            json!({ "keys": keys, "truncated": truncated, "unread": unread, "complete": complete }),
+        )),
         other => Err(ApiError::unexpected(other)),
     }
 }

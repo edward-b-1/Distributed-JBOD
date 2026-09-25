@@ -946,15 +946,45 @@ async fn delete_version_everywhere(
 /// version's record on k+m devices) collapse to the newest version per
 /// key, which can make a page shorter than the bound; that is why the
 /// truncation flag also says whether any node had more.
+///
+/// The listing goes around what cannot be read (15.1.1, 5.6, 13.1): a
+/// node that cannot be reached, or a device its node cannot read,
+/// contributes no keys and is named in the page instead, and the page
+/// says whether every key can still appear: it can while fewer than k+m
+/// devices are unread, since every version has a record copy on k+m
+/// devices, and may not once that many are out.
 async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
+    let document = node.document();
     let mut newest: BTreeMap<String, KeyEntry> = BTreeMap::new();
     let mut any_node_truncated = false;
+    let mut unread: Vec<UnavailableDevice> = Vec::new();
     // The smallest "last key" among the nodes that had more: the merged
     // page may not go beyond it.
     let mut horizon: Option<String> = None;
-    for (target, response) in broadcast(node, Request::LocalList(query.clone())).await? {
-        match response {
-            Response::LocalList { entries, truncated } => {
+    for (target, answer) in broadcast_each(node, Request::LocalList(query.clone())).await? {
+        match answer {
+            Err(Failure::Error(detail)) if detail.code == ErrorCode::NodeUnreachable => {
+                unread.extend(
+                    document
+                        .devices
+                        .iter()
+                        .filter(|d| d.node == target && d.state != DeviceState::Removed)
+                        .map(|d| UnavailableDevice {
+                            device: d.id,
+                            node: target,
+                        }),
+                );
+            }
+            Err(f) => return Err(f),
+            Ok(Response::LocalList {
+                entries,
+                truncated,
+                unread: unread_here,
+            }) => {
+                unread.extend(unread_here.into_iter().map(|device| UnavailableDevice {
+                    device,
+                    node: target,
+                }));
                 any_node_truncated |= truncated;
                 if truncated {
                     if let Some(last) = entries.last() {
@@ -973,7 +1003,7 @@ async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failu
                     }
                 }
             }
-            other => {
+            Ok(other) => {
                 return Err(error(
                     ErrorCode::ProtocolViolation,
                     format!("{target} answered LocalList with {other:?}"),
@@ -986,9 +1016,13 @@ async fn list_keys(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failu
         keys.retain(|e| e.key <= *horizon);
     }
     let (keys, cut) = crate::local_ops::page_of_keys(keys, query.limit);
+    unread.sort_by_key(|u| (u.node, u.device));
+    let complete = unread.len() < document.k as usize + document.m as usize;
     Ok(Response::ListKeys {
         keys,
         truncated: cut || any_node_truncated,
+        unread,
+        complete,
     })
 }
 

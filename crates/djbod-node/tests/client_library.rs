@@ -167,11 +167,12 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
     assert_eq!(page.next_start_after(), Some("k"));
     let all = client.list_all(None).await.expect("list all");
     assert_eq!(
-        all.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+        all.keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
         vec!["k", "k2", "k3"]
     );
+    assert!(all.unread.is_empty() && all.complete, "{all:?}");
     let under_prefix = client.list_all(Some("k2")).await.expect("list prefix");
-    assert_eq!(under_prefix.len(), 1);
+    assert_eq!(under_prefix.keys.len(), 1);
 
     let status = client.status().await.expect("status");
     assert_eq!(status.cluster_id, cluster);
@@ -229,7 +230,7 @@ async fn the_blocking_client_does_the_same_without_async() {
         let mut sink = Vec::new();
         let record = client.get_to_writer("two", &mut sink)?.record;
         assert_eq!(sink, body);
-        let keys = client.list_all(None)?;
+        let keys = client.list_all(None)?.keys;
         let status = client.status()?;
         Ok((
             keys.len(),

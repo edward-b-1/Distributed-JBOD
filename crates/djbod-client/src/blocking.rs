@@ -15,8 +15,8 @@ use uuid::Uuid;
 use djbod_core::cluster::ClusterDocument;
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{
-    DeviceContents, DrainEvent, KeyEntry, ListQuery, ObjectRead, ObjectWrite, RepairReport,
-    ScrubEvent, StreamEnd,
+    DeviceContents, DrainEvent, ListQuery, ObjectRead, ObjectWrite, RepairReport, ScrubEvent,
+    StreamEnd,
 };
 
 pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, MoveShardReport, Status};
@@ -114,7 +114,7 @@ impl Client {
         self.runtime.block_on(self.inner.list(query))
     }
 
-    pub fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
+    pub fn list_all(&mut self, prefix: Option<&str>) -> Result<ListPage, ClientError> {
         self.runtime.block_on(self.inner.list_all(prefix))
     }
 
