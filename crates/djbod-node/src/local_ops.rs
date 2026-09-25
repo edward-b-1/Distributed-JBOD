@@ -975,7 +975,18 @@ async fn local_scrub(
         temporary_max_age: std::time::Duration::from_secs(node.config().temporary_max_age_secs),
     };
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubItem>(64);
-    let devices = node.devices();
+    // A removed device (18.2.1) is retired: nothing on it will be used
+    // again, so it is neither scrubbed nor reported.
+    let document = node.document();
+    let devices: Vec<Arc<Device>> = node
+        .devices()
+        .into_iter()
+        .filter(|d| {
+            document
+                .device(d.id())
+                .is_some_and(|entry| entry.state != DeviceState::Removed)
+        })
+        .collect();
     let unavailable = node.unavailable_devices();
     let engine = tokio::task::spawn_blocking(move || -> Result<(), DeviceError> {
         // A listed device no configured path holds (5.6): one finding

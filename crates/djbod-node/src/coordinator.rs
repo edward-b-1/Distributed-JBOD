@@ -615,20 +615,16 @@ async fn delete_version_everywhere(
 ) -> Result<(), Failure> {
     let document = node.document();
     for shard in &record.shards {
-        let owner = document
+        // A device gone from the document, or listed as removed, is never
+        // written to or cleaned (18.2.1): whatever it holds is erased if
+        // the disk is ever added again.
+        let Some(owner) = document
             .device(shard.device)
+            .filter(|d| d.state != DeviceState::Removed)
             .map(|d| d.node)
-            .ok_or_else(|| {
-                Failure::Error(ErrorDetail {
-                    device: Some(shard.device),
-                    key: Some(record.key.clone()),
-                    version: Some(record.version),
-                    ..ErrorDetail::new(
-                        ErrorCode::DeviceUnavailable,
-                        format!("{} is not in the cluster document", shard.device),
-                    )
-                })
-            })?;
+        else {
+            continue;
+        };
         let mut connection = connect_to(node, owner).await?;
         connection
             .request(Request::DeleteVersion {
@@ -1963,8 +1959,12 @@ async fn remove_stale_copies(
     let document = node.document();
     let mut removed = Vec::new();
     for (device, _) in stale {
-        let Some(owner) = document.device(*device).map(|d| d.node) else {
-            continue; // device gone from the cluster; nothing to clean
+        let Some(owner) = document
+            .device(*device)
+            .filter(|d| d.state != DeviceState::Removed)
+            .map(|d| d.node)
+        else {
+            continue; // device gone from the cluster, or removed; nothing to clean
         };
         let mut connection = connect_to(node, owner).await?;
         connection
@@ -1986,18 +1986,24 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
         .scheme()
         .map_err(|e| error(ErrorCode::RecordsInconsistent, e.to_string()))?;
     let document = node.document();
-    // Devices that have left the document (6.2.6.3) hold nothing the
-    // cluster can reach: their record copies cannot be rewritten and their
-    // shards are rebuilt onto other devices (18.3).
+    // Devices that have left the document (6.2.6.3) or are listed as
+    // removed (18.2.1.1) hold nothing the cluster will use again: their
+    // record copies are not rewritten and their shards are rebuilt onto
+    // other devices (18.3).
+    let in_service = |device: DeviceId| {
+        document
+            .device(device)
+            .is_some_and(|d| d.state != DeviceState::Removed)
+    };
     let lost: Vec<ShardIndex> = record
         .shards
         .iter()
-        .filter(|s| document.device(s.device).is_none())
+        .filter(|s| !in_service(s.device))
         .map(|s| ShardIndex(s.index))
         .collect();
     let missing_record_copies: Vec<DeviceId> = missing_record_copies
         .into_iter()
-        .filter(|d| document.device(*d).is_some())
+        .filter(|d| in_service(*d))
         .collect();
 
     if record.size == 0 {
@@ -2303,9 +2309,14 @@ async fn open_repair_sources(
         let device = record
             .device_for(index)
             .expect("validated record lists every index");
-        // A device that has left the document (6.2.6.3) is a lost shard,
-        // to be rebuilt elsewhere (18.3), not a failure.
-        let Some(owner) = document.device(device).map(|d| d.node) else {
+        // A device that has left the document (6.2.6.3), or is listed
+        // as removed (18.2.1), is a lost shard, to be rebuilt elsewhere
+        // (18.3), not a failure.
+        let Some(owner) = document
+            .device(device)
+            .filter(|d| d.state != DeviceState::Removed)
+            .map(|d| d.node)
+        else {
             sources.push(RepairSource {
                 index,
                 device,

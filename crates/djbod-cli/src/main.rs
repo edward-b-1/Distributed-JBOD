@@ -280,7 +280,18 @@ enum ClusterCommand {
     },
     /// Mark a device removed. Refused while any object still has a shard
     /// on it: drain it first. The device is named by UUID or label.
-    RemoveDevice { device: String },
+    RemoveDevice {
+        device: String,
+        /// The device is dead or gone and cannot be drained: mark it
+        /// removed anyway, without checking what it holds. Its shards are
+        /// rebuilt elsewhere by `djbod scrub --repair`; a version with more
+        /// than m shards on it is lost. Asks for confirmation first.
+        #[arg(long)]
+        force: bool,
+        /// Skip the confirmation prompt of --force.
+        #[arg(long, requires = "force")]
+        yes: bool,
+    },
     /// Drop a node and its devices from the cluster. Refused while any
     /// object still has a shard on them: drain them first. The node stops
     /// serving once it has acknowledged.
@@ -608,7 +619,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         println!("transport {transport}");
                         println!();
                         print!("{}", tables::status(&devices, &nodes));
-                        let unavailable_count = devices.iter().filter(|d| !d.available).count();
+                        let unavailable_count = devices
+                            .iter()
+                            .filter(|d| !d.available && d.state != DeviceState::Removed)
+                            .count();
                         if unavailable_count > 0 {
                             eprintln!(
                                 "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed)"
@@ -1401,7 +1415,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     }
                 }
-                ClusterCommand::RemoveDevice { device } => {
+                ClusterCommand::RemoveDevice {
+                    device,
+                    force: true,
+                    yes,
+                } => {
+                    let device_id = resolve_device(&cli, device).await?;
+                    force_remove_device(&cli, node, cluster, device_id, *yes).await?
+                }
+                ClusterCommand::RemoveDevice {
+                    device,
+                    force: false,
+                    ..
+                } => {
                     let device_id = resolve_device(&cli, device).await?;
                     let (document, changed) = djbod_client::admin::remove_device(
                         &connector(&cli)?,
@@ -1633,6 +1659,103 @@ async fn reencode_one(
         (Err(e), _) => Err(anyhow::anyhow!("read failed: {}", client_err(e))),
         (Ok(_), Err(e)) => Err(anyhow::anyhow!("write failed: {}", client_err(e))),
     }
+}
+
+/// `cluster remove-device --force` (SPEC 18.2.1.1): say what it means,
+/// confirm, mark the device removed. Nothing is scanned and nothing is
+/// moved; `scrub --repair` rebuilds what the device held.
+async fn force_remove_device(
+    cli: &Cli,
+    peer: SocketAddr,
+    cluster: Uuid,
+    device_id: DeviceId,
+    yes: bool,
+) -> anyhow::Result<()> {
+    use djbod_client::admin;
+    let mut client = connect(cli).await?;
+    let status = client.status().await.map_err(client_err)?;
+    let document = client.cluster_document().await.map_err(client_err)?;
+    let entry = document
+        .device(device_id)
+        .ok_or_else(|| anyhow::anyhow!("device {device_id} is not in the cluster document"))?;
+    let m = document.m;
+    let needed = document.k as usize + document.m as usize;
+    // Devices that could take a rebuilt shard once this one is gone.
+    let remaining = status
+        .devices
+        .iter()
+        .filter(|d| d.device != device_id && d.state == DeviceState::Active && d.available)
+        .count();
+    let readable = status
+        .devices
+        .iter()
+        .any(|d| d.device == device_id && d.available);
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "device": device_id,
+                "node": entry.node,
+                "state": format!("{:?}", entry.state).to_lowercase(),
+                "readable": readable,
+                "remaining_active_devices": remaining,
+                "needed_per_version": needed,
+            }))?
+        );
+    } else {
+        println!(
+            "device {} on node {} is {}{}",
+            device_id.0,
+            entry.node.0,
+            format!("{:?}", entry.state).to_lowercase(),
+            if readable {
+                " and its node can still read it"
+            } else {
+                " and its node cannot read it"
+            }
+        );
+        println!(
+            "marking it removed loses every shard on it: versions with at most m = {m} shards there are rebuilt from the others by `djbod scrub --repair`; any with more are lost. Nothing is checked or moved now."
+        );
+        if remaining < needed {
+            println!(
+                "warning: {remaining} active device(s) would remain and every version needs {needed}; nothing can be rebuilt until a device is added"
+            );
+        }
+    }
+    if !yes {
+        eprint!("type the device id to mark it removed: ");
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if line.trim() != device_id.0.to_string() {
+            bail!("confirmation did not match; nothing changed");
+        }
+    }
+    let (document, changed) =
+        admin::remove_device_forced(&connector(cli)?, peer, cluster, device_id)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "device": device_id,
+                "document_version": document.version,
+                "changed": changed,
+            }))?
+        );
+    } else if changed {
+        println!(
+            "device {} removed (document version {}); run `djbod scrub --repair` to rebuild what it held, then take it out of its node's configuration and restart that node",
+            device_id.0, document.version
+        );
+    } else {
+        println!(
+            "device {} was already removed; nothing changed",
+            device_id.0
+        );
+    }
+    Ok(())
 }
 
 /// `cluster remove-node --force` (SPEC 6.2.6.3): show the cost, confirm,

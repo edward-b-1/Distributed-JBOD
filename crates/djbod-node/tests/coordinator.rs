@@ -1729,3 +1729,64 @@ async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+/// SPEC 18.2.1.1, 18.3: a device marked `removed` is lost to repair as one
+/// dropped from the document is: with its directory destroyed, the read
+/// reconstructs around it, the repair relocates its shard onto the spare
+/// device without touching the removed one, and a later write replacing
+/// the object cleans nothing there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rebuilds_the_shards_of_a_device_marked_removed() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize + 9, 81);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let before = head(&mut client, "k").await.expect("head");
+    let dead = before.shards[2].device;
+    let spare = spare_device(&test, &before);
+
+    // The forced removal: the device stays in the document as removed.
+    // (Its directory is intact here so that the read's record lookup,
+    // which still wants every copy, succeeds; #174 is that rule.)
+    let mut next = test.node.document();
+    next.version += 1;
+    for d in next.devices.iter_mut() {
+        if d.id == dead {
+            d.state = DeviceState::Removed;
+        }
+    }
+    test.node.apply_document(next).expect("apply");
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+
+    let report = repair(&mut client, "k").await;
+    let shard = report
+        .shards
+        .iter()
+        .find(|s| s.index == 2)
+        .expect("shard 2");
+    assert_eq!(shard.condition, ShardCondition::Lost);
+    assert!(shard.rewritten);
+    assert_eq!(shard.relocated_to, Some(spare));
+    let after = head(&mut client, "k").await.expect("head");
+    assert_eq!(after.revision, 1);
+    assert_eq!(after.device_for(ShardIndex(2)), Some(spare));
+    assert!(after.shard_on(dead).is_none());
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert!(read.reconstructed.is_empty(), "{:?}", read.reconstructed);
+
+    // Now the directory goes too. Replacing the object deletes the old
+    // version everywhere it can be deleted; the removed device is skipped
+    // rather than failing the put, and nothing is recreated there.
+    let root = test.node.device(dead).expect("device").root().to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+    client
+        .put_object("k", &body[..BLOCK as usize], CHUNK, None)
+        .await
+        .expect("put again");
+    assert!(!root.exists());
+}

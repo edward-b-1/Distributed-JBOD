@@ -426,13 +426,13 @@ async fn drain_and_scrub_stream_events_as_json_lines() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("json line"))
         .collect();
-    // The removed device is still open on the node until its path leaves
-    // the node's configuration, so the node still scrubs it.
+    // The removed device is retired (SPEC 18.2.1): still open on the node
+    // until its path leaves the configuration, but no longer scrubbed.
     let summaries = lines
         .iter()
         .filter(|l| l["event"] == "node_summary")
         .count();
-    assert_eq!(summaries, 5, "one per device the node has open: {lines:?}");
+    assert_eq!(summaries, 4, "one per device still in service: {lines:?}");
     assert!(
         lines
             .iter()

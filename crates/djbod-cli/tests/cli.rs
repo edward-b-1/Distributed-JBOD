@@ -1346,3 +1346,81 @@ async fn a_destroyed_device_is_reported_unavailable() {
     assert!(err.contains(&dead.id().0.to_string()), "{err}");
     assert!(!root.exists(), "{} was recreated", root.display());
 }
+
+/// SPEC 18.2.1.1: a device whose directory is gone cannot be drained;
+/// `remove-device --force` marks it removed after a confirmation, and
+/// `scrub --repair` rebuilds what it held onto the remaining devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
+    let test = start_node(5, 3, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    let body = xorshift64_bytes(300_000, 17);
+    std::fs::write(&source, &body).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, _) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let dead = record["shards"][1]["device"]
+        .as_str()
+        .expect("device")
+        .to_string();
+    let root = test
+        .node
+        .devices()
+        .into_iter()
+        .find(|d| d.id().0.to_string() == dead)
+        .expect("device")
+        .root()
+        .to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    // Without --yes the command wants the id typed back; nothing on stdin
+    // means nothing changes.
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &dead, "--force"]);
+    assert!(!ok);
+    assert!(err.contains("confirmation did not match"), "{err}");
+    let (ok, out, _) = djbod(&test, &["cluster", "remove-device", &dead]);
+    assert!(!ok, "{out}");
+
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "remove-device", &dead, "--force", "--yes"],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("cannot read it"), "{out}");
+    assert!(out.contains("removed (document version 2)"), "{out}");
+    assert!(out.contains("scrub --repair"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("removed"), "{out}");
+
+    // The scrub finds the version that lost a copy and rebuilds its shard
+    // elsewhere; the run is complete and clean, and the read no longer
+    // reconstructs anything.
+    let (ok, _, err) = djbod(&test, &["scrub", "--repair"]);
+    assert!(ok, "{err}");
+    assert!(err.contains("1 repair(s)"), "{err}");
+    assert!(
+        err.contains("complete, everything found was repaired"),
+        "{err}"
+    );
+    let output = dir.path().join("out.bin");
+    let (ok, _, err) = djbod(&test, &["get", "k", output.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert_eq!(std::fs::read(&output).expect("output"), body);
+    let (ok, out, _) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert!(
+        record["shards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["device"] != dead),
+        "{record}"
+    );
+    assert_eq!(record["revision"], 1, "{record}");
+    assert!(!root.exists(), "the repair recreated the removed device");
+}
