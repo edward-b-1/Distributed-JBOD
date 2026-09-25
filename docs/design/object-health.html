@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Object Health</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --accent-track: #d6e6f9; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; --unknown: #b9b8b2;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; --unknown: #4a4a47; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; --unknown: #4a4a47; }
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --accent: #2a78d6; --accent-track: #d6e6f9; --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; --unknown: #b9b8b2; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; --unknown: #4a4a47; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding-block: 24px 48px; padding-inline: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; text-wrap: balance; }
+  .lede { color: var(--text-2); margin: 0 0 8px; max-width: 65ch; }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 28px; padding: 0; list-style: none; color: var(--text-2); font-size: 13px; }
+  .facts b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  h2 { font-size: 15px; font-weight: 600; margin: 36px 0 6px; }
+  h3 { font-size: 13px; font-weight: 600; margin: 22px 0 4px; }
+  .note { color: var(--text-2); margin: 0 0 12px; max-width: 70ch; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
+  .state-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  .mock .frame { display: grid; grid-template-columns: 120px 1fr; }
+  .mock aside { background: var(--surface); border-right: 1px solid var(--line); padding: 8px 6px; font-size: 12px; }
+  .mock aside div { padding: 5px 8px; border-radius: 6px; color: var(--text-2); }
+  .mock aside div.on { background: var(--accent-track); color: var(--text); font-weight: 600; }
+  .mock main { padding: 10px 12px; display: grid; gap: 8px; }
+  .mock code { font-family: var(--mono); font-size: 11.5px; }
+  .num { font-variant-numeric: tabular-nums; }
+  /* the marks, as in the console */
+  .mk { display: inline-block; width: .7em; height: .7em; margin-right: .45em; vertical-align: -.02em; background: var(--good); border-radius: 50%; flex: none; }
+  .mk.bad { background: var(--critical); border-radius: .12em; }
+  .mk.warn { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .mk.off { background: none; border: .15em solid var(--muted); box-sizing: border-box; }
+  .mk.unk { background: var(--unknown); border-radius: .12em; }
+  /* cards */
+  .health { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .health .mark { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--good-soft); flex: none; }
+  .health .mark::before { content: ""; width: 12px; height: 12px; border-radius: 50%; background: var(--good); }
+  .health.bad .mark { background: var(--critical-soft); } .health.bad .mark::before { background: var(--critical); border-radius: 2px; }
+  .health.warn .mark { background: var(--warning-soft); } .health.warn .mark::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: 13px; height: 12px; }
+  .health.unk .mark { background: var(--line); } .health.unk .mark::before { background: var(--unknown); border-radius: 2px; }
+  .health .t { font-weight: 600; } .health .s { color: var(--text-2); font-size: 12px; }
+  .health .go { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+  .health .go span { display: block; text-align: right; }
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; }
+  .tile .l { color: var(--text-2); font-size: 11px; } .tile .v { font-size: 15px; font-weight: 600; } .tile .s { color: var(--text-2); font-size: 11px; }
+  .tile.bad .v { color: var(--critical); }
+  /* B: the bar */
+  .bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; background: var(--line); margin: 6px 0 4px; }
+  .bar i { display: block; height: 100%; }
+  .bar .g { background: var(--good); } .bar .w { background: var(--warning); } .bar .c { background: var(--critical); }
+  .bar .u { background: repeating-linear-gradient(135deg, var(--unknown) 0 3px, transparent 3px 6px); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-2); }
+  .legend b { color: var(--text); font-weight: 600; }
+  /* tables */
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.id, .id { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .cap { font-size: 12px; color: var(--text-2); }
+  .link { color: var(--accent); }
+  .pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--critical-soft); color: var(--text); }
+  .pill.ok { background: var(--good-soft); } .pill.warn { background: var(--warning-soft); }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .panel h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .btn { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 3px 9px; font-size: 12px; color: var(--text); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolbar select, .toolbar input { border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 6px; padding: 3px 8px; font-size: 12px; font-family: inherit; }
+  .callout { border-left: 3px solid var(--critical); background: var(--critical-soft); padding: 8px 10px; border-radius: 0 6px 6px 0; font-size: 12.5px; }
+  .callout.ok { border-color: var(--good); background: var(--good-soft); }
+  .callout.warn { border-color: var(--warning); background: var(--warning-soft); }
+  .callout b { font-weight: 600; }
+  .stack { display: grid; gap: 8px; }
+  .kbd { font-family: var(--mono); font-size: 11.5px; background: var(--line); padding: 0 4px; border-radius: 3px; }
+  .verdict { margin-top: 32px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); max-width: 70ch; }
+  .verdict p { margin: 0 0 8px; } .verdict p:last-child { margin: 0; }
+</style>
+</head>
+<body>
+
+<h1>Object health in the web UI</h1>
+<p class="lede">How the console could say how many objects the cluster holds and whether each can be read, drawn in the console's own colours, light and dark side by side. Every mock uses the demo cluster as it stands today.</p>
+<ul class="facts">
+  <li>scheme <b>2+1</b>, three shards per object, any two suffice</li>
+  <li><b>245,756</b> versions stored</li>
+  <li>devbox4 unreachable, its devices <b>demo-d1</b> and <b>demo-d2</b> unavailable</li>
+  <li>every object has two shards on devbox4, so <b>every GET fails</b> right now</li>
+</ul>
+
+<h2>1. The card on the Overview</h2>
+<p class="note">Three treatments of the same numbers, each sitting under the cluster health card that already exists. The counts come from a records-only scan, so the card is refreshed on demand and says when it was last computed, rather than on every page refresh.</p>
+
+<h3>A. A second health card</h3>
+<p class="note">Same shape as the cluster card: one mark, one line, one sub-line, and an action on the right. The completeness statement is the sub-line's last clause.</p>
+<div class="pair">
+  <div><p class="state-label">light</p>
+  <div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="health bad"><div class="mark"></div><div><div class="t">245,756 objects unreadable</div><div class="s">0 intact, 0 degraded, <b>245,756 unreadable</b>; complete, since no unreachable node holds 3 devices. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span><span>Unreadable keys &rarr;</span></div></div>
+    <div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">3</div><div class="s">1 unreachable</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div><div class="s">5 active, 2 unavailable</div></div><div class="tile"><div class="l">Used</div><div class="v">70 GiB</div><div class="s">of 2.7 TiB</div></div><div class="tile"><div class="l">Document</div><div class="v">v25</div><div class="s">3 hold it</div></div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark</p>
+  <div class="mock dark"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="health bad"><div class="mark"></div><div><div class="t">245,756 objects unreadable</div><div class="s">0 intact, 0 degraded, <b>245,756 unreadable</b>; complete, since no unreachable node holds 3 devices. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span><span>Unreadable keys &rarr;</span></div></div>
+    <div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">3</div><div class="s">1 unreachable</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div><div class="s">5 active, 2 unavailable</div></div><div class="tile"><div class="l">Used</div><div class="v">70 GiB</div><div class="s">of 2.7 TiB</div></div><div class="tile"><div class="l">Document</div><div class="v">v25</div><div class="s">3 hold it</div></div></div>
+  </main></div></div></div>
+</div>
+
+<h3>B. A segmented bar</h3>
+<p class="note">The proportions at a glance: green intact, amber degraded, red unreadable, and a hatched grey segment for objects that may exist but cannot be counted. Below it the counts and the completeness line. The drawing is only worth having when the counts are mixed; today it is one red bar.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; today</p>
+  <div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="panel"><div class="row"><h4 style="margin:0">Objects <span class="cap num">245,756 versions</span></h4><span class="cap" style="margin-left:auto">computed 4 min ago</span><span class="btn">Refresh</span></div>
+      <div class="bar"><i class="c" style="width:100%"></i></div>
+      <div class="legend"><span><i class="mk"></i><b>0</b> intact</span><span><i class="mk warn"></i><b>0</b> degraded</span><span><i class="mk bad"></i><b>245,756</b> unreadable</span><span><i class="mk unk"></i><b>0</b> uncountable</span><span class="link" style="margin-left:auto">Unreadable keys &rarr;</span></div>
+      <div class="cap" style="margin-top:6px">Complete: no unreachable node holds 3 devices, so no object is hidden entirely.</div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; after demo-d1 is drained and devbox4 goes down again</p>
+  <div class="mock dark"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="panel"><div class="row"><h4 style="margin:0">Objects <span class="cap num">245,903 versions</span></h4><span class="cap" style="margin-left:auto">computed 1 min ago</span><span class="btn">Refresh</span></div>
+      <div class="bar"><i class="g" style="width:0.06%"></i><i class="w" style="width:99.9%"></i></div>
+      <div class="legend"><span><i class="mk"></i><b>147</b> intact</span><span><i class="mk warn"></i><b>245,756</b> degraded</span><span><i class="mk bad"></i><b>0</b> unreadable</span><span><i class="mk unk"></i><b>0</b> uncountable</span><span class="link" style="margin-left:auto">Degraded keys &rarr;</span></div>
+      <div class="cap" style="margin-top:6px">Every object can be read, but 245,756 have one shard on an unavailable device and would be lost with one more failure.</div></div>
+  </main></div></div></div>
+</div>
+
+<h3>C. Tiles in the existing row</h3>
+<p class="note">The lightest touch: the Overview's tile row gains Objects and Unreadable, and the mark on the Objects section in the rail carries the count. No new card; the detail lives on the Objects page.</p>
+<div class="pair">
+  <div><p class="state-label">light</p>
+  <div class="mock light"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects <span class="pill">245,756</span></div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">3</div><div class="s">1 unreachable</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div><div class="s">2 unavailable</div></div><div class="tile"><div class="l">Objects</div><div class="v num">245,756</div><div class="s">computed 4 min ago</div></div><div class="tile bad"><div class="l">Unreadable</div><div class="v num">245,756</div><div class="s">0 degraded &middot; complete</div></div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark</p>
+  <div class="mock dark"><div class="frame"><aside><div class="on">Overview</div><div>Nodes</div><div>Objects <span class="pill">245,756</span></div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="health bad"><div class="mark"></div><div><div class="t">1 of 3 nodes unreachable</div><div class="s">devbox4 at 192.168.1.234:5263: connection refused</div></div><div class="go">Nodes &rarr;</div></div>
+    <div class="tiles"><div class="tile"><div class="l">Nodes</div><div class="v">3</div><div class="s">1 unreachable</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div><div class="s">2 unavailable</div></div><div class="tile"><div class="l">Objects</div><div class="v num">245,756</div><div class="s">computed 4 min ago</div></div><div class="tile bad"><div class="v num" style="color:var(--critical)">245,756</div><div class="l">Unreadable</div><div class="s">0 degraded &middot; complete</div></div></div>
+  </main></div></div></div>
+</div>
+
+<h2>2. The four states the card must express</h2>
+<p class="note">Whichever treatment is chosen, these are the sentences. Shown in treatment A. The last state is the one the scrub already has: the answer is incomplete and says so, rather than pretending.</p>
+<div class="pair">
+  <div class="stack light" style="padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+    <div class="health"><div class="mark"></div><div><div class="t">All 245,756 objects intact</div><div class="s">every shard on an available device. Computed 2 min ago.</div></div><div class="go"><span>Refresh</span></div></div>
+    <div class="health warn"><div class="mark"></div><div><div class="t">245,756 objects degraded</div><div class="s">readable, but one shard of each is on an unavailable device; one more failure loses them. Computed 1 min ago.</div></div><div class="go"><span>Refresh</span><span>Degraded keys &rarr;</span></div></div>
+    <div class="health bad"><div class="mark"></div><div><div class="t">245,756 objects unreadable</div><div class="s">0 intact, 0 degraded; fewer than 2 shards of each can be reached. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span><span>Unreadable keys &rarr;</span></div></div>
+    <div class="health unk"><div class="mark"></div><div><div class="t">Count incomplete</div><div class="s">88,742 intact, 0 degraded, 0 unreadable among the objects seen; devbox4 lists 3 devices, so objects stored only there are not counted. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span></div></div>
+  </div>
+  <div class="stack dark" style="padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+    <div class="health"><div class="mark"></div><div><div class="t">All 245,756 objects intact</div><div class="s">every shard on an available device. Computed 2 min ago.</div></div><div class="go"><span>Refresh</span></div></div>
+    <div class="health warn"><div class="mark"></div><div><div class="t">245,756 objects degraded</div><div class="s">readable, but one shard of each is on an unavailable device; one more failure loses them. Computed 1 min ago.</div></div><div class="go"><span>Refresh</span><span>Degraded keys &rarr;</span></div></div>
+    <div class="health bad"><div class="mark"></div><div><div class="t">245,756 objects unreadable</div><div class="s">0 intact, 0 degraded; fewer than 2 shards of each can be reached. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span><span>Unreadable keys &rarr;</span></div></div>
+    <div class="health unk"><div class="mark"></div><div><div class="t">Count incomplete</div><div class="s">88,742 intact, 0 degraded, 0 unreadable among the objects seen; devbox4 lists 3 devices, so objects stored only there are not counted. Computed 4 min ago.</div></div><div class="go"><span>Refresh</span></div></div>
+  </div>
+</div>
+
+<h2>3. From the count to the keys</h2>
+<p class="note">The card's link opens the Objects page with a health filter set, next to the prefix filter that exists. The table gains a Shards column: how many of the object's shards are on available devices, with the unavailable ones named on hover. The same column marks every listing, filtered or not, so a damaged object stands out while browsing.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; Objects, filtered to unreadable</p>
+  <div class="mock light"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:120px"><input value="" placeholder="as key" style="width:90px"><span class="btn primary">Upload</span></div>
+    <div class="toolbar"><input value="bench/n230-r1/" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><select><option>Health: unreadable</option><option>all</option><option>degraded</option><option>intact</option></select><span class="cap" style="margin-left:auto">page 1 &middot; 100 of 245,756</span><span class="btn">Prev</span><span class="btn">Next</span></div>
+    <table><tr><th>Key</th><th>Size</th><th>Shards</th><th></th></tr>
+      <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td><i class="mk bad"></i>1 of 3</td><td class="cap">demo-d1, demo-d2 unavailable</td></tr>
+      <tr><td class="id">bench/n230-r1/cli/00001_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_bid.arrow</td><td class="num">3.5 KB</td><td><i class="mk bad"></i>1 of 3</td><td class="cap">demo-d1, demo-d2 unavailable</td></tr>
+      <tr><td class="id">bench/n230-r1/cli/00002_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_mid.arrow</td><td class="num">3.6 KB</td><td><i class="mk bad"></i>1 of 3</td><td class="cap">demo-d1, demo-d2 unavailable</td></tr>
+      <tr><td class="id">bench/n230-r1/cli/00003_data_ohlcv-1m_xcbt_2025-06-24_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td><i class="mk bad"></i>1 of 3</td><td class="cap">demo-d1, demo-d2 unavailable</td></tr>
+    </table>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; Objects, unfiltered, mixed cluster</p>
+  <div class="mock dark"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:120px"><input value="" placeholder="as key" style="width:90px"><span class="btn primary">Upload</span></div>
+    <div class="toolbar"><input value="" placeholder="prefix" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><select><option>Health: all</option></select><span class="cap" style="margin-left:auto">page 1 &middot; 100 of 245,903</span><span class="btn">Prev</span><span class="btn">Next</span></div>
+    <table><tr><th>Key</th><th>Size</th><th>Shards</th><th></th></tr>
+      <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td><i class="mk warn"></i>2 of 3</td><td class="cap">demo-d2 unavailable</td></tr>
+      <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td><i class="mk warn"></i>2 of 3</td><td class="cap">demo-d2 unavailable</td></tr>
+      <tr><td class="id">photos/2026-09-25/IMG_0412.jpg</td><td class="num">4.8 MB</td><td><i class="mk"></i>3 of 3</td><td class="cap"></td></tr>
+      <tr><td class="id">photos/2026-09-25/IMG_0413.jpg</td><td class="num">5.1 MB</td><td><i class="mk"></i>3 of 3</td><td class="cap"></td></tr>
+    </table>
+  </main></div></div></div>
+</div>
+<p class="note">The Shards column needs the record for each listed key, one HEAD per row, which is a hundred small calls per page. The node-side summary operation would return the count with each key instead; until then the column can be filled lazily after the list arrives.</p>
+
+<h2>4. One object, in the record view</h2>
+<p class="note">Possible today with no node change: the record names the shard devices, and the status says which devices are available. A verdict line above the shard table says what a GET will do and why, and the shard rows carry the marks from PR #216.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; unreadable</p>
+  <div class="mock light"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="row"><span class="id" style="color:var(--text);font-size:12.5px">Zed-x86_64.exe</span><span class="cap num">92,119,648 bytes &middot; version 01M2X2WM2VP309XHD8HAV3A110</span></div>
+    <div class="callout"><b>Unreadable.</b> 2 of 3 shards are on unavailable devices and 2 are needed. A GET will fail until devbox4 is reachable again or the shards are rebuilt elsewhere.</div>
+    <table><tr><th>#</th><th>Device</th><th>Node</th><th>State</th></tr>
+      <tr><td class="num">0</td><td>demo-d1 <span class="id">(fa0488a2)</span></td><td>devbox4</td><td><i class="mk bad"></i>active, unavailable</td></tr>
+      <tr><td class="num">1</td><td>devbox-d0 <span class="id">(246ee7bb)</span></td><td>devbox</td><td><i class="mk"></i>active</td></tr>
+      <tr><td class="num">2</td><td>demo-d2 <span class="id">(ed37c3db)</span></td><td>devbox4</td><td><i class="mk bad"></i>active, unavailable</td></tr>
+    </table>
+    <div class="row"><span class="btn">Download</span><span class="btn">Verify</span><span class="btn">Repair</span><span class="btn">Move shard</span><span class="btn" style="color:var(--critical)">Delete</span></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; degraded</p>
+  <div class="mock dark"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="row"><span class="id" style="color:var(--text);font-size:12.5px">Zed-x86_64.exe</span><span class="cap num">92,119,648 bytes &middot; version 01M2X2WM2VP309XHD8HAV3A110</span></div>
+    <div class="callout warn"><b>Readable, degraded.</b> 1 of 3 shards is on an unavailable device; a GET rebuilds it from the other 2 on the way out. One more unavailable device makes this object unreadable.</div>
+    <table><tr><th>#</th><th>Device</th><th>Node</th><th>State</th></tr>
+      <tr><td class="num">0</td><td>devbox-d1 <span class="id">(73fa6c01)</span></td><td>devbox</td><td><i class="mk"></i>active</td></tr>
+      <tr><td class="num">1</td><td>devbox-d0 <span class="id">(246ee7bb)</span></td><td>devbox</td><td><i class="mk"></i>active</td></tr>
+      <tr><td class="num">2</td><td>demo-d2 <span class="id">(ed37c3db)</span></td><td>devbox4</td><td><i class="mk bad"></i>active, unavailable</td></tr>
+    </table>
+    <div class="row"><span class="btn">Download</span><span class="btn">Verify</span><span class="btn">Repair</span><span class="btn">Move shard</span><span class="btn" style="color:var(--critical)">Delete</span></div>
+  </main></div></div></div>
+</div>
+
+<h2>5. Where the numbers come from</h2>
+<p class="note">Sections 1 to 3 need one node-side operation; section 4 needs none.</p>
+<table style="max-width:70ch">
+  <tr><th>Piece</th><th>Source</th><th>Cost</th><th>Needs</th></tr>
+  <tr><td>Card counts</td><td>A records-only merge of every reachable device's record stream, as the scrub's cross-node phase does since #162, counting shards on available devices per version instead of checking them</td><td>one record scan per device, minutes at 245k versions; on demand</td><td>node and client work, a SPEC section</td></tr>
+  <tr><td>Completeness line</td><td>Whether any unreachable node lists at least k+m devices</td><td>free, from the document</td><td>the same operation</td></tr>
+  <tr><td>Health filter and Shards column</td><td>The summary's per-key results, or one HEAD per listed key until then</td><td>100 small calls per page if lazy</td><td>UI only, better with the operation</td></tr>
+  <tr><td>Record view verdict</td><td>The record's shard devices against the status's availability</td><td>none</td><td>UI only</td></tr>
+</table>
+
+<div class="verdict">
+  <p><b>Recommendation.</b> Do section 4 now as a UI PR; it answers "can this object be read" today. Ask the node owner for the summary operation, with the four states of section 2 as its contract and the completeness rule in it. Then add the card as treatment A, since it sits beside the cluster health card as its equal and the two together answer "is the cluster healthy" and "is the data healthy" in one glance, and the Shards column and health filter on the Objects page.</p>
+  <p>Treatment B earns its place only once counts are mixed, which they will be during a drain; it could replace A's sub-line later. Treatment C is the least work but hides the completeness statement, which is the one line that must not be missed.</p>
+</div>
+
+</body>
+</html>
