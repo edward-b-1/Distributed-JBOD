@@ -212,7 +212,24 @@ fn remote_failure(target: NodeId, e: ConnectionError) -> Failure {
 
 /// Send one request to every node in the document and collect the
 /// responses. Any node failing fails the whole call (13.3, 16.1).
+/// `request` to every node in the document, failing on the first node
+/// that cannot answer (16.1).
 async fn broadcast(node: &Arc<Node>, request: Request) -> Result<Vec<(NodeId, Response)>, Failure> {
+    let mut responses = Vec::new();
+    for (target, answer) in broadcast_each(node, request).await? {
+        responses.push((target, answer?));
+    }
+    Ok(responses)
+}
+
+/// `request` to every node in the document, with each node's answer or
+/// its failure, in node order, for an operation that goes on without a
+/// node it cannot reach: `Status` (19.1.3, 5.6). Only a failure of the
+/// machinery itself is an error here.
+async fn broadcast_each(
+    node: &Arc<Node>,
+    request: Request,
+) -> Result<Vec<(NodeId, Result<Response, Failure>)>, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
     for entry in &document.nodes {
@@ -220,19 +237,21 @@ async fn broadcast(node: &Arc<Node>, request: Request) -> Result<Vec<(NodeId, Re
         let node = node.clone();
         let request = request.clone();
         tasks.spawn(async move {
-            let mut connection = connect_to(&node, target).await?;
-            let response = connection
-                .request(request)
-                .await
-                .map_err(|e| remote_failure(target, e))?;
-            Ok::<(NodeId, Response), Failure>((target, response))
+            let answer = async {
+                let mut connection = connect_to(&node, target).await?;
+                connection
+                    .request(request)
+                    .await
+                    .map_err(|e| remote_failure(target, e))
+            }
+            .await;
+            (target, answer)
         });
     }
-    let mut responses = Vec::with_capacity(document.nodes.len());
+    let mut answers = Vec::with_capacity(document.nodes.len());
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok(Ok(pair)) => responses.push(pair),
-            Ok(Err(f)) => return Err(f),
+            Ok(pair) => answers.push(pair),
             Err(e) => {
                 return Err(error(
                     ErrorCode::Internal,
@@ -241,8 +260,8 @@ async fn broadcast(node: &Arc<Node>, request: Request) -> Result<Vec<(NodeId, Re
             }
         }
     }
-    responses.sort_by_key(|(id, _)| *id);
-    Ok(responses)
+    answers.sort_by_key(|(id, _)| *id);
+    Ok(answers)
 }
 
 // ------------------------------------------------------------- lookups
@@ -512,11 +531,68 @@ async fn device_contents(node: &Arc<Node>, device: DeviceId) -> Result<Response,
     }))
 }
 
+/// `Status` (19.1.3): every node's view of its devices, folded into one.
+/// A node that cannot be reached does not fail it: the node is reported
+/// unreachable, and its devices are listed from the document as
+/// unavailable with no space, which from the cluster's side they are
+/// (5.6). Status is what an operator runs to find out what is wrong, so
+/// it is the one request that must work when something is.
 async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
     let document = node.document();
-    let answers = broadcast(node, Request::LocalStatus).await?;
-    let nodes = node_statuses(&answers);
-    let devices = device_statuses(node, answers)?;
+    let mut nodes = Vec::new();
+    let mut devices = Vec::new();
+    let mut answered = Vec::new();
+    for (target, answer) in broadcast_each(node, Request::LocalStatus).await? {
+        match answer {
+            Ok(response) => {
+                if let Response::LocalStatus { build, .. } = &response {
+                    nodes.push(NodeStatus {
+                        node: target,
+                        reachable: true,
+                        build: Some(build.clone()),
+                        error: None,
+                    });
+                }
+                answered.push((target, response));
+            }
+            // A node holding another document version refused the Hello:
+            // that is the disagreement 6.2.7 forbids, reported as such,
+            // not a node that could not be reached.
+            Err(Failure::Error(detail)) if detail.code == ErrorCode::DocumentVersionMismatch => {
+                return Err(Failure::Error(detail));
+            }
+            Err(failure) => {
+                let unreachable = Unreachable::from_failure(target, failure);
+                nodes.push(NodeStatus {
+                    node: target,
+                    reachable: false,
+                    build: None,
+                    error: Some(unreachable.detail.message),
+                });
+                let node_label = document.node(target).and_then(|n| n.label.clone());
+                for entry in document
+                    .devices
+                    .iter()
+                    .filter(|d| d.node == target && d.state != DeviceState::Removed)
+                {
+                    devices.push(DeviceStatus {
+                        device: entry.id,
+                        node: target,
+                        state: entry.state,
+                        available: false,
+                        label: entry.label.clone(),
+                        node_label: node_label.clone(),
+                        total_bytes: 0,
+                        free_bytes: 0,
+                    });
+                }
+            }
+        }
+    }
+    devices.extend(device_statuses(node, answered)?);
+    // Document order, whichever node answered first.
+    let position = |id: DeviceId| document.devices.iter().position(|d| d.id == id);
+    devices.sort_by_key(|d| position(d.device));
     Ok(Response::Status {
         cluster_id: document.cluster_id,
         cluster_name: document.name.clone(),
@@ -526,20 +602,6 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
         transport: document.transport,
         devices,
     })
-}
-
-/// Each node asked and the build it reported (6.2.6.4).
-fn node_statuses(answers: &[(NodeId, Response)]) -> Vec<NodeStatus> {
-    let mut nodes = Vec::new();
-    for (target, response) in answers {
-        if let Response::LocalStatus { build, .. } = response {
-            nodes.push(NodeStatus {
-                node: *target,
-                build: build.clone(),
-            });
-        }
-    }
-    nodes
 }
 
 /// Combine the `LocalStatus` answers of the nodes asked into one device

@@ -272,6 +272,9 @@ the node is up. The consequences:
   is to restore the device or retire it, then run again.
 - The node logs the loss once when first seen and once when the device
   is readable again.
+- A node the coordinator cannot reach makes every device of that node
+  unavailable from the cluster's side: `Status` lists them so, and names
+  the node and the reason, rather than failing.
 
 Retiring an unavailable device is `remove-device --force` (18.2.1.1);
 `scrub --repair` then rebuilds what it held.
@@ -1324,7 +1327,10 @@ the rule.
 16.1 [D] The system is fail-stop. The following conditions return an error
 to the client:
 
-- Any node in the cluster document does not respond to a broadcast.
+- Any node in the cluster document does not respond to a broadcast,
+  except for `Status`, which reports the node as unreachable and its
+  devices as unavailable (5.6, 19.1.3), since it is the request an
+  administrator makes to find out what is wrong.
 - More than m of an object's shards cannot be read at all, whether
   missing, unreadable, or on a device or node that cannot be reached
   (11.4); fewer are reconstructed around, served, and reported.
@@ -1742,10 +1748,12 @@ coordinator, and those nodes send to each other. Every response is either
 `Status`
 : Request: none. Response: cluster id, cluster name if set (6.2.5.3),
   document version, coordinator node
-  UUID, every node asked with the build it reported (6.2.6.4), and for
-  every device in the cluster: UUID, owning node, state, whether its
-  node can read it (5.6), total bytes, free bytes. Implemented by
-  broadcasting `LocalStatus`.
+  UUID, every node asked with whether it answered, the build it
+  reported if so (6.2.6.4) and why not if not, and for every device in
+  the cluster: UUID, owning node, state, whether its node can read it
+  (5.6), total bytes, free bytes. Implemented by broadcasting
+  `LocalStatus`; a node that cannot be reached does not fail it, and its
+  devices are listed from the document as unavailable with no space.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
