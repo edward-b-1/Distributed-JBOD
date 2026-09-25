@@ -73,8 +73,21 @@ async fn start_node_with_tls(device_count: usize, k: u8, m: u8, tls: Option<TlsP
 
 /// Run the `djbod` binary against the test node. Returns (status ok,
 /// raw stdout, stderr).
+/// The `djbod` binary with a clean slate: the developer's own `DJBOD_*`
+/// settings (a node list, a cluster id, TLS paths) must not leak into
+/// the tests, which each say exactly what they pass.
+fn djbod_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_djbod"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("DJBOD_") {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
 fn djbod_raw(test: &TestNode, args: &[&str]) -> (bool, Vec<u8>, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let output = djbod_command()
         .arg("--node")
         .arg(test.addr.to_string())
         .arg("--cluster")
@@ -221,7 +234,7 @@ async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_
     // (SPEC 11.4): the file is complete and correct, standard error names
     // the block, and the exit code is 2 so a pipeline notices.
     let output = work.path().join("output.bin");
-    let run = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let run = djbod_command()
         .args([
             "--node",
             &test.addr.to_string(),
@@ -266,12 +279,7 @@ async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_connection_details_are_explained() {
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
-        .env_remove("DJBOD_NODE")
-        .env_remove("DJBOD_CLUSTER")
-        .arg("status")
-        .output()
-        .expect("run djbod");
+    let output = djbod_command().arg("status").output().expect("run djbod");
     assert!(!output.status.success());
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(err.contains("--node"), "{err}");
@@ -675,7 +683,7 @@ async fn the_client_speaks_tls_with_flags_or_environment() {
     assert!(ok, "{err}");
     assert!(out.contains("transport tls"), "{out}");
     let copy = dir.path().join("copy.bin");
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let output = djbod_command()
         .env("DJBOD_NODE", test.addr.to_string())
         .env("DJBOD_CLUSTER", test.node.cluster_id().to_string())
         .env("DJBOD_TLS_CA", &ca)
@@ -913,7 +921,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
     assert!(ok, "{err}");
 
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        let output = djbod_command()
             .arg("--node")
             .arg(test.addr.to_string())
             .args(args)
@@ -973,7 +981,7 @@ async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
     let cluster = test.node.cluster_id().to_string();
     let nodes = format!("127.0.0.1:1,{}", test.addr);
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        let output = djbod_command()
             .arg("--node")
             .arg(&nodes)
             .args(args)
@@ -995,7 +1003,7 @@ async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
     assert!(ok, "{err}");
     assert!(out.contains(&format!("at {}", test.addr)), "{out}");
     // Only dead addresses: every one is named.
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let output = djbod_command()
         .args([
             "--node",
             "127.0.0.1:1,127.0.0.1:2",
@@ -1196,7 +1204,7 @@ async fn scrub_exit_codes_say_what_was_concluded() {
     assert!(ok, "{err}");
 
     let run = |args: &[&str]| {
-        let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+        let output = djbod_command()
             .args([
                 "--node",
                 &test.addr.to_string(),
@@ -1311,7 +1319,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
 
     // The device's contents were not checked: not damage, an incomplete
     // run, exit 3, and no per-key noise for the copies it held.
-    let scrub = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let scrub = djbod_command()
         .args([
             "--node",
             &test.addr.to_string(),
