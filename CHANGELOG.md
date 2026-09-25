@@ -1,3 +1,223 @@
+## [aaec982] - 2026-09-18
+
+Pull request #14: Add RepairObject: rebuild damaged or missing shards from the intact ones
+
+### Added
+
+- `RepairObject` and `djbod repair <key>`, which rebuild damaged or missing shards from the intact ones (SPEC 18.4.1).
+- A first pass that reads every stripe of every readable shard with all k+m indices requested, so any block failing its checksum surfaces as a fault, and refuses to write anything when more than m shards are damaged in any stripe or when the whole-object checksum disagrees.
+- A second pass that opens `PutShard` to each damaged shard's own device, re-encodes each stripe and streams the damaged shards' blocks, leaving placement unchanged. Two passes rather than one because a shard's condition is known only after its last block has been read, and buffering a whole shard would break the bounded-memory rule of SPEC 3.6.
+- A report listing every shard's condition and whether it was rewritten. Rewriting to a different device when the original is gone waits for the drain and re-placement machinery of milestone 4, and `SPEC.md` says so.
+
+## [aad6066] - 2026-09-18
+
+Pull request #12: Warn once per shared filesystem, listing the devices on it
+
+### Fixed
+
+- Devices sharing a filesystem produce one warning naming them all, instead of a warning for every pair at `init-cluster` and again at `run`. The refusal without `allow_shared_filesystem` is unchanged.
+
+## [a5ce980] - 2026-09-18
+
+Direct commit: Specification: defer human-readable device labels
+
+### Changed
+
+- `SPEC.md` defers human-readable device labels.
+
+## [79206fc] - 2026-09-18
+
+Direct commit: Getting started: say where node.toml lives
+
+### Changed
+
+- The getting-started guide says where `node.toml` lives.
+
+## [9d903cb] - 2026-09-18
+
+Direct commit: Add a getting-started guide for a single-machine cluster
+
+### Added
+
+- `docs/getting-started.md`, a walkthrough of a single-machine cluster, with the `README.md` shortened to point at it.
+
+## [221185f] - 2026-09-18
+
+Pull request #11: Add the djbod command-line client
+
+### Added
+
+- `djbod`, a binary driving a node from a shell with `status`, `put`, `get`, `head`, `list`, `delete` and `cluster-config`, taking `--node` and `--cluster` from `DJBOD_NODE` and `DJBOD_CLUSTER`, and `--json` for machine-readable output.
+- Streaming both ways, so memory is bounded by one chunk: a `get` to a named file that fails part way removes the partial file and says so, since the whole-object check arrives in the final stream frame (SPEC 3.6, 11.7).
+- Errors printing the code, the message and every identifying field the node supplied: node, device, key, version, shard and stripe (SPEC 16.2).
+- A single-machine walkthrough in the `README.md`, with milestone 2 recorded complete in SPEC C.4.2.
+
+## [f33b077] - 2026-09-18
+
+Pull request #10: Add the coordinator: client-facing operations for a cluster of one node
+
+### Added
+
+- The `coordinator` module, serving every client-facing operation by fanning node-to-node operations out over every node in the cluster document, this node included over loopback, so one node and twenty take the same code path (SPEC 4.1).
+- Lookup, which broadcasts `LocalLookup` and then checks that a version has k+m equal copies, each from a device the record lists and naming the requested key, with the newest version winning (SPEC 13, 9.1.6, 9.4.4).
+- `PutObject`, which places by most free bytes over k+m distinct active devices with room, streams the body into stripes, encodes and fans out with stripe numbers while folding in the whole-object checksum, writes the records, and then deletes older versions (SPEC 10).
+- `GetObject`, which opens every data shard before the record reaches the client, decodes each stripe and fails the stream naming device, shard index and stripe on anything but `Intact` (SPEC 11.4, 11.7).
+- `ListKeys`, taking the newest version per key across nodes with `start_after`, `limit` and `truncated` (SPEC 15.1).
+- `ulid::VersionGenerator`, monotonic within a millisecond (SPEC 9.2.3), and `advertise` in the node configuration for the address recorded in the document.
+
+## [c201faa] - 2026-09-18
+
+Direct commit: Specification: open question on where size limits live; advertise address in 6.1.1
+
+### Added
+
+- An open question in `SPEC.md` about where the size limits live, and the advertised address in SPEC 6.1.1.
+
+## [152da35] - 2026-09-18
+
+Pull request #9: Add the node process serving the node-to-node operations
+
+### Added
+
+- `djbod-node`, a binary with `init-cluster` and `run` that creates a cluster from its own devices and serves every node-to-node operation of SPEC 19.1.3 over TCP.
+- `config`: the per-node TOML file with node id, listen address, state directory, device paths, bootstrap peers, temporary-file maximum age and `allow_shared_filesystem` (SPEC 6.1.1).
+- `node`: `Node::init_cluster`, `Node::open` and `apply_document`, which enforces the same cluster and version plus one and saves before switching (SPEC 6.2.6).
+- `local_ops`: `PutShard` reserving and answering `READY` then checking each frame's stripe number, `GetShard` streaming blocks with their stored checksums without verifying them, and `LocalList`.
+- A connection span carrying peer, kind and node id, a request span carrying id, operation and key, a panic hook, and `--log-format json` (SPEC 20.4).
+
+### Changed
+
+- The same-filesystem check refuses two devices on one `st_dev`, and `allow_shared_filesystem` turns that refusal into a logged warning for tests and single-machine experiments (SPEC 5.3).
+
+## [a411e25] - 2026-09-18
+
+Direct commit: Specification: logging conventions (20.4)
+
+### Added
+
+- The logging conventions in `SPEC.md` (SPEC 20.4).
+
+## [01d627d] - 2026-09-18
+
+Direct commit: README: note why the default port is 5263
+
+### Added
+
+- A note in the `README.md` saying why the default port is 5263.
+
+## [9719a99] - 2026-09-18
+
+Direct commit: Specification: node configuration is TOML; default port 5263
+
+### Changed
+
+- `SPEC.md` decides that node configuration is TOML and that the default port is 5263.
+
+## [ce5b96d] - 2026-09-18
+
+Pull request #8: Wrap the metadata record with a checksum of its canonical form
+
+### Added
+
+- A checksum over the record's canonical form, so a record on disk is protected as a block is: XXH3-64 over JSON with keys sorted bytewise, no whitespace and absent optional fields omitted, modelled on RFC 8785 for the value types a record uses. Before this, a corrupt copy showed only as disagreement between the k+m copies, which cannot say which copy is wrong and cannot be found by a local scrub.
+- `canonical_bytes()` and `checksum()` as public methods for the scrubber and for repair.
+
+### Changed
+
+- `MetadataRecord::to_json` computes and wraps the checksum and `from_json` unwraps, verifies, then validates, so the file stays readable when reformatted or when its keys are reordered while any change to a value is caught.
+
+## [703fff2] - 2026-09-18
+
+Pull request #7: Add the protocol crate and the cluster document type
+
+### Added
+
+- `djbod-proto`, a runtime-agnostic crate turning messages into bytes and back.
+- `frame`: the 12-byte little-endian header, rejecting an unknown message type, non-zero flags and a payload length above 64 MiB + 4096 from the header alone, before any payload is read or allocated; `Frame::decode` reports `Incomplete { have, needed }`.
+- `codec`: message bodies in Concise Binary Object Representation (CBOR) through `ciborium` and serde.
+- `message`: `Request` and `Response` covering every operation of SPEC 19.1.3, `ErrorDetail` with the fields SPEC 16.2 requires, `DataFrame` costing exactly 16 bytes over its block, and `StreamEnd`.
+- `djbod-core::cluster`: `ClusterDocument` with node and device entries, device states, the `device` independence level and the sanity checks of SPEC 6.2.4.
+
+### Changed
+
+- `SPEC.md` writes out framing (19.1.2) and the handshake (19.1.5) as decided, and decides CBOR and tokio.
+
+### Removed
+
+- The cluster secret and `HelloProof`, after review: the plain `Hello` carrying protocol version, peer kind, node id, cluster id and document version catches every misconfiguration the secret was meant to catch, the keyed proof was incomplete against a deliberate actor on the local network, and clients were unauthenticated in any case. SPEC 19.1.6 now fixes the intended design as per-node certificates with fingerprints in the cluster document.
+
+## [77fe2e4] - 2026-09-18
+
+Direct commit: Specification: note listing at scale as an open question (15.2.1)
+
+### Added
+
+- Listing at scale as an open question in `SPEC.md` (SPEC 15.2.1).
+
+## [54049f5] - 2026-09-17
+
+Pull request #6: Add the device layer
+
+### Added
+
+- `Device::initialise`, which requires a directory empty apart from `lost+found`, writes `DISTRIBUTED-JBOD-DEVICE.json` atomically with the system name, a plain-English notice, the format version, a fresh device UUID, the cluster id and a timestamp, and creates `objects/default` (SPEC 5.2, 5.2.1).
+- `Device::open`, which tells an uninitialised directory, a `ForeignDirectory` holding `objects/` but no identity file, a corrupt identity file and a device from another cluster apart (SPEC 5.4).
+- `begin_shard`, which creates the key directory and a `.tmp` file, reserves the exact final length with `fallocate` and writes the header, with `finish` fsyncing and renaming into place and `abort` or a drop removing the temporary (SPEC 9.3.3, 10.6).
+- `write_record`, `read_records`, `read_record`, `open_shard`, `delete_version`, `walk_records` and `cleanup_temporaries`, the last removing `.tmp` files older than a cutoff (SPEC 10.11, 14.2).
+- `free_space(headroom)` from `statvfs` available bytes less a fraction of the total (SPEC 5.5).
+
+### Changed
+
+- `SPEC.md` names the identity file and its notice, states the empty-directory rule, and records tokio as the async runtime with the alternatives considered.
+
+## [feec79a] - 2026-09-17
+
+Direct commit: Specification: content length required, fallocate reservation, and temporary file cleanup decided
+
+### Changed
+
+- `SPEC.md` decides that a content length is required, that space is reserved with `fallocate`, and how temporary files are cleaned up.
+
+## [7d7a023] - 2026-09-17
+
+Direct commit: Specification: record milestone 1 as complete
+
+### Changed
+
+- `SPEC.md` records milestone 1 as complete.
+
+## [d142139] - 2026-09-17
+
+Pull request #5: Add the metadata record, on-disk layout names, and ULID text form
+
+### Added
+
+- `record`: `MetadataRecord`, the JSON document describing one version, written as indented JSON so a disk can be searched with ordinary tools, with validation of the system name, the format version, the key hash against the key, the scheme, the block size and the shard list (SPEC 9.4, 9.1.6). `DeviceId` is a universally unique identifier (UUID) newtype.
+- `layout`: the directory `objects/<bucket>/ab/cd/<hash>/` and the file names `<version>.meta.json` and `<version>.<index>.shard`, with parsers for both (SPEC 9.1).
+- The 26-character Crockford base32 text form of a universally unique lexicographically sortable identifier (ULID), checked to sort in the same order as the bytes so sorting file names sorts by creation time (SPEC 9.2.3).
+- Serde implementations for `KeyHash`, `BlockChecksum` and `VersionId`.
+
+### Changed
+
+- The record's shard list is `{ index, device }` with no node UUID, because a device's owning node is in the cluster document and can change when a disk moves between machines; recorded as SPEC 9.4.2.1 for review.
+
+## [6dc4077] - 2026-09-17
+
+Pull request #4: Add key hash, version id, and shard file modules
+
+### Added
+
+- `keyhash`: SHA-256 of the key's raw bytes with its hex rendering and the `ab/cd/<full>` directory components, pinned to published SHA-256 vectors (SPEC 9.1.2, 9.1.3).
+- `version`: `VersionId`, the 16-byte version identifier as a value.
+- `shardfile`: the reader and writer for shard file format version 1, with a 4 KiB header, blocks at `4096 + i * B`, a footer holding the checksum table, and a 16-byte trailer under the invariant `F + L + 16 == file length` (SPEC 9.3.2).
+- A whole-object XXH3-64 checksum in the footer, so the recovery tool has the value without the metadata record (SPEC 8.3.6).
+- A geometry cross-check on `finish` and on `open`, so too few stripes or a wrongly padded final stripe cannot produce a valid-looking file.
+
+### Changed
+
+- `ShardFileReader::open` verifies the trailer invariant, the footer checksum, the header checksum and magic, and that header, footer and trailer agree on where the blocks are, but leaves block checksums to the stripe decoder, which keeps opening cheap.
+- `ShardFileWriter` recomputes each appended block's checksum and refuses a block whose supplied checksum disagrees (SPEC 17.6), and allows only the final block to be short.
+
 ## [c81be85] - 2026-09-17
 
 Direct commit: Specification: shard file format v1 with header, footer, and trailer
