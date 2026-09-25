@@ -315,7 +315,14 @@ async fn set_state_and_drain_from_the_command_line() {
     let (ok, out, err) = djbod(&test, &["cluster", "drain", &device]);
     assert!(ok, "{out}{err}");
     assert!(out.contains("1 version, "), "{out}");
-    assert!(out.contains("moved    k  shard 0 -> "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "moved    k  shard 0  node {} device {device} -> node {} device ",
+            test.node.id().0,
+            test.node.id().0
+        )),
+        "{out}"
+    );
     assert!(err.contains("1 moved, 0 skipped"), "{err}");
     let (ok, out, err) = djbod(&test, &["--json", "head", "k"]);
     assert!(ok, "{err}");
