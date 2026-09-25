@@ -117,7 +117,7 @@ async fn scrub_finds_damage_and_exits_nonzero() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 

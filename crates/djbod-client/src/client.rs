@@ -352,7 +352,8 @@ impl Client {
     }
 
     /// Fetch an object: its record, what the read had to reconstruct
-    /// from parity (SPEC 11.4; empty when nothing), and the body.
+    /// from parity (SPEC 11.4) and which record copies it went without
+    /// (9.4.4), both empty when the object was whole, and the body.
     pub async fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         let mut body = Vec::new();
         let read = self.get_to_writer(key, &mut body).await?;
@@ -381,8 +382,10 @@ impl Client {
         result
     }
 
-    /// The object's record without its body.
-    pub async fn head(&mut self, key: &str) -> Result<MetadataRecord, ClientError> {
+    /// The object's record without its body, and the record copies the
+    /// lookup went without (9.4.4), empty when every device had one.
+    /// Nothing is reconstructed, no block being read.
+    pub async fn head(&mut self, key: &str) -> Result<ObjectRead, ClientError> {
         match self
             .request(
                 Request::HeadObject {
@@ -392,7 +395,14 @@ impl Client {
             )
             .await?
         {
-            Response::HeadObject { record } => Ok(record),
+            Response::HeadObject {
+                record,
+                missing_records,
+            } => Ok(ObjectRead {
+                record,
+                reconstructed: Vec::new(),
+                missing_records,
+            }),
             other => Err(Self::unexpected("HeadObject", other)),
         }
     }

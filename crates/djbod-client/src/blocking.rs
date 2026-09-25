@@ -13,7 +13,7 @@ use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 use djbod_core::cluster::ClusterDocument;
-use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::record::DeviceId;
 use djbod_proto::message::{
     DeviceContents, DrainEvent, KeyEntry, ListQuery, ObjectRead, ObjectWrite, RepairReport,
     ScrubEvent, StreamEnd,
@@ -102,7 +102,7 @@ impl Client {
             .block_on(self.inner.get_to_writer(key, &mut sink))
     }
 
-    pub fn head(&mut self, key: &str) -> Result<MetadataRecord, ClientError> {
+    pub fn head(&mut self, key: &str) -> Result<ObjectRead, ClientError> {
         self.runtime.block_on(self.inner.head(key))
     }
 

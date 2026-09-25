@@ -29,9 +29,9 @@ use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind,
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
-    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, NodeStatus,
-    Reconstruction, RecordCursor, RepairReport, Request, Response, ScrubEvent, ScrubItem,
-    ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
+    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, MissingRecordCopy,
+    NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response,
+    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -266,22 +266,63 @@ async fn broadcast_each(
 
 // ------------------------------------------------------------- lookups
 
-/// The broadcast lookup of section 13: every record copy for a key hash,
-/// from every node, asked concurrently and each read to the end of its
-/// pages (15.2.2).
-async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord>, Failure> {
+/// What a broadcast lookup found on the devices it could reach.
+struct Lookup {
+    records: Vec<LocatedRecord>,
+    /// The devices whose copies could not be looked for, and why: on a
+    /// node that could not be reached, unreadable by their node (5.6),
+    /// or removed from the cluster (18.2.1). The code is the one a
+    /// request naming the device would be refused with.
+    unread: BTreeMap<DeviceId, (ErrorCode, String)>,
+    /// The nodes that could not be reached, for the operations that
+    /// must reach every node (13.3, 16.1).
+    unreachable: Vec<ErrorDetail>,
+}
+
+/// The broadcast lookup of section 13 as a read uses it: every record
+/// copy for a key hash from every node that answers, asked concurrently
+/// and each read to the end of its pages (15.2.2), and the devices whose
+/// copies could not arrive, so that the read can tell a device that is
+/// out from a copy that is gone (9.4.4).
+async fn lookup_reachable(node: &Arc<Node>, key_hash: KeyHash) -> Result<Lookup, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
     for entry in &document.nodes {
         let target = entry.id;
         let node = node.clone();
-        tasks.spawn(async move { lookup_on(&node, target, key_hash).await });
+        tasks.spawn(async move { (target, lookup_on(&node, target, key_hash).await) });
     }
-    let mut located = Vec::new();
+    let mut found = Lookup {
+        records: Vec::new(),
+        unread: BTreeMap::new(),
+        unreachable: Vec::new(),
+    };
     while let Some(joined) = tasks.join_next().await {
         match joined {
-            Ok(Ok(records)) => located.extend(records),
-            Ok(Err(f)) => return Err(f),
+            Ok((target, Ok((records, unread)))) => {
+                found.records.extend(records);
+                for device in unread {
+                    found.unread.insert(
+                        device,
+                        (
+                            ErrorCode::DeviceUnavailable,
+                            format!("device {device} is unavailable on node {target} (5.6)"),
+                        ),
+                    );
+                }
+            }
+            Ok((target, Err(Failure::Error(detail))))
+                if detail.code == ErrorCode::NodeUnreachable =>
+            {
+                for device in document.devices.iter().filter(|d| d.node == target) {
+                    found.unread.insert(
+                        device.id,
+                        (ErrorCode::NodeUnreachable, detail.message.clone()),
+                    );
+                }
+                found.unreachable.push(detail);
+            }
+            Ok((_, Err(f))) => return Err(f),
             Err(e) => {
                 return Err(error(
                     ErrorCode::Internal,
@@ -290,21 +331,41 @@ async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord
             }
         }
     }
-    located.sort_by(|a, b| {
+    for device in &document.devices {
+        if device.state == DeviceState::Removed {
+            found.unread.entry(device.id).or_insert((
+                ErrorCode::DeviceUnavailable,
+                format!("device {} was removed from the cluster (18.2.1)", device.id),
+            ));
+        }
+    }
+    found.records.sort_by(|a, b| {
         a.record
             .version
             .cmp(&b.record.version)
             .then(a.device.cmp(&b.device))
     });
-    Ok(located)
+    Ok(found)
 }
 
-/// One node's record copies under `key_hash`, page by page.
+/// The broadcast lookup as every operation but a read uses it (13.3):
+/// a node that cannot be reached fails it, and a device its node cannot
+/// read contributes nothing, which the copy count then shows (9.4.4).
+async fn lookup(node: &Arc<Node>, key_hash: KeyHash) -> Result<Vec<LocatedRecord>, Failure> {
+    let found = lookup_reachable(node, key_hash).await?;
+    if let Some(detail) = found.unreachable.into_iter().next() {
+        return Err(Failure::Error(detail));
+    }
+    Ok(found.records)
+}
+
+/// One node's record copies under `key_hash`, page by page, and the
+/// devices it could not read (5.6), which it names on every page.
 async fn lookup_on(
     node: &Arc<Node>,
     target: NodeId,
     key_hash: KeyHash,
-) -> Result<Vec<LocatedRecord>, Failure> {
+) -> Result<(Vec<LocatedRecord>, Vec<DeviceId>), Failure> {
     let mut connection = connect_to(node, target).await?;
     let mut all = Vec::new();
     let mut after: Option<LookupCursor> = None;
@@ -317,14 +378,18 @@ async fn lookup_on(
             .await
             .map_err(|e| remote_failure(target, e))?;
         match answer {
-            Response::LocalLookup { records, truncated } => {
+            Response::LocalLookup {
+                records,
+                truncated,
+                unread,
+            } => {
                 after = records.last().map(|r| LookupCursor {
                     version: r.record.version,
                     device: r.device,
                 });
                 all.extend(records);
                 if !truncated || after.is_none() {
-                    return Ok(all);
+                    return Ok((all, unread));
                 }
             }
             other => {
@@ -337,12 +402,24 @@ async fn lookup_on(
     }
 }
 
-/// Group record copies by version, newest first, applying the read rule
-/// of 9.4.4 as amended by 18.8.1: within a version, take the highest
-/// placement revision present, require k+m copies of it that all agree
-/// and each come from a device it lists, and ignore lower-revision copies,
-/// which are the leftovers of a re-placement. Every copy must name the
-/// requested key (9.1.6).
+/// One version as the copies found describe it (9.4.4, 18.8.1): the
+/// record at its highest placement revision, the devices it lists whose
+/// copy of that revision did not arrive, and how many copies vouch for
+/// the body, which counts lower-revision copies that describe the same
+/// body, as repair counts them (18.4.2).
+struct TrustedVersion {
+    record: MetadataRecord,
+    /// Faults `Missing` or `Stale` only: whether a missing copy's device
+    /// could have been consulted is the caller's knowledge (`Lookup`).
+    missing: Vec<MissingRecordCopy>,
+    vouching: usize,
+}
+
+/// Group record copies by version, newest first, applying 9.4.4 as
+/// every operation but a read does: within a version, take the highest
+/// placement revision present, require every copy the record lists to
+/// have arrived, all agreeing, and ignore lower-revision copies, which
+/// are the leftovers of a re-placement (18.8.1).
 fn versions_of(key: &str, located: Vec<LocatedRecord>) -> Result<Vec<MetadataRecord>, Failure> {
     versions_of_excluding(key, located, &BTreeSet::new())
 }
@@ -358,6 +435,43 @@ fn versions_of_excluding(
     located: Vec<LocatedRecord>,
     unread: &BTreeSet<DeviceId>,
 ) -> Result<Vec<MetadataRecord>, Failure> {
+    let mut versions = Vec::new();
+    for trusted in trusted_versions(key, located)? {
+        let record = trusted.record;
+        let unread_copies = trusted
+            .missing
+            .iter()
+            .filter(|m| unread.contains(&m.device))
+            .count();
+        if unread_copies < trusted.missing.len() {
+            let listed = record.k as usize + record.m as usize;
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                version: Some(record.version),
+                ..ErrorDetail::new(
+                    ErrorCode::RecordsInconsistent,
+                    format!(
+                        "{} record copies found, {} expected (revision {})",
+                        listed - trusted.missing.len(),
+                        listed - unread_copies,
+                        record.revision
+                    ),
+                )
+            }));
+        }
+        versions.push(record);
+    }
+    Ok(versions)
+}
+
+/// The checks every operation makes of a version's copies (9.4.4): each
+/// names the requested key (9.1.6), the copies at the highest revision
+/// agree and each comes from a device the record lists. What a missing
+/// copy means is left to the caller. Newest version first.
+fn trusted_versions(
+    key: &str,
+    located: Vec<LocatedRecord>,
+) -> Result<Vec<TrustedVersion>, Failure> {
     let mut by_version: BTreeMap<VersionId, Vec<LocatedRecord>> = BTreeMap::new();
     for item in located {
         by_version
@@ -393,25 +507,6 @@ fn versions_of_excluding(
             .filter(|c| c.record.revision == current_revision)
             .collect();
         let first = &current[0].record;
-        let unread_copies = first
-            .shards
-            .iter()
-            .filter(|s| unread.contains(&s.device))
-            .count();
-        let expected = first.k as usize + first.m as usize - unread_copies;
-        if current.len() != expected {
-            return Err(Failure::Error(ErrorDetail {
-                key: Some(key.to_string()),
-                version: Some(version),
-                ..ErrorDetail::new(
-                    ErrorCode::RecordsInconsistent,
-                    format!(
-                        "{} record copies found, {expected} expected (revision {current_revision})",
-                        current.len()
-                    ),
-                )
-            }));
-        }
         for copy in &current {
             if copy.record != *first {
                 return Err(Failure::Error(ErrorDetail {
@@ -436,7 +531,34 @@ fn versions_of_excluding(
                 }));
             }
         }
-        versions.push(first.clone());
+        let missing = first
+            .shards
+            .iter()
+            .filter(|shard| !current.iter().any(|c| c.device == shard.device))
+            .map(|shard| {
+                let stale = copies
+                    .iter()
+                    .filter(|c| c.device == shard.device)
+                    .map(|c| c.record.revision)
+                    .max();
+                MissingRecordCopy {
+                    device: shard.device,
+                    fault: match stale {
+                        Some(revision) => RecordCopyFault::Stale { revision },
+                        None => RecordCopyFault::Missing,
+                    },
+                }
+            })
+            .collect();
+        let vouching = copies
+            .iter()
+            .filter(|c| c.record.revision == current_revision || first.same_body(&c.record))
+            .count();
+        versions.push(TrustedVersion {
+            record: first.clone(),
+            missing,
+            vouching,
+        });
     }
     Ok(versions)
 }
@@ -478,17 +600,121 @@ fn check_key(node: &Node, key: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The newest version of `key`, or NotFound.
+/// The newest version of `key`, or NotFound, for the operations that
+/// must reach every copy (13.3).
 async fn newest_version(node: &Arc<Node>, key: &str) -> Result<MetadataRecord, Failure> {
     check_key(node, key)?;
     let located = lookup(node, hash_key(key.as_bytes())).await?;
     let versions = versions_of(key, located)?;
-    versions.into_iter().next().ok_or_else(|| {
-        Failure::Error(ErrorDetail {
-            key: Some(key.to_string()),
-            ..ErrorDetail::new(ErrorCode::NotFound, format!("no object under key {key:?}"))
-        })
+    versions.into_iter().next().ok_or_else(|| not_found(key))
+}
+
+fn not_found(key: &str) -> Failure {
+    Failure::Error(ErrorDetail {
+        key: Some(key.to_string()),
+        ..ErrorDetail::new(ErrorCode::NotFound, format!("no object under key {key:?}"))
     })
+}
+
+/// The newest version of `key` as a read trusts it (9.4.4 as amended by
+/// 18.4.2): the copies that arrived must agree, and at least k must
+/// vouch for the body; every listed copy that did not arrive is returned
+/// beside the record, classified by what is known of its device, for
+/// the client to hear about (11.7). Nothing is written.
+async fn newest_readable_version(
+    node: &Arc<Node>,
+    key: &str,
+) -> Result<(MetadataRecord, Vec<MissingRecordCopy>), Failure> {
+    check_key(node, key)?;
+    let found = lookup_reachable(node, hash_key(key.as_bytes())).await?;
+    let document = node.document();
+    let Some(newest) = trusted_versions(key, found.records)?.into_iter().next() else {
+        // Nothing on the devices that could be read. That is "not found"
+        // only while fewer than k+m devices are out, since every version
+        // has a copy on k+m devices (13.3); with more out, a version may
+        // be entirely out of view, and the answer is the outage. A removed
+        // device is not out: nothing is expected of it (18.2.1).
+        let out: Vec<&(ErrorCode, String)> = found
+            .unread
+            .iter()
+            .filter(|(device, _)| {
+                document
+                    .device(**device)
+                    .is_some_and(|d| d.state != DeviceState::Removed)
+            })
+            .map(|(_, why)| why)
+            .collect();
+        if out.len() >= document.k as usize + document.m as usize {
+            let (code, reason) = out[0].clone();
+            let out = out.len();
+            return Err(Failure::Error(ErrorDetail {
+                key: Some(key.to_string()),
+                ..ErrorDetail::new(
+                    code,
+                    format!(
+                        "no copy of key {key:?} on the devices that could be read, and {out} device(s) could not be, enough to hold every copy of a version: {reason}"
+                    ),
+                )
+            }));
+        }
+        return Err(not_found(key));
+    };
+    let TrustedVersion {
+        record,
+        mut missing,
+        vouching,
+    } = newest;
+    for copy in &mut missing {
+        if copy.fault != RecordCopyFault::Missing {
+            continue;
+        }
+        if let Some((_, reason)) = found.unread.get(&copy.device) {
+            copy.fault = RecordCopyFault::Unavailable {
+                reason: reason.clone(),
+            };
+        } else if document.device(copy.device).is_none() {
+            copy.fault = RecordCopyFault::Unavailable {
+                reason: format!("device {} is not in the cluster document", copy.device),
+            };
+        }
+    }
+    if vouching < record.k as usize {
+        // Refused with the first unavailable device's own code when there
+        // is one, as 11.4 refuses shards: a node down and a copy gone call
+        // for different actions.
+        let code = missing
+            .iter()
+            .find_map(|m| match m.fault {
+                RecordCopyFault::Unavailable { .. } => Some(
+                    found
+                        .unread
+                        .get(&m.device)
+                        .map(|(code, _)| *code)
+                        .unwrap_or(ErrorCode::DeviceUnavailable),
+                ),
+                _ => None,
+            })
+            .unwrap_or(ErrorCode::RecordsInconsistent);
+        let list: Vec<String> = missing
+            .iter()
+            .map(|m| format!("{}: {:?}", m.device, m.fault))
+            .collect();
+        return Err(Failure::Error(ErrorDetail {
+            key: Some(key.to_string()),
+            version: Some(record.version),
+            device: missing.first().map(|m| m.device),
+            ..ErrorDetail::new(
+                code,
+                format!(
+                    "only {vouching} record copies of {} can be read and at least k = {} are needed: {}",
+                    record.k as usize + record.m as usize,
+                    record.k,
+                    list.join("; ")
+                ),
+            )
+        }));
+    }
+    Ok((record, missing))
 }
 
 // ------------------------------------------------------------ handlers
@@ -648,8 +874,11 @@ fn device_statuses(
 }
 
 async fn head_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
-    let record = newest_version(node, key).await?;
-    Ok(Response::HeadObject { record })
+    let (record, missing_records) = newest_readable_version(node, key).await?;
+    Ok(Response::HeadObject {
+        record,
+        missing_records,
+    })
 }
 
 async fn delete_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure> {
@@ -1023,8 +1252,8 @@ async fn get_object(
     writer: &mut Writer,
     key: &str,
 ) -> Result<(), Failure> {
-    let record = match newest_version(node, key).await {
-        Ok(record) => record,
+    let (record, missing_records) = match newest_readable_version(node, key).await {
+        Ok(found) => found,
         Err(f) => return respond(writer, id, Err(f)).await,
     };
     let scheme = match record.scheme() {
@@ -1284,7 +1513,8 @@ async fn get_object(
     }
 
     // The whole-object check (11.7), delivered as the stream's status,
-    // with what was reconstructed on the way (11.4).
+    // with what was reconstructed on the way (11.4) and the record
+    // copies the lookup went without (9.4.4).
     let computed = BlockChecksum(hasher.digest());
     if delivered != record.size || computed != record.object_checksum {
         let detail = ErrorDetail {
@@ -1309,6 +1539,7 @@ async fn get_object(
                 object_size: None,
                 object_checksum: None,
                 reconstructed,
+                missing_records,
             },
         },
     )
@@ -1753,6 +1984,7 @@ async fn stream_body_to_writers(
                         object_size: Some(record.size),
                         object_checksum: Some(object_checksum),
                         reconstructed: Vec::new(),
+                        missing_records: Vec::new(),
                     },
                 )
                 .await
@@ -1850,9 +2082,9 @@ struct RepairSource {
 /// The newest version of `key` as repair needs it: the record copies
 /// that exist must agree and there must be at least k of them, but they
 /// need not be all k+m. Returns the record and the devices whose copy is
-/// missing (SPEC 18.4.2). Reads keep the strict rule (9.4.4); repair is
-/// the one operation allowed to see an incomplete set, because it exists
-/// to complete it.
+/// missing (SPEC 18.4.2). A read trusts the same set
+/// (`newest_readable_version`) and reports what is missing; repair is
+/// the operation that completes it.
 async fn repairable_record(
     node: &Arc<Node>,
     key: &str,
@@ -2545,6 +2777,7 @@ async fn rebuild_shards(
                     object_size: Some(record.size),
                     object_checksum: Some(record.object_checksum),
                     reconstructed: Vec::new(),
+                    missing_records: Vec::new(),
                 },
             )
             .await
@@ -3139,6 +3372,7 @@ async fn copy_shard(
                     object_size: None,
                     object_checksum: None,
                     reconstructed: Vec::new(),
+                    missing_records: Vec::new(),
                 },
             )
             .await;
@@ -3223,6 +3457,7 @@ async fn relay_shard_blocks(
             object_size: Some(record.size),
             object_checksum: Some(record.object_checksum),
             reconstructed: Vec::new(),
+            missing_records: Vec::new(),
         },
     )
     .await

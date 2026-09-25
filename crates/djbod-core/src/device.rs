@@ -400,18 +400,24 @@ impl Device {
         Ok(path)
     }
 
-    /// The bucket's partition directories, in order. A bucket that cannot
-    /// be found is the device being unavailable (5.6); anything missing
-    /// below it was deleted meanwhile and reads as empty.
-    fn read_bucket(&self) -> Result<Vec<PathBuf>, DeviceError> {
+    /// The bucket directory, which the format creates and no operation
+    /// ever removes (9.1.9): a bucket that cannot be found is the device
+    /// being unavailable (5.6). Anything missing below it was deleted
+    /// meanwhile and reads as empty.
+    fn bucket_directory(&self) -> Result<PathBuf, DeviceError> {
         let bucket = self.root.join(OBJECTS_DIR).join(DEFAULT_BUCKET);
-        match fs::read_dir(&bucket) {
-            Ok(_) => read_dir_sorted(&bucket),
+        match fs::metadata(&bucket) {
+            Ok(_) => Ok(bucket),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(DeviceError::Unavailable {
                 path: self.root.clone(),
             }),
             Err(e) => Err(io_error(&bucket, e)),
         }
+    }
+
+    /// The bucket's partition directories, in order.
+    fn read_bucket(&self) -> Result<Vec<PathBuf>, DeviceError> {
+        read_dir_sorted(&self.bucket_directory()?)
     }
 
     /// Every key directory on this device, in path order.
@@ -481,11 +487,17 @@ impl Device {
 
     /// Every record under a key hash on this device, oldest version first.
     /// A record that fails to parse or validate is an error (16.1).
+    /// Every record copy under `key_hash` on this device: none when the
+    /// key has no directory here, `Unavailable` when the whole device
+    /// tree is gone (5.6), which the bucket directory tells apart.
     pub fn read_records(&self, key_hash: &KeyHash) -> Result<Vec<MetadataRecord>, DeviceError> {
         let dir = self.object_directory(key_hash);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                self.bucket_directory()?;
+                return Ok(Vec::new());
+            }
             Err(e) => return Err(io_error(&dir, e)),
         };
         let mut versions: Vec<VersionId> = Vec::new();

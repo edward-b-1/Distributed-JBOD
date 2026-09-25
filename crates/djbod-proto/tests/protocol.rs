@@ -18,9 +18,9 @@ use djbod_proto::frame::{
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
     DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    LocatedRecord, LookupCursor, Message, MessageError, NodeStatus, Reconstruction, RecordCursor,
-    RepairReport, Request, Response, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
-    DATA_PREFIX_LEN,
+    LocatedRecord, LookupCursor, Message, MessageError, MissingRecordCopy, NodeStatus,
+    Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response, ShardCondition,
+    ShardRepair, StreamEnd, UnavailableDevice, DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -512,6 +512,10 @@ fn every_response_round_trips() {
         },
         Response::HeadObject {
             record: sample_record(),
+            missing_records: vec![MissingRecordCopy {
+                device: device(3),
+                fault: RecordCopyFault::Stale { revision: 0 },
+            }],
         },
         Response::DeleteObject,
         Response::ListKeys {
@@ -585,6 +589,7 @@ fn every_response_round_trips() {
                 record: sample_record(),
             }],
             truncated: false,
+            unread: vec![device(2)],
         },
         Response::LocalList {
             entries: vec![entry],
@@ -657,9 +662,22 @@ fn stream_end_round_trips_in_all_three_shapes() {
                     stripes: 40,
                 },
             ],
+            missing_records: vec![
+                MissingRecordCopy {
+                    device: device(2),
+                    fault: RecordCopyFault::Unavailable {
+                        reason: "node unreachable".to_string(),
+                    },
+                },
+                MissingRecordCopy {
+                    device: device(3),
+                    fault: RecordCopyFault::Missing,
+                },
+            ],
         },
     });
-    // The success case is tiny: one map with an empty `reconstructed`.
+    // The success case is tiny: one map with an empty `reconstructed`
+    // and an empty `missing_records`.
     let ok = Message::EndOfStream {
         id: 1,
         end: StreamEnd::ok(),
@@ -667,7 +685,7 @@ fn stream_end_round_trips_in_all_three_shapes() {
     .encode()
     .expect("encode");
     assert!(
-        ok.len() <= HEADER_LEN + 4 + "reconstructed".len(),
+        ok.len() <= HEADER_LEN + 6 + "reconstructed".len() + "missing_records".len(),
         "StreamEnd::ok is {} bytes",
         ok.len()
     );

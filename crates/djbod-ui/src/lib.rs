@@ -78,7 +78,8 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{
-    ErrorCode, ErrorDetail, ListQuery, Reconstruction, Request, Response as Reply,
+    ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction, RecordCopyFault, Request,
+    Response as Reply,
 };
 
 /// The page, embedded so the binary is self-contained.
@@ -244,21 +245,45 @@ impl App {
         );
     }
 
-    /// The note a read that reconstructed from parity leaves (SPEC 11.4):
-    /// the bytes were right, the disk is not, and repair fixes it.
-    fn reconstruction_detail(reconstructed: &[Reconstruction]) -> ErrorDetail {
-        let first = &reconstructed[0];
-        ErrorDetail {
-            device: Some(first.device),
-            shard_index: Some(first.shard_index),
-            stripe: Some(first.first_stripe),
-            ..ErrorDetail::new(
-                ErrorCode::BlockChecksumMismatch,
-                format!(
-                    "{} block(s) reconstructed from parity; the data was correct, the damage on disk is not repaired",
-                    reconstructed.len()
+    /// The note a degraded read leaves (SPEC 11.4, 9.4.4): blocks it
+    /// reconstructed from parity, record copies it went without, or
+    /// both. The bytes were right, the cluster is not whole, and repair
+    /// fixes what is damage; a device that is out mends nothing.
+    fn degraded_detail(
+        reconstructed: &[Reconstruction],
+        missing_records: &[MissingRecordCopy],
+    ) -> ErrorDetail {
+        let mut notes = Vec::new();
+        if !reconstructed.is_empty() {
+            notes.push(format!(
+                "{} block(s) reconstructed from parity; the data was correct, the damage on disk is not repaired",
+                reconstructed.len()
+            ));
+        }
+        for copy in missing_records {
+            notes.push(match &copy.fault {
+                RecordCopyFault::Missing => format!("record copy missing on device {}", copy.device),
+                RecordCopyFault::Stale { revision } => format!(
+                    "record copy on device {} is at revision {revision}, an interrupted re-placement",
+                    copy.device
                 ),
-            )
+                RecordCopyFault::Unavailable { reason } => format!(
+                    "record copy on device {} could not be read: {reason}",
+                    copy.device
+                ),
+            });
+        }
+        match reconstructed.first() {
+            Some(first) => ErrorDetail {
+                device: Some(first.device),
+                shard_index: Some(first.shard_index),
+                stripe: Some(first.first_stripe),
+                ..ErrorDetail::new(ErrorCode::BlockChecksumMismatch, notes.join("; "))
+            },
+            None => ErrorDetail {
+                device: missing_records.first().map(|m| m.device),
+                ..ErrorDetail::new(ErrorCode::RecordsInconsistent, notes.join("; "))
+            },
         }
     }
 
@@ -889,7 +914,24 @@ async fn read_failures(State(app): State<Arc<App>>) -> ApiResult {
 async fn head_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
     let mut conn = connect(&app).await?;
     match conn.request(Request::HeadObject { key }).await? {
-        Reply::HeadObject { record } => Ok(Json(json!(record))),
+        Reply::HeadObject {
+            record,
+            missing_records,
+        } => {
+            // A copy the lookup went without (SPEC 9.4.4) is noted like a
+            // reconstruction, so the page shows it until a repair.
+            if !missing_records.is_empty() {
+                app.record_failure(
+                    &record.key,
+                    "head",
+                    0,
+                    App::degraded_detail(&[], &missing_records),
+                );
+            }
+            let mut value = json!(record);
+            value["missing_records"] = json!(missing_records);
+            Ok(Json(value))
+        }
         other => Err(ApiError::unexpected(other)),
     }
 }
@@ -1087,18 +1129,18 @@ async fn download_object(
                     // It also proves every shard read intact, so any note
                     // of an earlier failure on this key is dropped.
                     StreamItem::End(end) => match end.error {
-                        None if end.reconstructed.is_empty() => {
+                        None if end.reconstructed.is_empty() && end.missing_records.is_empty() => {
                             app.clear_failure(&key);
                             None
                         }
-                        // Correct bytes, damaged disk (SPEC 11.4): noted
-                        // so the page shows it until a repair.
+                        // Correct bytes, a cluster not whole (SPEC 11.4,
+                        // 9.4.4): noted so the page shows it until a repair.
                         None => {
                             app.record_failure(
                                 &key,
                                 "download",
                                 delivered,
-                                App::reconstruction_detail(&end.reconstructed),
+                                App::degraded_detail(&end.reconstructed, &end.missing_records),
                             );
                             None
                         }
@@ -1200,28 +1242,32 @@ async fn verify_object(
         key: key.clone(),
     };
     /// The last line: the verdict, remembered or cleared for the key. A
-    /// verified body that needed reconstruction (SPEC 11.4) is damage on
-    /// disk, remembered as such.
+    /// verified body that needed reconstruction (SPEC 11.4) or went
+    /// without a record copy (9.4.4) is a cluster not whole, remembered
+    /// as such.
     fn done(
         app: &App,
         key: &str,
         verified: bool,
         error: Option<ErrorDetail>,
         reconstructed: Vec<Reconstruction>,
+        missing_records: Vec<MissingRecordCopy>,
         bytes: u64,
     ) -> Value {
         match &error {
-            None if verified && reconstructed.is_empty() => app.clear_failure(key),
+            None if verified && reconstructed.is_empty() && missing_records.is_empty() => {
+                app.clear_failure(key)
+            }
             None if verified => app.record_failure(
                 key,
                 "verify",
                 bytes,
-                App::reconstruction_detail(&reconstructed),
+                App::degraded_detail(&reconstructed, &missing_records),
             ),
             Some(detail) => app.record_failure(key, "verify", bytes, detail.clone()),
             None => {}
         }
-        json!({ "event": "done", "verified": verified, "error": error, "reconstructed": reconstructed, "bytes": bytes })
+        json!({ "event": "done", "verified": verified, "error": error, "reconstructed": reconstructed, "missing_records": missing_records, "bytes": bytes })
     }
     let lines = futures_util::stream::unfold(state, move |mut st| async move {
         if st.finished {
@@ -1241,7 +1287,15 @@ async fn verify_object(
                                 data.sequence
                             ),
                         );
-                        break done(&st.app, &st.key, false, Some(detail), Vec::new(), st.bytes);
+                        break done(
+                            &st.app,
+                            &st.key,
+                            false,
+                            Some(detail),
+                            Vec::new(),
+                            Vec::new(),
+                            st.bytes,
+                        );
                     }
                     st.expected_sequence += 1;
                     st.bytes += data.bytes.len() as u64;
@@ -1260,6 +1314,7 @@ async fn verify_object(
                         end.error.is_none(),
                         end.error,
                         end.reconstructed,
+                        end.missing_records,
                         st.bytes,
                     );
                 }
@@ -1269,7 +1324,15 @@ async fn verify_object(
                         ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
-                    break done(&st.app, &st.key, false, Some(detail), Vec::new(), st.bytes);
+                    break done(
+                        &st.app,
+                        &st.key,
+                        false,
+                        Some(detail),
+                        Vec::new(),
+                        Vec::new(),
+                        st.bytes,
+                    );
                 }
             }
         };
