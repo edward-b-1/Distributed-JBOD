@@ -796,12 +796,11 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
                     build: None,
                     error: Some(unreachable.detail.message),
                 });
+                // Every device the document lists for the node, removed
+                // ones included (18.2.1): the status shows the whole
+                // document, and what to hide is the reader's choice.
                 let node_label = document.node(target).and_then(|n| n.label.clone());
-                for entry in document
-                    .devices
-                    .iter()
-                    .filter(|d| d.node == target && d.state != DeviceState::Removed)
-                {
+                for entry in document.devices.iter().filter(|d| d.node == target) {
                     devices.push(DeviceStatus {
                         device: entry.id,
                         node: target,
