@@ -72,6 +72,7 @@ use uuid::Uuid;
 use djbod_client::admin::{self, AdminError};
 use djbod_client::connection::{Connection, ConnectionError, StreamItem, DEFAULT_BODY_CHUNK};
 use djbod_client::transport::Connector;
+use djbod_client::wire::WireError;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
@@ -411,6 +412,14 @@ pub enum ApiError {
     Remote(ErrorDetail),
     /// The node could not be reached or talked to.
     Client(Box<ConnectionError>),
+    /// No connection could be made to the node at `address`: the
+    /// operating system refused, timed out, or could not route to it.
+    /// `reason` is in plain words; `detail` is the raw error.
+    Unreachable {
+        address: SocketAddr,
+        reason: String,
+        detail: String,
+    },
     /// A document change failed.
     Membership(Box<AdminError>),
     /// The request itself was wrong.
@@ -435,6 +444,25 @@ impl From<AdminError> for ApiError {
 }
 
 impl ApiError {
+    /// A failure to open a connection to `address`. An I/O error becomes
+    /// `Unreachable`, worded for the page; anything else, such as a peer
+    /// that answered and refused, keeps its own description.
+    fn connecting(address: SocketAddr, e: ConnectionError) -> ApiError {
+        match e {
+            ConnectionError::Wire(WireError::Io(io)) => ApiError::Unreachable {
+                address,
+                reason: plain_words(&io),
+                detail: io.to_string(),
+            },
+            ConnectionError::Wire(WireError::Closed) => ApiError::Unreachable {
+                address,
+                reason: "the connection was closed before the node answered".to_string(),
+                detail: WireError::Closed.to_string(),
+            },
+            other => other.into(),
+        }
+    }
+
     fn unexpected(reply: Reply) -> ApiError {
         ApiError::Client(Box::new(ConnectionError::UnexpectedMessage {
             expected: "the operation's response",
@@ -461,6 +489,22 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_GATEWAY,
                 json!({ "error": { "code": "node_unreachable", "message": e.to_string() } }),
             ),
+            ApiError::Unreachable {
+                address,
+                reason,
+                detail,
+            } => (
+                StatusCode::BAD_GATEWAY,
+                json!({ "error": {
+                    "code": "node_unreachable",
+                    // What the page shows: the address tried and why it
+                    // failed, in words an operator can act on.
+                    "message": format!("node {address} is not reachable: {reason}"),
+                    "address": address.to_string(),
+                    // The operating system's own text, for debugging.
+                    "detail": detail,
+                } }),
+            ),
             ApiError::Membership(e) => {
                 let (status, code) = membership_status(&e);
                 (
@@ -474,6 +518,37 @@ impl IntoResponse for ApiError {
             ),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+/// An I/O error in the words an operator uses, without the operating
+/// system's error number: "connection refused" rather than
+/// "Connection refused (os error 111)".
+fn plain_words(e: &io::Error) -> String {
+    use io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused => "connection refused".to_string(),
+        K::ConnectionReset => "connection reset".to_string(),
+        K::ConnectionAborted => "connection aborted".to_string(),
+        K::TimedOut => "timed out".to_string(),
+        K::HostUnreachable => "host unreachable".to_string(),
+        K::NetworkUnreachable => "network unreachable".to_string(),
+        K::NetworkDown => "network down".to_string(),
+        K::AddrNotAvailable => "address not available".to_string(),
+        K::PermissionDenied => "permission denied".to_string(),
+        _ => {
+            // Whatever the system said, minus its trailing "(os error N)".
+            let text = e.to_string();
+            let text = match text.rfind(" (os error ") {
+                Some(cut) if text.ends_with(')') => &text[..cut],
+                _ => &text,
+            };
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => "unknown error".to_string(),
+            }
+        }
     }
 }
 
@@ -519,12 +594,13 @@ fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
 async fn connect(target: &Target) -> ApiResult<Connection> {
-    Ok(Connection::connect_with(
+    Connection::connect_with(
         &target.connector,
         target.node,
         Connection::client_hello(target.cluster),
     )
-    .await?)
+    .await
+    .map_err(|e| ApiError::connecting(target.node, e))
 }
 
 /// The device a path parameter names: a UUID, or a label looked up in
