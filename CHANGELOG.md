@@ -1,3 +1,258 @@
+## [99bfa9f] - 2026-09-19
+
+Pull request #35: Milestone 5 (a): TLS transport, node certificates, and the three modes
+
+### Added
+
+- `djbod_node::transport`: `TlsMaterial::load` reads a node's certificate, private key and authority bundle from PEM files, `Stream` puts plain TCP and TLS behind one read and write type so the frame code and the handlers are unchanged, and `accept` looks at the first byte, since a TLS handshake record is `0x16` and no frame type is (SPEC 19.1.6).
+- A `[tls]` table with `cert`, `key` and `ca` paths, `--tls-cert`, `--tls-key` and `--tls-ca` on `run`, `join` and `add-device`, and `DJBOD_TLS_CERT`, `DJBOD_TLS_KEY` and `DJBOD_TLS_CA`, flags over variables over file, paths only and never material (SPEC 20.6).
+- `ClusterDocument.transport` as `plain`, `tls-optional` or `tls`, with `membership::set_transport` and `djbod cluster set-transport`; leaving `plain` is refused with `NodeNotTlsReady` until every node reports material loaded, which `LocalStatus` carries as `tls_ready`, and a node refuses to start or to adopt a document under a TLS transport without material (SPEC 19.1.6.4).
+- A `&Connector` first parameter on every membership function, so the caller chooses plain or TLS; `join` and `add-device` try TLS first when the node has material and fall back to plain, so a node with its own certificate joins a `tls` cluster with nothing registered in advance (SPEC 19.1.6.5).
+- Counters of connections accepted by transport, which the migration test uses to prove node-to-node traffic switched.
+
+### Security
+
+- `TlsMaterial::load` refuses a private key file readable by anyone but its owner (SPEC 19.1.6.2).
+
+## [1708dc4] - 2026-09-19
+
+Pull request #34: Spec: TLS design (19.1.6) and configuration sources (20.6)
+
+### Added
+
+- SPEC 19.1.6, the Transport Layer Security (TLS) design: one certificate authority per cluster with everything issued by `openssl`, since djbod generates no keys and signs nothing; material named by path through a flag, an environment variable or a `[tls]` table and never in the configuration file or the cluster document; verification by chain to the authority and, for a server, the dialled host; the three modes `plain`, `tls-optional` and `tls`, with nodes speaking mutual TLS in both TLS modes and the listener telling TLS from plain by the first byte; join authenticated by the node's own certificate with nothing pre-registered; and revocation as authority rotation staged with root bundles.
+- SPEC 20.6, the configuration rule: argument over environment variable over configuration file, `DJBOD_` naming, with secrets always in their own files.
+- Milestone 5 in SPEC C.4 in four steps, and `rustls` with tokio-rustls recorded as the implementation, leaving the frame layer, the recovery tool and the offline scrub unchanged.
+
+## [a4ab9e5] - 2026-09-19
+
+Pull request #33: Report a version deleted mid-drain as deleted, not as a stale copy (#30)
+
+### Fixed
+
+- A drain reports a version deleted or replaced between the listing and that version's turn as `DrainEvent::Deleted` rather than as a stale copy and a failure of the run, since nothing is stale and the pass has not failed (#30). Only when copies exist but the current record does not place a shard on this device is the copy a genuine leftover for the scrub.
+
+### Changed
+
+- The stale-copy decision moves into `shard_to_drain`, a pure function over the device, the listed copy and the current versions, so it can be tested without staging a race inside one request.
+
+## [27868a7] - 2026-09-19
+
+Pull request #32: Send the listing cursor and limit down to every node (#29)
+
+### Changed
+
+- `coordinator::list_keys` forwards the client's query, cursor and limit to every node and takes one page from each, so the coordinator holds at most one page per node. Before this, every page moved every key in the cluster over the network and held all of them in memory, costing N x P in transfer and N in memory per page for N keys in P pages (#29).
+- The merged page is cut no further than the smallest last key among the nodes that reported more, the horizon rule, because under the byte bound a node's page may stop before a long key while the merged page still has room for a shorter key that sorts after it; that shorter key would otherwise become the cursor and the long key would never be asked for again (SPEC 15.2.1).
+- The truncation flag also reports whether any node had more, since one version's record sits on k+m devices and the same key collapses to one entry, which can make a page shorter than the bound.
+
+### Fixed
+
+- A client limit of zero is treated as one, instead of producing an empty page marked truncated so that a walk never advanced.
+
+## [6c7580f] - 2026-09-19
+
+Pull request #31: Refuse to remove an active device or a node with active devices (#28)
+
+### Fixed
+
+- `remove-device` refuses an active device with `MembershipError::DeviceActive` and `remove-node` refuses a node with any active device with `NodeHasActiveDevices`, both naming the devices and pointing at `set-state` and `drain`. Before this, nothing stopped a client write from placing a shard on a still-active device between the reference scan and the proposal, after which the device was marked removed while holding data (#28). A draining device receives no new shards, so once the state is established the scan cannot be invalidated by a write. `remove-node --force` is unaffected, since a dead node cannot receive writes.
+
+## [564af37] - 2026-09-19
+
+Pull request #27: Milestone 4 (e): size limits in the cluster document, bounded records, paged listings
+
+### Added
+
+- `max_key_bytes`, `max_object_bytes` and `max_user_metadata_bytes` in the cluster document, all with serde defaults so existing documents parse unchanged, bounded by the validator, and set by `djbod-node init-cluster` or `djbod cluster set-limits` (SPEC 6.2.2, 21.3).
+- A bound of 8 MiB of key text on a `ListKeys` or `LocalList` page and 8 MiB of encoded records on a `LocalRecords` page, each with a truncation flag and a cursor, with every internal walk following pages to the end (SPEC 15.2.2). Before this, a cluster of about 4,100 objects with 16 KiB keys made every unlimited listing, and so every scrub, fail with a frame-size protocol violation.
+- `MetadataTooLarge`, refusing a content type over its fixed 1 KiB bound or user metadata over the document's limit before any shard is stored.
+- Paging for `LocalLookup` by encoded size with a version and device cursor, since with records this large a node holding several copies of one version could not answer a lookup in one frame; the coordinator asks every node concurrently and follows each to the end.
+
+### Removed
+
+- The compiled-in size constants, in favour of the document's fields, with the refusal messages naming the field to change.
+
+## [dc9aa77] - 2026-09-18
+
+Pull request #26: Milestone 4 (d): set-scheme and reencode
+
+### Added
+
+- `djbod cluster set-scheme --k K --m M [--block-size B]`, which proposes a document with the new values and moves no data, refusing with `TooFewActiveDevices` when fewer devices are active than the new k+m, and reporting how many objects are stored at another scheme. Existing objects stay readable indefinitely, because each record carries the scheme it was written with.
+- `djbod cluster reencode`, the migration: it pages through every key and, for each version whose recorded k, m or block size differs from the document's, streams a `GetObject` on one connection into a `PutObject` on another through an in-process pipe, keeping content type and user metadata. An interruption leaves either the old version or the new one, and a rerun re-encodes only what is left (SPEC 18.9).
+- `put_object_with_metadata` on the client, carrying the user metadata map, with `put_object_from_reader` delegating to it.
+
+### Changed
+
+- The shortcuts SPEC 18.9 allowed when only m changes are deferred, because the shard file header records the scheme and the scrub checks it against the record, so either would need a header rewrite on every shard. A re-encoded object gets a new version id and creation time, since to the store it is a new write of the same key.
+
+## [51b4221] - 2026-09-18
+
+Pull request #25: Milestone 4 (c): djbod-recover, the offline recovery tool
+
+### Added
+
+- The `djbod-recover` crate, depending on `djbod-core` alone (SPEC 20.2).
+- `list <device-path>...`, which walks each path's `objects/default` tree directly so a disk that has lost its identity file works like any other, printing key, version, revision, size, present shards over k+m and whether k structurally sound shard files remain, and exiting 2 when any version is short of k shards or any file was damaged.
+- `extract <key> [--version <id>] --out <file> <device-path>...`, which opens every shard whose header and footer describe the same object, refuses up front if fewer than k are sound, decodes stripe by stripe, and renames a `.partial` file into place only after the whole-object checksum matches. It refuses to overwrite an existing output and never writes to a device.
+
+## [81238a2] - 2026-09-18
+
+Pull request #24: Milestone 4 (b), second half: remove-device, remove-node, and forced removal
+
+### Added
+
+- `membership::scan_references`, which asks every node for the records on each of its devices, keeps the highest revision per version, and counts the shards current records place on the devices in question, running inline rather than as a background job (SPEC 18.5).
+- `remove_device`, refusing with `StillReferenced` and example keys while any current record names the device and otherwise proposing it as `removed`, with the entry kept so a disk that comes back is recognised; and `remove_node`, which does the same for all of a node's devices and then drops the node, refusing to remove the last node.
+- `remove-node --force`: `plan_forced_removal` refuses a node that answers a document fetch within five seconds, computes the affected versions and those with more than m shards on the dead node, and the command prints both counts and the unrecoverable keys and requires the node id typed back unless `--yes`. `execute_forced_removal` proposes through `propose_skipping`, which neither asks the dead node for its version nor sends it the document (SPEC 6.2.6.3).
+- `--wipe-removed-device` on `join`, `add-device` and `init-cluster`, since a device initialised for the cluster but absent from the document is a removed device and is otherwise refused with `RemovedDevice`. `Device::erase` and `Device::wipe_and_initialise` are the only code that deletes data.
+- `relocate_lost_shards`, which picks a distinct new active device per lost shard, most free space first and excluding holders, so repair rebuilds a shard whose device has left the document; `ShardRepair` gains `relocated_to` (SPEC 18.3).
+
+### Changed
+
+- A node that adopts a document no longer listing itself logs a warning and stops serving, and `djbod-node run` waits one second for its acknowledgement to reach the proposer, says why it is stopping, and exits.
+
+### Fixed
+
+- The cluster scrub test asserted no local finding on the third damaged device, which can coincide with one of the other two; the assertion now checks for findings about that object alone.
+
+## [1f608f8] - 2026-09-18
+
+Pull request #23: Milestone 4 (b), first half: set-state and drain
+
+### Added
+
+- `djbod cluster set-state <device> draining|active`, which moves no data and is safe to repeat, since asking for the state a device already has is a no-op and an unknown device is `MembershipError::UnknownDevice`. Placement and `MoveShard` already consider only active devices, so a draining device stops receiving shards with no further code.
+- `Drain`, answered with `DrainStarted` and a stream of `Estimate`, `Moved` and `Skipped` events, refused unless the device is draining, with a message pointing at `set-state`.
+- `LocalRecords`, the node-to-node operation that lists a device's records, since a device holds a record copy for every version it has a shard of and the scan is therefore local to one node.
+- An estimate that sums the shard bytes on the device against the free room on active devices and checks that at least k+m devices are active, ending the stream with `InsufficientDevices` before anything moves unless `partial` is given (SPEC 18.2.2).
+- `djbod cluster drain <device> [--partial]`, exiting 2 if anything was skipped, with `--node-id` draining every draining device of a node in turn.
+
+### Changed
+
+- The drain finishes when the version list is exhausted whatever happened to individual versions, so it cannot loop, and the end-of-stream carries `WriteFailed` naming how many versions were skipped (SPEC 18.2.1).
+
+## [110e876] - 2026-09-18
+
+Pull request #22: Milestone 4 (a): record revisions and the re-placement primitive (MoveShard)
+
+### Added
+
+- `MetadataRecord.revision`, 0 when a version is first written and omitted from the JSON then, so every existing record file still parses and verifies unchanged, and covered by the record checksum (SPEC 18.8.1).
+- `MetadataRecord::same_body`, saying whether two records describe the same version, key, size, checksum and scheme and differ only in placement.
+- `MoveShard` and `djbod move-shard <key> <index> [--to <device>]`, which copy the shard from the source when it is intact and rebuild it from the others otherwise, write the record at revision+1 to the destination and then every other holder, and remove the source's copy (SPEC 18.8.2).
+- `ClusterFinding::StaleCopy` from the cluster scrub for a lower-revision copy on a device the record no longer lists, removed by repair and reported in `RepairReport.stale_copies_removed`.
+
+### Changed
+
+- Reads take the highest revision present and require k+m agreeing copies of it from listed devices, ignoring lower revisions.
+- `Device::write_record` is idempotent for an equal record and replaces a copy only with a higher revision of the same body; anything else is `RecordExists`.
+- `repairable_record` trusts the highest revision vouched for by lower-revision copies of the same body, so a move interrupted after its first `PutMeta` is completed forwards and never backwards.
+
+## [70427eb] - 2026-09-18
+
+Direct commit: Specification: drain is a single pass and cannot loop
+
+### Changed
+
+- `SPEC.md` states that a drain is a single pass and cannot loop.
+
+## [6b0a321] - 2026-09-18
+
+Pull request #21: Specification: milestone 4 design for review
+
+### Added
+
+- SPEC 18.8.1, the record `revision`: 0 at first write and incremented by every re-placement, so the version id identifies the body and the revision identifies its placement. A read of an object fails for the few `PutMeta` round trips of its re-placement window, which is fail-stop as designed but a new way for a read to fail transiently under ordinary administration.
+- SPEC 18.8.2, re-placement of one shard from device to device, with every step idempotent and the crash windows stated, and 18.2.1, drain as one command that marks draining, re-places every shard and marks removed.
+- SPEC 6.2.6.3, forced removal of a dead node: show the cost first, require the id typed back, apply without the dead node's acknowledgement, then rebuild. A returning removed node refuses to serve and its devices refuse reinitialisation without an explicit wipe flag.
+- SPEC 20.2.2 `djbod-recover`, listing and extracting from mounted disks with no cluster and never writing to a device, and 18.9 re-encode as a migration on the primitive.
+
+## [3732738] - 2026-09-18
+
+Pull request #20: Repair rewrites missing record copies when at least k agreeing copies remain
+
+### Added
+
+- Repair rewrites the record copies a device has lost, closing the one case the cluster scrub could find but not fix. It trusts the record when the copies that exist agree, each comes from a device the record lists, and there are at least k of them, and reports the devices it wrote to in a new `record_copies_rewritten` field (SPEC 18.4.2). Two disagreeing copies, or fewer than k, are refused with `RecordsInconsistent`.
+
+### Changed
+
+- Shards are rewritten before record copies, so a crash between the two leaves a shard without a record, which the scrub reports and a later repair completes. Reads keep the strict rule of SPEC 9.4.4, all k+m copies present and agreeing; repair is the one operation allowed to proceed with fewer.
+
+## [d2532ae] - 2026-09-18
+
+Pull request #19: Milestone 3 (d): the cluster-wide scrub and the write-collision guard
+
+### Added
+
+- `LocalScrub`, which runs the local scrub engine over a node's own devices on a blocking thread and streams each finding and then a summary per device, so no data crosses the network for detection.
+- `Scrub` in three phases: fan `LocalScrub` out to every node and relay every event as it arrives, with a node that cannot be scrubbed becoming a `NodeFailed` event; cross-node checks for `RecordsInconsistent`, `ShardMissingOnHolder` and `HolderUnavailable`, which catch a device that lost both record and shard for a version; and, with `repair`, one `RepairObject` per damaged key issued from the coordinator.
+- `djbod scrub` with `--rate-mib`, `--repair` and `--json`, exiting 0 when clean and 2 when anything was found or the scrub was incomplete.
+- The write-collision guard: a node refuses a second `PutShard` for a shard already being written on that device, releasing the slot when the first write finishes or is dropped, and temporary file names carry a process- and call-unique token so two writers can never share one (SPEC 20.1.2.1).
+
+### Changed
+
+- `SPEC.md` records 20.1.2 as built and 20.1.2.1 as decided, closes open question 21.1, and marks milestone 3 complete.
+
+## [5be4b18] - 2026-09-18
+
+Pull request #16: Add the local scrub engine and an offline scrub check
+
+### Added
+
+- `djbod_core::scrub`, which reads one device directly with no network and no node: every record parsed, checksummed, validated and checked against the directory it is in; every shard file opened and every block read against its checksum; and the within-device cross-checks for a record whose shard is absent, a shard with no record, a record that does not list this device, and stale temporaries (SPEC 20.1).
+- A rate limiter capping bytes read per second. The scrub is safe while the node runs, because files are immutable once renamed and a file that vanishes mid-scrub is a concurrent delete rather than damage.
+- `djbod-node scrub`, which runs the engine offline over one machine's devices, with `--device`, `--rate-mib` and `--json`, exiting 0 when clean and 2 when anything was found.
+- SPEC 20.1.2 describing both layers and 20.1.2.1 stating the guard needed before repairs can be issued from more than one place.
+
+## [cc1c114] - 2026-09-18
+
+Direct commit: Specification: membership items decided; milestone 3 status
+
+### Changed
+
+- `SPEC.md` marks the membership items decided and records the milestone 3 status.
+
+## [3f3fe57] - 2026-09-18
+
+Pull request #18: Milestone 3: joining, document changes without a master, sync, startup adoption
+
+### Added
+
+- The `membership` module, written as a client over the native protocol so it runs from anywhere: `fetch_all`, `propose`, `sync`, `join`, `add_devices` and `adopt_from_peers`.
+- `propose` reports a refusal by the first-listed node as `Superseded`, to be refetched and retried, and a later failure as `Partial` naming the nodes that applied.
+- `djbod-node join` and `add-device`, `djbod cluster show` and `djbod cluster sync`, with `run` consulting bootstrap peers before opening.
+
+### Changed
+
+- `ApplyClusterConfig` accepts any higher version of its cluster's document, not only version plus one, since versions are produced serially through the first-listed node and a straggler two versions behind must be able to jump. SPEC 6.2.6 is corrected where it said exactly plus one.
+
+### Fixed
+
+- A peer that refuses the coordinator's `Hello` over a version mismatch is reported as `DocumentVersionMismatch` with its own message rather than as unreachable.
+- A client whose upload the coordinator refuses before the body is consumed reads the refusal the coordinator sent, instead of reporting the broken pipe its own write hit.
+
+## [a3cde8e] - 2026-09-18
+
+Pull request #17: Specification: milestone 3 design for review
+
+### Added
+
+- SPEC 6.2.6, changing the cluster document without a master: check that every node holds version N, build N+1, and apply in document order stopping at the first refusal, so two concurrent proposers cannot both enter a document with one version number. The first-listed node has no run-time role; it is an ordering rule derived from the document.
+- SPEC 6.2.6.1 and 6.2.6.2: nodes only move forward and versions are produced serially, so a node may adopt any higher version it is shown, and a straggler after a partial apply fails requests with `DocumentVersionMismatch` until `djbod cluster sync` catches it up.
+- SPEC 6.2.6.3: a permanently dead node blocks document changes until milestone 4 adds forced removal, recorded as a known version 1 limitation.
+- SPEC 18.1.1 join, 18.1.2 startup adoption and 18.1.3 adding a device to an existing node, with placeholders for `Scrub` and `LocalScrub` in 19.1.3 and the milestone 3 build order in C.4.
+
+## [dbfd6ac] - 2026-09-18
+
+Pull request #15: Log field names in plain text; keep level colours
+
+### Fixed
+
+- Log field names are written plainly as `name=value` instead of in the terminal's italics, through a custom field formatter that is replaceable independently of the event formatter, which still colours the level and dims the target.
+
 ## [aaec982] - 2026-09-18
 
 Pull request #14: Add RepairObject: rebuild damaged or missing shards from the intact ones
