@@ -690,7 +690,7 @@ function renderHealth() {
   const actions = [];
   if (unreachable.length) {
     cls = 'bad';
-    title = `${unreachable.length} of ${nodes.length} node(s) unreachable`;
+    title = `${unreachable.length} of ${plural(nodes.length, 'node')} unreachable`;
     sub = unreachable.map((n) => `${nodeText(n.node)} at ${n.address}: ${n.error}`).join('; ');
   } else if (behind.length) {
     cls = 'bad';
@@ -703,7 +703,7 @@ function renderHealth() {
     sub = `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
   } else {
     title = 'Cluster consistent';
-    sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
+    sub = `${plural(nodes.length, 'node holds', 'nodes hold')} document version ${status.document_version}`;
   }
   $('health').replaceChildren(el('div', { class: 'health ' + cls },
     el('div', { class: 'mark', 'aria-hidden': 'true' }),
@@ -979,15 +979,15 @@ function renderListing() {
   $('list-next').disabled = !truncated;
   $('list-page').textContent = `Page ${page}`;
   const cursor = after[page - 1];
-  $('list-count').textContent = `${keys.length} key(s) on this page`;
+  $('list-count').textContent = `${plural(keys.length, 'key')} on this page`;
   $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
   // The listing went around devices the cluster cannot read (SPEC 15.1):
   // complete while fewer than k+m are out, possibly short once that many are.
   const { unread, complete } = state.listing;
   const devices = unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
   $('list-note').replaceChildren(unread.length === 0 ? '' : complete
-    ? el('span', {}, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
-    : el('span', { class: 'bad' }, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
+    ? el('span', {}, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
+    : el('span', { class: 'bad' }, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
 }
 $('list-go').addEventListener('click', () => list());
 $('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
@@ -1145,7 +1145,7 @@ async function repair(key) {
       return `shard ${s.index} on ${deviceText(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${deviceText(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
     });
     const rewritten = r.shards.filter((s) => s.rewritten).length;
-    toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
+    toast(`repair of ${key}: ${plural(rewritten, 'shard')} rewritten`, lines.join('\n'));
     refreshFailures();
     select(key);
   } catch (e) { fail('repair', e); }
@@ -1189,7 +1189,7 @@ $('upload-go').addEventListener('click', async () => {
     }
     if (!check.fits) {
       toast(`no room for ${file.name} (${human(file.size)})`,
-        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${check.active_devices} active device(s) have that much` +
+        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${plural(check.active_devices, 'active device')} have that much` +
         (check.active_devices >= check.required_devices ? `, and the ${check.required_devices}${ordinal(check.required_devices)} emptiest has ${human(check.room_bytes)}` : '') +
         '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
       return;
@@ -1287,14 +1287,14 @@ $('scrub-go').addEventListener('click', async () => {
       if (e.event === 'node_summary') { devicesDone++; bytesRead += e.summary.bytes_read || 0; }
       if (e.event === 'node_failed') devicesDone++;
       if (e.event === 'cluster_finding' || e.event === 'cross_check_stopped' || e.event === 'cross_check_progress' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
-      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${devicesDone} device(s), ${human(bytesRead)} read`; }
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${plural(devicesDone, 'device')}, ${human(bytesRead)} read`; }
       else showProgress();
       switch (e.event) {
         case 'node_finding': findings++; logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
-        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${plural(e.summary.findings.length, 'finding')}`, 'muted'); break;
         case 'node_failed': findings++; logLine(log, `node ${nodeText(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
-        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
+        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${plural(e.versions_checked, 'version')} checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
         case 'cross_check_availability': {
           const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
@@ -1303,13 +1303,13 @@ $('scrub-go').addEventListener('click', async () => {
         }
         case 'cross_check_exposure': {
           // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
-          const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${u.versions.toLocaleString()} version(s)`).join('; ');
-          const limit = e.versions_at_the_limit ? ` ${e.versions_at_the_limit.toLocaleString()} can lose no further shard.` : '';
-          const unreadable = e.versions_unreadable ? ` ${e.versions_unreadable.toLocaleString()} are unreadable now.` : '';
-          logLine(log, `WARNING: data at higher risk: ${e.versions_with_shards_out.toLocaleString()} of ${e.versions_checked.toLocaleString()} version(s) have a shard on an unavailable device (${perDevice}).${limit}${unreadable} Restore the device, or force-remove it and run a repairing scrub.`, 'finding');
+          const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${plural(u.versions, 'version')}`).join('; ');
+          const limit = e.versions_at_the_limit ? ` ${plural(e.versions_at_the_limit, 'version')} can lose no further shard.` : '';
+          const unreadable = e.versions_unreadable ? ` ${plural(e.versions_unreadable, 'version is', 'versions are')} unreadable now.` : '';
+          logLine(log, `WARNING: data at higher risk: versions with a shard on an unavailable device: ${e.versions_with_shards_out.toLocaleString()} of ${e.versions_checked.toLocaleString()} (${perDevice}).${limit}${unreadable} Restore the device, or force-remove it and run a repairing scrub.`, 'finding');
           break;
         }
-        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
+        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${plural(e.report.shards.filter((s) => s.rewritten).length, 'shard')} rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':
           if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
@@ -1343,7 +1343,7 @@ $('drain-go').addEventListener('click', async () => {
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
       switch (e.event) {
-        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${plural(e.versions, 'version')}, ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${plural(e.active_devices, 'active device')}, ${e.required_devices} needed per version`, 'muted'); break;
         case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
         case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;

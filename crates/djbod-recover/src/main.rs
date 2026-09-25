@@ -24,6 +24,7 @@ use djbod_core::layout::{
 use djbod_core::record::MetadataRecord;
 use djbod_core::shardfile::{shard_geometry, ShardFileReader};
 use djbod_core::stripe::{decode_stripe, DecodedStripe};
+use djbod_core::text::counted;
 use djbod_core::version::VersionId;
 
 #[derive(Parser)]
@@ -289,9 +290,9 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
         eprintln!("problem: {problem}");
     }
     eprintln!(
-        "{} version(s), {unrecoverable} not recoverable, {} problem(s)",
-        found.records.len(),
-        found.problems.len()
+        "{}, {unrecoverable} not recoverable, {}",
+        counted(found.records.len(), "version", "versions"),
+        counted(found.problems.len(), "problem", "problems")
     );
     Ok(if unrecoverable > 0 || !found.problems.is_empty() {
         ExitCode::from(2)
@@ -413,8 +414,8 @@ fn write_object(
     }
     if readers.len() < scheme.data_shards() {
         bail!(
-            "only {} intact shard(s) of {}+{} found; need at least {}",
-            readers.len(),
+            "only {} of {}+{} found; need at least {}",
+            counted(readers.len(), "intact shard", "intact shards"),
             record.k,
             record.m,
             record.k
@@ -449,7 +450,8 @@ fn write_object(
             DecodedStripe::Repaired { data, faults } => {
                 repaired_stripes += 1;
                 eprintln!(
-                    "stripe {stripe}: reconstructed around shard(s) {:?}",
+                    "stripe {stripe}: reconstructed around {} {:?}",
+                    counted(faults.len(), "shard", "shards"),
                     faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
                 );
                 data
@@ -459,7 +461,9 @@ fn write_object(
                 usable,
                 needed,
             } => bail!(
-                "stripe {stripe}: only {usable} usable block(s) of {needed} needed; damaged shard(s) {:?}",
+                "stripe {stripe}: only {} of {needed} needed; {} {:?}",
+                counted(usable, "usable block", "usable blocks"),
+                counted(faults.len(), "damaged shard", "damaged shards"),
                 faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
             ),
         };
@@ -475,7 +479,10 @@ fn write_object(
         );
     }
     if repaired_stripes > 0 {
-        eprintln!("{repaired_stripes} stripe(s) needed reconstruction");
+        eprintln!(
+            "{} needed reconstruction",
+            counted(repaired_stripes as usize, "stripe", "stripes")
+        );
     }
     Ok(())
 }

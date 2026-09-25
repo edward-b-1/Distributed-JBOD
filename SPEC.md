@@ -1148,7 +1148,7 @@ be entirely out of view.
 
 ## 14. Delete
 
-14.1 [D] Deleting a key looks up its version(s), instructs the node of every listed device to
+14.1 [D] Deleting a key looks up its versions, instructs the node of every listed device to
 delete the shard file and metadata record, and reports success only when
 all have confirmed. Any unreachable node fails the delete.
 

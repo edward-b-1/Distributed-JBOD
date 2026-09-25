@@ -256,8 +256,8 @@ impl App {
         let mut notes = Vec::new();
         if !reconstructed.is_empty() {
             notes.push(format!(
-                "{} block(s) reconstructed from parity; the data was correct, the damage on disk is not repaired",
-                reconstructed.len()
+                "{} reconstructed from parity; the data was correct, the damage on disk is not repaired",
+                djbod_core::text::counted(reconstructed.len(), "block", "blocks")
             ));
         }
         for copy in missing_records {

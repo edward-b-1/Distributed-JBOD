@@ -33,6 +33,7 @@ use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_core::stripe::FaultKind;
+use djbod_core::text::counted;
 use djbod_proto::message::{
     DrainEvent, ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction,
     RecordCopyFault,
@@ -457,15 +458,6 @@ fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failu
     }
 }
 
-/// A count in words: "1 finding", "3 findings".
-fn counted(n: usize, one: &str, many: &str) -> String {
-    if n == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{n} {many}")
-    }
-}
-
 /// What a scrub finding is, in the words of the last line (20.1.2.3),
 /// singular and plural. A device that could not be read is not damage
 /// and has its own line.
@@ -643,7 +635,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 print!("{}", tables::contents(&document, &rows));
                 let empty = rows.iter().filter(|c| c.versions == 0).count();
                 if empty > 0 {
-                    eprintln!("{empty} device(s) hold nothing and may be removed");
+                    eprintln!(
+                        "{} nothing and may be removed",
+                        counted(empty, "device holds", "devices hold")
+                    );
                 }
             }
         }
@@ -695,7 +690,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .count();
                         if unavailable_count > 0 {
                             eprintln!(
-                                "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed) or cannot be reached"
+                                "{} unavailable: {}",
+                                counted(unavailable_count, "device is", "devices are"),
+                                if unavailable_count == 1 {
+                                    "its node cannot read it (disk failed, not mounted, or destroyed) or cannot be reached"
+                                } else {
+                                    "their nodes cannot read them (disk failed, not mounted, or destroyed) or cannot be reached"
+                                }
                             );
                         }
                         // A node that could not be asked (5.6, 19.1.3): its
@@ -762,8 +763,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .map(|u| format!("{} on node {}", u.device.0, u.node.0))
                     .collect();
                 eprintln!(
-                    "{key}: placed around {} unavailable device(s): {}; run `djbod status`",
-                    devices.len(),
+                    "{key}: placed around {}: {}; run `djbod status`",
+                    counted(devices.len(), "unavailable device", "unavailable devices"),
                     devices.join(", ")
                 );
                 std::process::exit(2);
@@ -977,14 +978,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 summary,
                             } => {
                                 eprintln!(
-                                    "node {}  device {}: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+                                    "node {}  device {}: {} records, {} shards, {} blocks, {} read, {}",
                                     short(&node.0),
                                     short(&device.0),
                                     summary.records_checked,
                                     summary.shards_checked,
                                     summary.blocks_checked,
                                     human_bytes(summary.bytes_read),
-                                    summary.findings.len()
+                                    counted(summary.findings.len(), "finding", "findings")
                                 );
                             }
                             ScrubEvent::NodeFailed { node, detail } => {
@@ -1008,16 +1009,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     None => "the rest not checked".to_string(),
                                 };
                                 println!(
-                                    "cross-node checks stopped at node {}: {}; {versions_checked} version(s) checked, {unchecked}",
+                                    "cross-node checks stopped at node {}: {}; {} checked, {unchecked}",
                                     short(&node.0),
-                                    detail.message
+                                    detail.message,
+                                    counted(*versions_checked as usize, "version", "versions")
                                 );
                             }
                             ScrubEvent::CrossCheckProgress {
                                 versions_checked, ..
                             } => {
                                 eprintln!(
-                                    "cross-node checks: {versions_checked} version(s) checked"
+                                    "cross-node checks: {} checked",
+                                    counted(*versions_checked as usize, "version", "versions")
                                 );
                             }
                             ScrubEvent::CrossCheckAvailability { .. } => availability = Some(event),
@@ -1025,7 +1028,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
                                     report.shards.iter().filter(|s| s.rewritten).count();
-                                println!("repaired {key}: {rewritten} shard(s) rewritten");
+                                println!(
+                                    "repaired {key}: {} rewritten",
+                                    counted(rewritten, "shard", "shards")
+                                );
                             }
                             ScrubEvent::RepairFailed { key, detail } => {
                                 println!("repair of {key} failed: {}", describe_detail(detail));
@@ -1186,7 +1192,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             );
                         }
                         let count = report.shards.iter().filter(|s| s.rewritten).count();
-                        println!("{count} shard(s) rewritten");
+                        println!("{} rewritten", counted(count, "shard", "shards"));
                     }
                 }
             }
@@ -1343,9 +1349,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 document.k, document.m, document.block_size
                             );
                         }
-                        if behind > 0 {
+                        if behind == 1 {
                             println!(
-                                "{behind} object(s) are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them"
+                                "1 object is stored at another scheme and stays readable as it is; `djbod cluster reencode` rewrites it"
+                            );
+                        } else if behind > 1 {
+                            println!(
+                                "{behind} objects are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them"
                             );
                         } else {
                             println!("every object is at this scheme");
@@ -1802,8 +1812,8 @@ fn describe_unread(page: &djbod_client::ListPage) -> String {
         "keys stored only on those devices cannot be seen, so the listing may be incomplete"
     };
     format!(
-        "listed around {} device(s) the cluster cannot read: {}; {consequence}; run `djbod status`",
-        page.unread.len(),
+        "listed around {} the cluster cannot read: {}; {consequence}; run `djbod status`",
+        counted(page.unread.len(), "device", "devices"),
         devices.join(", ")
     )
 }
@@ -1881,7 +1891,10 @@ async fn reencode_all(
         }
     }
     if !cli.json {
-        eprintln!("{examined} object(s) examined, {reencoded} re-encoded, {failures} failed");
+        eprintln!(
+            "{} examined, {reencoded} re-encoded, {failures} failed",
+            counted(examined, "object", "objects")
+        );
     }
     Ok(failures)
 }
@@ -1983,7 +1996,8 @@ async fn force_remove_device(
         );
         if remaining < needed {
             println!(
-                "warning: {remaining} active device(s) would remain and every version needs {needed}; nothing can be rebuilt until a device is added"
+                "warning: {} would remain and every version needs {needed}; nothing can be rebuilt until a device is added",
+                counted(remaining as usize, "active device", "active devices")
             );
         }
     }
@@ -2055,9 +2069,9 @@ async fn force_remove_node(
             node_id.0, plan.address, plan.unreachable_because
         );
         println!(
-            "it holds {} device(s); {} version(s) have shards there",
-            plan.devices.len(),
-            plan.affected.len()
+            "it holds {}; {} shards there",
+            counted(plan.devices.len(), "device", "devices"),
+            counted(plan.affected.len(), "version has", "versions have")
         );
         if unrecoverable.is_empty() {
             println!("every one of them can be rebuilt from the other shards (at most m = {m} on the dead node)");
@@ -2084,10 +2098,10 @@ async fn force_remove_node(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !cli.json {
         println!(
-            "node {} removed (document version {}); rebuilding {} version(s)",
+            "node {} removed (document version {}); rebuilding {}",
             node_id.0,
             document.version,
-            plan.affected.len()
+            counted(plan.affected.len(), "version", "versions")
         );
     }
     // Step 3: rebuild, one repair per affected key, through a live node.
@@ -2105,8 +2119,9 @@ async fn force_remove_node(
                         .filter(|s| s.relocated_to.is_some())
                         .count();
                     println!(
-                        "rebuilt  {}  {relocated} shard(s) placed on other devices",
-                        reference.key
+                        "rebuilt  {}  {} placed on other devices",
+                        reference.key,
+                        counted(relocated, "shard", "shards")
                     );
                 }
             }
@@ -2158,11 +2173,13 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         required_devices,
                     } => {
                         println!(
-                            "draining {} on node {}: {versions} version(s), {} to move; {} free on {active_devices} active device(s), {required_devices} needed per version",
+                            "draining {} on node {}: {}, {} to move; {} free on {}, {required_devices} needed per version",
                             device.0,
                             short(&node.0),
+                            counted(versions as usize, "version", "versions"),
                             human_bytes(shard_bytes),
-                            human_bytes(target_free_bytes)
+                            human_bytes(target_free_bytes),
+                            counted(active_devices as usize, "active device", "active devices")
                         );
                     }
                     DrainEvent::Moved {
@@ -2246,8 +2263,8 @@ fn describe_missing_records(
 /// until it is.
 fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> String {
     let mut lines = vec![format!(
-        "{key}: {} block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair {key}` runs",
-        reconstructed.len()
+        "{key}: {} reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair {key}` runs",
+        counted(reconstructed.len(), "block", "blocks")
     )];
     for r in reconstructed {
         let fault = match &r.fault {
