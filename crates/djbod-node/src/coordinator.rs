@@ -3142,6 +3142,17 @@ async fn drain(
     let total = records.len();
     let mut skipped = 0usize;
     for record in &records {
+        // The shard file's size, from the record's own geometry, for the
+        // client's progress against the estimate.
+        let shard_bytes = if record.size == 0 {
+            0
+        } else {
+            record
+                .scheme()
+                .ok()
+                .and_then(|scheme| shard_file_length(scheme, record.block_size, record.size))
+                .unwrap_or(0)
+        };
         let event = match drain_one(node, device, record).await {
             Ok(DrainOutcome::Moved(moved)) => DrainEvent::Moved {
                 key: record.key.clone(),
@@ -3149,6 +3160,7 @@ async fn drain(
                 shard_index: moved.shard_index,
                 destination: moved.destination,
                 rebuilt: moved.rebuilt,
+                shard_bytes,
             },
             Ok(DrainOutcome::Deleted) => DrainEvent::Deleted {
                 key: record.key.clone(),

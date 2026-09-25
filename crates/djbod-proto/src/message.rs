@@ -723,6 +723,9 @@ pub enum DrainEvent {
         /// Rebuilt from the other shards rather than copied from the
         /// draining device.
         rebuilt: bool,
+        /// The shard file's size, so a client can show how much of the
+        /// estimate's bytes have moved.
+        shard_bytes: u64,
     },
     /// The version stays where it is; the detail says why.
     Skipped {

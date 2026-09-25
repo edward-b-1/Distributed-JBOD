@@ -399,6 +399,10 @@
       <span id="drain-summary" class="hint"></span>
     </div>
     <p class="hint">One pass over every version on a draining device, moving each shard to another device. Mark the device draining on the Overview tab first. Rerun after fixing whatever was skipped, then remove the device.</p>
+    <div class="row" id="drain-progress" hidden>
+      <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill working" id="drain-fill" style="width:0%"></div></div></div>
+      <span class="hint" id="drain-progress-text"></span>
+    </div>
     <div class="log" id="drain-log" hidden></div>
   </div>
 </section>
@@ -1338,10 +1342,25 @@ $('drain-go').addEventListener('click', async () => {
   if (!device) return;
   const log = $('drain-log'); log.replaceChildren(); log.hidden = false;
   $('drain-go').disabled = true;
-  let moved = 0, skipped = 0, deleted = 0;
+  let moved = 0, skipped = 0, deleted = 0, movedBytes = 0, total = 0, totalBytes = 0;
+  const fill = $('drain-fill'), text = $('drain-progress-text'), started = performance.now();
+  // Progress against the estimate, from the events the drain sends
+  // anyway: one per version, so the bar advances by versions handled.
+  const showProgress = () => {
+    const done = moved + skipped + deleted;
+    const share = total ? done / total : 0;
+    fill.style.width = `${Math.round(share * 100)}%`;
+    const elapsed = (performance.now() - started) / 1000;
+    const left = done && done < total ? ` about ${humanTime(elapsed / done * (total - done))} left` : '';
+    text.textContent = total ? `${done.toLocaleString()} of ${total.toLocaleString()} versions (${Math.round(share * 100)}%), ${human(movedBytes)} of ${human(totalBytes)} moved, ${humanTime(elapsed)} elapsed${left}` : 'estimating…';
+  };
+  $('drain-progress').hidden = false; fill.classList.add('working'); showProgress();
   $('drain-summary').textContent = 'running…';
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
+      if (e.event === 'estimate') { total = e.versions; totalBytes = e.shard_bytes; }
+      if (e.event === 'moved') movedBytes += e.shard_bytes || 0;
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${moved} moved, ${human(movedBytes)}`; }
       switch (e.event) {
         case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${plural(e.versions, 'version')}, ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${plural(e.active_devices, 'active device')}, ${e.required_devices} needed per version`, 'muted'); break;
         case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
@@ -1353,6 +1372,7 @@ $('drain-go').addEventListener('click', async () => {
           break;
         default: logLine(log, JSON.stringify(e));
       }
+      if (e.event !== 'end') showProgress();
       $('drain-summary').textContent = `${moved} moved, ${skipped} skipped`;
     });
   } catch (e) { fail('drain', e); }
