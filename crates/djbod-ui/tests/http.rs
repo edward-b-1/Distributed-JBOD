@@ -61,7 +61,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
 
 fn app(test: &TestNode) -> axum::Router {
     router(Target {
-        node: test.addr,
+        nodes: vec![test.addr],
         cluster: test.node.cluster_id(),
         connector: Connector::plain(),
     })
@@ -594,7 +594,10 @@ async fn bad_requests_are_reported_as_such() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_is_down_is_reported_not_crashed() {
     let target = Target {
-        node: "127.0.0.1:1".parse().unwrap(),
+        nodes: vec![
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+        ],
         cluster: Uuid::new_v4(),
         connector: Connector::plain(),
     };
@@ -606,13 +609,17 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "node_unreachable");
-    // The message names the address tried and says why in plain words;
+    // The message names every address tried and says why in plain words;
     // the operating system's own text is kept aside for debugging.
     assert_eq!(
-        json["error"]["message"], "node 127.0.0.1:1 is not reachable: connection refused",
+        json["error"]["message"],
+        "no node is reachable: 127.0.0.1:1: connection refused; 127.0.0.1:2: connection refused",
         "{json}"
     );
-    assert_eq!(json["error"]["address"], "127.0.0.1:1");
+    assert_eq!(
+        json["error"]["addresses"],
+        serde_json::json!(["127.0.0.1:1", "127.0.0.1:2"])
+    );
     let detail = json["error"]["detail"].as_str().unwrap();
     assert!(detail.contains("refused"), "{detail}");
     assert!(
@@ -622,6 +629,64 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
             .contains("os error"),
         "{json}"
     );
+}
+
+/// With one address configured the message is about that node alone, and
+/// the address stands on its own for the page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_dead_node_is_named_alone() {
+    let target = Target {
+        nodes: vec!["127.0.0.1:1".parse().unwrap()],
+        cluster: Uuid::new_v4(),
+        connector: Connector::plain(),
+    };
+    let response = router(target)
+        .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"]["message"], "node 127.0.0.1:1 is not reachable: connection refused",
+        "{json}"
+    );
+    assert_eq!(json["error"]["address"], "127.0.0.1:1");
+    assert_eq!(
+        json["error"]["addresses"],
+        serde_json::json!(["127.0.0.1:1"])
+    );
+}
+
+/// A dead node first in the list is skipped for one that answers, and the
+/// status says which one that was (SPEC 20.3); the next call goes
+/// straight to the node that answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_node_is_used_when_the_first_is_down() {
+    let test = start_node(3, 2, 1).await;
+    let app = router(Target {
+        nodes: vec!["127.0.0.1:1".parse().unwrap(), test.addr],
+        cluster: test.node.cluster_id(),
+        connector: Connector::plain(),
+    });
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["via"], test.addr.to_string());
+    }
+    // Membership procedures find a live peer the same way.
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/cluster").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1155,7 +1220,7 @@ async fn requests_from_another_site_or_host_are_refused() {
     // A name the operator declared is fine.
     let named = router_for_hosts(
         Target {
-            node: test.addr,
+            nodes: vec![test.addr],
             cluster: test.node.cluster_id(),
             connector: Connector::plain(),
         },

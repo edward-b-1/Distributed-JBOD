@@ -541,7 +541,7 @@ function fail(context, e) {
   // A node the UI server cannot reach fails every call until it is back,
   // so that is one banner, not a toast per call; api() clears it on the
   // next success.
-  if (e && e.error && e.error.code === 'node_unreachable' && e.error.address) {
+  if (e && e.error && e.error.code === 'node_unreachable' && (e.error.addresses || e.error.address)) {
     state.unreachable = e.error;
     renderBanners();
     return;
@@ -709,7 +709,9 @@ function renderHeader() {
   $('h-cluster').textContent = status.cluster_name ? `${status.cluster_name} (${short(status.cluster_id)})` : status.cluster_id;
   $('h-cluster').title = status.cluster_id;
   $('h-node').textContent = nodeText(status.coordinator);
-  $('h-node').title = status.coordinator;
+  // The node that answered, and the address the UI server reached it at;
+  // the server moves to another node when one fails.
+  $('h-node').title = status.via ? `${status.coordinator}\nreached at ${status.via}` : status.coordinator;
   $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
   $('h-transport').textContent = status.transport || 'plain';
   $('h-build').textContent = status.ui_build || '?';
@@ -731,8 +733,8 @@ function renderBanners() {
   const warnings = [];
   if (state.unreachable) {
     warnings.push({ id: 'node-unreachable', level: 'critical', sticky: true,
-      text: `${state.unreachable.message}. Start the node, or start `,
-      code: 'djbod-ui', tail: ' against another node.', title: state.unreachable.detail || '' });
+      text: `${state.unreachable.message}. Start a node, or start `,
+      code: 'djbod-ui', tail: ' with another address.', title: state.unreachable.detail || '' });
   }
   // The transport is unknown until the status has been fetched once.
   const transport = state.status ? (status.transport || 'plain') : null;

@@ -126,6 +126,9 @@ pub struct ReadFailure {
 /// failures, and the host names this server answers to.
 pub struct App {
     pub target: Target,
+    /// Which node answered last, and the addresses learnt from the
+    /// cluster document, so a node leaving does not take the page down.
+    peers: std::sync::Mutex<Peers>,
     failures: std::sync::Mutex<std::collections::HashMap<String, ReadFailure>>,
     /// Host names, without port, accepted in `Host` besides IP literals
     /// and `localhost`.
@@ -135,7 +138,85 @@ pub struct App {
 /// At most this many keys are remembered; the oldest go first.
 const MAX_FAILURES: usize = 1000;
 
+/// What the server knows about where the cluster's nodes are, beyond
+/// the addresses it was started with.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Peers {
+    /// The address that answered last; tried first next time, so a
+    /// working node is not abandoned for a dead one earlier in the list.
+    preferred: Option<SocketAddr>,
+    /// Every node's addresses as the cluster document last listed them.
+    learned: Vec<SocketAddr>,
+}
+
+/// The order in which to try addresses: the one that answered last, the
+/// configured ones in their order, then the ones learnt from the cluster
+/// document; each address once.
+fn candidates(
+    preferred: Option<SocketAddr>,
+    configured: &[SocketAddr],
+    learned: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::with_capacity(1 + configured.len() + learned.len());
+    for address in preferred.iter().chain(configured).chain(learned) {
+        if !out.contains(address) {
+            out.push(*address);
+        }
+    }
+    out
+}
+
 impl App {
+    /// Open a connection to the first node that answers, in the order of
+    /// `candidates`, and remember it as preferred. Fails with every
+    /// address tried and why when none answers.
+    async fn connect_any(&self) -> ApiResult<(SocketAddr, Connection)> {
+        let (preferred, learned) = {
+            let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+            (peers.preferred, peers.learned.clone())
+        };
+        let mut attempts = Vec::new();
+        for address in candidates(preferred, &self.target.nodes, &learned) {
+            match Connection::connect_with(
+                &self.target.connector,
+                address,
+                Connection::client_hello(self.target.cluster),
+            )
+            .await
+            {
+                Ok(connection) => {
+                    self.peers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .preferred = Some(address);
+                    return Ok((address, connection));
+                }
+                Err(e) => attempts.push(Attempt::new(address, e)),
+            }
+        }
+        Err(ApiError::Unreachable { attempts })
+    }
+
+    /// The address of a node that answers, for the membership procedures,
+    /// which take one peer and open their own connections to it.
+    async fn peer(&self) -> ApiResult<SocketAddr> {
+        Ok(self.connect_any().await?.0)
+    }
+
+    /// Remember every address the cluster document lists, so that the
+    /// nodes this server was started with are not the only ones it can
+    /// reach. Strings that are not `ip:port` are skipped; a node with such
+    /// an address is reported by the cluster view anyway.
+    fn learn(&self, document: &djbod_core::cluster::ClusterDocument) {
+        let learned: Vec<SocketAddr> = document
+            .nodes
+            .iter()
+            .flat_map(|node| node.addresses.iter())
+            .filter_map(|text| text.parse().ok())
+            .collect();
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).learned = learned;
+    }
+
     fn record_failure(&self, key: &str, operation: &'static str, bytes: u64, error: ErrorDetail) {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -201,7 +282,11 @@ impl App {
 /// values the command-line client needs.
 #[derive(Clone)]
 pub struct Target {
-    pub node: SocketAddr,
+    /// The nodes to connect through, tried in order; the addresses of
+    /// the other nodes in the cluster document are tried after them once
+    /// the document has been fetched (`App::learn`). The same list, and
+    /// the same meaning, as `djbod --bootstrap-node`.
+    pub nodes: Vec<SocketAddr>,
     pub cluster: Uuid,
     pub connector: Connector,
 }
@@ -246,6 +331,7 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
         .layer(DefaultBodyLimit::disable());
     let app = Arc::new(App {
         target,
+        peers: std::sync::Mutex::new(Peers::default()),
         failures: std::sync::Mutex::new(std::collections::HashMap::new()),
         hosts: hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect(),
     });
@@ -412,14 +498,9 @@ pub enum ApiError {
     Remote(ErrorDetail),
     /// The node could not be reached or talked to.
     Client(Box<ConnectionError>),
-    /// No connection could be made to the node at `address`: the
-    /// operating system refused, timed out, or could not route to it.
-    /// `reason` is in plain words; `detail` is the raw error.
-    Unreachable {
-        address: SocketAddr,
-        reason: String,
-        detail: String,
-    },
+    /// No node answered: every address tried and why, in plain words,
+    /// with the raw error kept for debugging.
+    Unreachable { attempts: Vec<Attempt> },
     /// A document change failed.
     Membership(Box<AdminError>),
     /// The request itself was wrong.
@@ -444,25 +525,6 @@ impl From<AdminError> for ApiError {
 }
 
 impl ApiError {
-    /// A failure to open a connection to `address`. An I/O error becomes
-    /// `Unreachable`, worded for the page; anything else, such as a peer
-    /// that answered and refused, keeps its own description.
-    fn connecting(address: SocketAddr, e: ConnectionError) -> ApiError {
-        match e {
-            ConnectionError::Wire(WireError::Io(io)) => ApiError::Unreachable {
-                address,
-                reason: plain_words(&io),
-                detail: io.to_string(),
-            },
-            ConnectionError::Wire(WireError::Closed) => ApiError::Unreachable {
-                address,
-                reason: "the connection was closed before the node answered".to_string(),
-                detail: WireError::Closed.to_string(),
-            },
-            other => other.into(),
-        }
-    }
-
     fn unexpected(reply: Reply) -> ApiError {
         ApiError::Client(Box::new(ConnectionError::UnexpectedMessage {
             expected: "the operation's response",
@@ -489,22 +551,36 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_GATEWAY,
                 json!({ "error": { "code": "node_unreachable", "message": e.to_string() } }),
             ),
-            ApiError::Unreachable {
-                address,
-                reason,
-                detail,
-            } => (
-                StatusCode::BAD_GATEWAY,
-                json!({ "error": {
+            ApiError::Unreachable { attempts } => {
+                // What the page shows: the address tried and why it
+                // failed, in words an operator can act on; with several
+                // addresses, each in turn.
+                let message = match attempts.as_slice() {
+                    [one] => format!("node {} is not reachable: {}", one.address, one.reason),
+                    many => format!(
+                        "no node is reachable: {}",
+                        many.iter()
+                            .map(|a| format!("{}: {}", a.address, a.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                };
+                let mut error = json!({
                     "code": "node_unreachable",
-                    // What the page shows: the address tried and why it
-                    // failed, in words an operator can act on.
-                    "message": format!("node {address} is not reachable: {reason}"),
-                    "address": address.to_string(),
+                    "message": message,
+                    "addresses": attempts.iter().map(|a| a.address.to_string()).collect::<Vec<_>>(),
                     // The operating system's own text, for debugging.
-                    "detail": detail,
-                } }),
-            ),
+                    "detail": attempts
+                        .iter()
+                        .map(|a| if attempts.len() == 1 { a.detail.clone() } else { format!("{}: {}", a.address, a.detail) })
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                });
+                if let [one] = attempts.as_slice() {
+                    error["address"] = json!(one.address.to_string());
+                }
+                (StatusCode::BAD_GATEWAY, json!({ "error": error }))
+            }
             ApiError::Membership(e) => {
                 let (status, code) = membership_status(&e);
                 (
@@ -518,6 +594,37 @@ impl IntoResponse for ApiError {
             ),
         };
         (status, Json(body)).into_response()
+    }
+}
+
+/// One address that was tried and did not answer.
+#[derive(Debug, Clone)]
+pub struct Attempt {
+    pub address: SocketAddr,
+    /// Why, in plain words: "connection refused", "timed out".
+    pub reason: String,
+    /// The error's own text, for debugging.
+    pub detail: String,
+}
+
+impl Attempt {
+    /// A failed connection attempt to `address`. An I/O error is worded
+    /// for the page; a peer that answered and refused keeps its own
+    /// description.
+    fn new(address: SocketAddr, e: ConnectionError) -> Attempt {
+        let (reason, detail) = match &e {
+            ConnectionError::Wire(WireError::Io(io)) => (plain_words(io), io.to_string()),
+            ConnectionError::Wire(WireError::Closed) => (
+                "the connection was closed before the node answered".to_string(),
+                e.to_string(),
+            ),
+            other => (other.to_string(), other.to_string()),
+        };
+        Attempt {
+            address,
+            reason,
+            detail,
+        }
     }
 }
 
@@ -593,14 +700,8 @@ fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
 
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
-async fn connect(target: &Target) -> ApiResult<Connection> {
-    Connection::connect_with(
-        &target.connector,
-        target.node,
-        Connection::client_hello(target.cluster),
-    )
-    .await
-    .map_err(|e| ApiError::connecting(target.node, e))
+async fn connect(app: &App) -> ApiResult<Connection> {
+    Ok(app.connect_any().await?.1)
 }
 
 /// The device a path parameter names: a UUID, or a label looked up in
@@ -611,7 +712,7 @@ async fn device_param(app: &App, name: &str) -> ApiResult<DeviceId> {
         Ok(uuid) => Ok(DeviceId(uuid)),
         Err(_) => Ok(admin::resolve_device(
             &app.target.connector,
-            app.target.node,
+            app.peer().await?,
             app.target.cluster,
             name,
         )
@@ -626,8 +727,7 @@ fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
 // ---------------------------------------------------------------- status
 
 async fn status(State(app): State<Arc<App>>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let (via, mut conn) = app.connect_any().await?;
     match conn.request(Request::Status).await? {
         Reply::Status {
             cluster_id,
@@ -648,6 +748,9 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             // is TLS, which follows from how it was started.
             "transport": transport,
             "ui_to_node_tls": conn.is_tls(),
+            // The address this server reached the cluster through for
+            // this answer; it moves to another node when one fails.
+            "via": via.to_string(),
             // This server's own build, shown in the page header.
             "ui_build": djbod_client::BUILD,
             // Every node asked and its build (SPEC 6.2.6.4).
@@ -662,7 +765,9 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
 /// in it answers when asked for its own version (`djbod cluster show`).
 async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
-    let document = admin::fetch_document(&target.connector, target.node, target.cluster).await?;
+    let document =
+        admin::fetch_document(&target.connector, app.peer().await?, target.cluster).await?;
+    app.learn(&document);
     let reports = admin::fetch_all(&target.connector, &document).await;
     let nodes: Vec<Value> = reports
         .iter()
@@ -683,7 +788,7 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
 
 async fn cluster_sync(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
-    let report = admin::sync(&target.connector, target.node, target.cluster).await?;
+    let report = admin::sync(&target.connector, app.peer().await?, target.cluster).await?;
     Ok(Json(json!({
         "highest_version": report.highest_version,
         "updated": report.updated,
@@ -703,7 +808,7 @@ async fn cluster_scheme(State(app): State<Arc<App>>, Json(body): Json<SchemeBody
     let target = &app.target;
     let (document, changed) = admin::set_scheme(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         body.k,
         body.m,
@@ -736,7 +841,7 @@ async fn cluster_limits(State(app): State<Arc<App>>, Json(body): Json<LimitsBody
     }
     let (document, changed) = admin::set_limits(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         body.max_key_bytes,
         body.max_object_bytes,
@@ -762,8 +867,7 @@ struct ListParams {
 }
 
 async fn list_objects(State(app): State<Arc<App>>, Query(params): Query<ListParams>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let query = ListQuery {
         prefix: params.prefix.filter(|p| !p.is_empty()),
         start_after: params.start_after.filter(|s| !s.is_empty()),
@@ -783,8 +887,7 @@ async fn read_failures(State(app): State<Arc<App>>) -> ApiResult {
 }
 
 async fn head_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn.request(Request::HeadObject { key }).await? {
         Reply::HeadObject { record } => Ok(Json(json!(record))),
         other => Err(ApiError::unexpected(other)),
@@ -800,7 +903,6 @@ async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult {
-    let target = &app.target;
     let size: u64 = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -811,7 +913,7 @@ async fn put_object(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(str::to_string);
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let mut source = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
     let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
@@ -854,8 +956,7 @@ async fn upload_check(
     State(app): State<Arc<App>>,
     Query(params): Query<UploadCheckParams>,
 ) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let document = match conn.request(Request::GetClusterConfig).await? {
         Reply::GetClusterConfig { document } => document,
         other => return Err(ApiError::unexpected(other)),
@@ -901,8 +1002,7 @@ async fn upload_check(
 }
 
 async fn delete_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn
         .request(Request::DeleteObject { key: key.clone() })
         .await?
@@ -926,8 +1026,7 @@ async fn download_object(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -1066,9 +1165,8 @@ async fn verify_object(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
     const REPORT_EVERY: u64 = 8 * 1024 * 1024;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -1196,8 +1294,7 @@ async fn verify_object(
 }
 
 async fn repair_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn
         .request(Request::RepairObject { key: key.clone() })
         .await?
@@ -1221,8 +1318,7 @@ async fn move_shard(
     Path(key): Path<String>,
     Json(body): Json<MoveShardBody>,
 ) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let request = Request::MoveShard {
         key,
         shard_index: body.shard_index,
@@ -1303,8 +1399,7 @@ struct ScrubBody {
 }
 
 async fn scrub(State(app): State<Arc<App>>, Json(body): Json<ScrubBody>) -> ApiResult<Response> {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .start_scrub(body.rate_mib.map(|m| m * 1024 * 1024), body.repair)
         .await?;
@@ -1325,9 +1420,8 @@ async fn drain(
     Path(id): Path<String>,
     Json(body): Json<DrainBody>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
     let device = device_param(&app, &id).await?;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn.start_drain(device, body.partial).await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
         let item = conn.next_drain_event(id).await;
@@ -1356,7 +1450,7 @@ async fn set_device_state(
     }
     let (document, changed) = admin::set_device_state(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         device,
         body.state,
@@ -1392,7 +1486,7 @@ async fn set_device_label(
         .filter(|l| !l.is_empty());
     let (document, changed) = admin::set_device_label(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         device,
         label.clone(),
@@ -1410,7 +1504,7 @@ async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> A
     let target = &app.target;
     let device = device_param(&app, &id).await?;
     let (document, changed) =
-        admin::remove_device(&target.connector, target.node, target.cluster, device).await?;
+        admin::remove_device(&target.connector, app.peer().await?, target.cluster, device).await?;
     Ok(Json(json!({
         "device": device,
         "document_version": document.version,
@@ -1433,7 +1527,7 @@ async fn set_node_label(
         .filter(|l| !l.is_empty());
     let (document, changed) = admin::set_node_label(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         node,
         label.clone(),
@@ -1450,9 +1544,34 @@ async fn set_node_label(
 async fn remove_node(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
     let target = &app.target;
     let node = NodeId(parse_id(&id, "node")?);
-    let document = admin::remove_node(&target.connector, target.node, target.cluster, node).await?;
+    let document =
+        admin::remove_node(&target.connector, app.peer().await?, target.cluster, node).await?;
     Ok(Json(json!({
         "node": node,
         "document_version": document.version,
     })))
+}
+
+#[cfg(test)]
+mod peers {
+    use super::candidates;
+    use std::net::SocketAddr;
+
+    fn a(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn preferred_then_configured_then_learned_each_once() {
+        let configured = [a("10.0.0.1:5263"), a("10.0.0.2:5263")];
+        let learned = [a("10.0.0.2:5263"), a("10.0.0.3:5263"), a("10.0.0.1:5263")];
+        assert_eq!(
+            candidates(Some(a("10.0.0.2:5263")), &configured, &learned),
+            vec![a("10.0.0.2:5263"), a("10.0.0.1:5263"), a("10.0.0.3:5263")]
+        );
+        assert_eq!(
+            candidates(None, &configured, &[]),
+            vec![a("10.0.0.1:5263"), a("10.0.0.2:5263")]
+        );
+    }
 }
