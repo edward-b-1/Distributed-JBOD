@@ -933,11 +933,19 @@ knows which to rewrite.
 durable, using the same temporary-name, fsync, rename procedure, followed
 by an fsync of the directory.
 
-9.4.4 [D] Because the record is on every device that has a shard, and every read must reach
-every node, the read path checks that all copies agree. Disagreement is an
-error (section 16). Copies at a lower placement revision than the highest
-one found are the leftovers of a re-placement and are ignored, as 18.8.1
-sets out; the k+m copies of the highest revision must agree.
+9.4.4 [D] Because the record is on every device that has a shard, a read
+collects the copies from every device it can reach and checks that they
+agree, that each comes from a device the record lists, and that at least
+k of them vouch for the version, counting lower-revision copies that
+describe the same body (18.8.1). Disagreement is an error (section 16),
+as is fewer than k vouching copies. A copy that did not arrive is not:
+the read goes on and reports it beside the body (11.7), naming the
+device and whether it was consulted and had no copy, holds a copy at an
+older revision, or could not be consulted at all (5.6, 13.1). This is
+the rule repair has always applied (18.4.2), and the read writes nothing.
+Copies at a lower placement revision than the highest one found are
+otherwise ignored, as 18.8.1 sets out. Every operation other than a read
+requires every listed copy to have arrived (13.3).
 
 ## 10. Write path (PUT)
 
@@ -1040,9 +1048,11 @@ slow client is fine as long as it keeps sending.
 11.1 [D] The client sends a key to a coordinator.
 
 11.2 [D] The coordinator broadcasts a lookup (section 13) and receives the
-metadata records from every listed device. It checks that the key in the record
-matches the requested key (9.1.6) and that all copies agree. If more than
-one version is present (9.2.4) it selects the newest.
+metadata records from every listed device it can reach. It checks that
+the key in the record matches the requested key (9.1.6), that the copies
+agree, and that at least k vouch for the version (9.4.4); a copy that did
+not arrive is reported with the body (11.7). If more than one version is
+present (9.2.4) it selects the newest.
 
 11.3 [D] For each stripe in order, the coordinator requests shard blocks
 `0 .. k-1` (the data blocks) from their devices, verifies each block against
@@ -1087,11 +1097,14 @@ body has by then been streamed to the client, the error is delivered as
 the stream's terminating status (19.1.2), and the client must treat the
 body as invalid. The same status carries the list of blocks
 reconstructed on the way (11.4), so a client reads one frame to learn
-both whether the body is good and what it cost. The client libraries
-return the list beside the record; the Python client also raises a
-`DegradedRead` warning; `djbod get` prints each reconstructed block on
-standard error and exits 2, the data being correct but the damage
-unrepaired, so that a pipeline notices.
+both whether the body is good and what it cost. The same status carries the record copies
+the lookup went without (9.4.4), one entry per device with why: missing,
+stale, or unavailable. The client libraries return both lists beside the
+record, and `head` returns the second alone, having read no block; the
+Python client also raises a `DegradedRead` warning for either; `djbod
+get` and `djbod head` print each entry on standard error and exit 2, the
+data being correct but the cluster not whole, so that a pipeline
+notices.
 
 ## 12. Placement summary
 
@@ -1113,14 +1126,21 @@ v1 places at device level, the split across hosts is incidental.
 
 13.1 [D] To find an object, the coordinator sends a lookup for the key
 hash to every node in the cluster document and waits for every node to
-respond.
+respond. A read (`GetObject`, `HeadObject`) waits for every node that
+does respond, and treats one that does not as it treats a device a node
+cannot read (5.6): the copies on its devices did not arrive, which 9.4.4
+says what to make of.
 
 13.2 [D] Each node checks each of its devices for a directory at the key
-hash and returns every metadata record found there.
+hash and returns every metadata record found there, and names the devices
+it cannot read (5.6).
 
-13.3 [D] If any node fails to respond within the timeout, the lookup fails.
-Because every node must answer, a lookup that finds nothing is an
-authoritative "not found".
+13.3 [D] If any node fails to respond within the timeout, the lookup
+fails, except for a read (13.1). A lookup that finds nothing is an
+authoritative "not found" while fewer than k+m devices are out, since
+every version has a copy on k+m devices (9.4); a read that finds nothing
+with k+m or more out reports the outage instead, because a version may
+be entirely out of view.
 
 13.4 [D] No node stores any index of what other nodes hold.
 
@@ -1330,7 +1350,10 @@ to the client:
 - Any node in the cluster document does not respond to a broadcast,
   except for `Status`, which reports the node as unreachable and its
   devices as unavailable (5.6, 19.1.3), since it is the request an
-  administrator makes to find out what is wrong.
+  administrator makes to find out what is wrong; and except for
+  `GetObject` and `HeadObject`, which go around it when the record copies
+  and shards that remain suffice (9.4.4, 11.4) and report it, and are
+  refused with `NodeUnreachable` when they do not.
 - More than m of an object's shards cannot be read at all, whether
   missing, unreadable, or on a device or node that cannot be reached
   (11.4); fewer are reconstructed around, served, and reported.
@@ -1338,8 +1361,9 @@ to the client:
   reconstructed from parity, served, and reported.
 - The whole-object checksum of a completed read does not match the record
   (11.7).
-- Metadata record copies for a version disagree, or fewer than k+m are
-  found.
+- Metadata record copies for a version disagree; or, for a read, fewer
+  than k vouch for it (9.4.4); or, for every other operation, fewer than
+  k+m are found.
 - The key in a record does not match the requested key (hash collision or
   corruption).
 - Fewer than k+m eligible devices exist for a write.
@@ -1585,13 +1609,14 @@ removed (18.8.1). Rewriting to a different device is `MoveShard`
 (18.8.2), except for a device that has left the document, which repair
 handles itself (18.3).
 
-18.4.2 [D] **Missing record copies.** Reads require all k+m record copies
-to be present and to agree (9.4.4). Repair is the one operation allowed
-to proceed with fewer: if the copies that exist agree with one another,
-each comes from a device the record lists, and there are at least k of
-them, the record is trusted, the shards are repaired as above, and then
-the record is written to every listed device whose copy was missing. Two
-disagreeing copies, or fewer than k, are refused. Shards are rewritten
+18.4.2 [D] **Missing record copies.** A read trusts a record on the same
+terms as repair does (9.4.4): the copies that exist agree with one
+another, each comes from a device the record lists, and there are at
+least k of them. A read reports what is missing and writes nothing;
+repair is the operation that completes it: the record is trusted, the
+shards are repaired as above, and then the record is written to every
+listed device whose copy was missing. Two disagreeing copies, or fewer
+than k, are refused by both. Shards are rewritten
 before record copies, so a crash between the two leaves a shard without a
 record, which the scrub reports and a later repair completes.
 
@@ -1623,13 +1648,16 @@ re-placement. The version id still identifies the body; the revision
 identifies its placement. Copies of one version may then legitimately
 differ in revision during a re-placement, and the rules become:
 
-- **Reads** (9.4.4 amended): collect the copies; take the highest revision
-  present; require k+m copies of that revision, all equal; ignore
-  lower-revision copies. Fewer than k+m copies of the highest revision is
-  `RecordsInconsistent`, as now. A read therefore fails during the window
-  in which a re-placement has written its new record to some devices but
-  not all, which is fail-stop behaving as designed, and succeeds once the
-  window closes.
+- **Reads** (9.4.4): collect the copies; take the highest revision
+  present; require its copies to be equal and, together with the
+  lower-revision copies describing the same body, to number at least k,
+  as repair does below; report every listed device whose copy of the
+  highest revision did not arrive (11.7), a lower-revision copy being
+  reported as stale. A read therefore succeeds during the window in
+  which a re-placement has written its new record to some devices but
+  not all, and says which device is behind; repair closes the window.
+  Every other operation requires every copy of the highest revision
+  (13.3), and fails during the window with `RecordsInconsistent`.
 - **Repair** (18.4.2 amended): trust the highest revision present,
   provided its copies agree and that, together with the lower-revision
   copies describing the same body (same version, key, size, checksum,
@@ -1735,7 +1763,8 @@ sequence is the stripe number (10.8); for object body streams it counts
 chunks from zero. A streaming operation is one request, then Data frames
 sharing its request id, then one EndOfStream carrying a status and, for
 `PutShard`, the object size and whole-object checksum, and, for
-`GetObject`, the blocks reconstructed from parity (11.4). Implemented in
+`GetObject`, the blocks reconstructed from parity (11.4) and the record
+copies the lookup went without (9.4.4). Implemented in
 `crates/djbod-proto`, which is runtime-agnostic: it converts messages to
 and from bytes and nothing else.
 
@@ -1771,12 +1800,15 @@ coordinator, and those nodes send to each other. Every response is either
 `GetObject`
 : Request: key. Response: the metadata record, then a stream of body
   bytes in stripe-sized frames, then end-of-stream carrying the blocks
-  reconstructed from parity (11.4), if any. Coordinator performs lookup,
-  block fetch, checksum verification, and reconstruction.
+  reconstructed from parity (11.4) and the record copies the lookup went
+  without (9.4.4), if any. Coordinator performs lookup, block fetch,
+  checksum verification, and reconstruction; a node that cannot be
+  reached does not fail it while k copies and k shards remain (13.1).
 
 `HeadObject`
-: Request: key. Response: the metadata record, no body. Implemented by
-  broadcast lookup.
+: Request: key. Response: the metadata record and the record copies the
+  lookup went without (9.4.4), no body. Implemented by broadcast lookup,
+  going around a node that cannot be reached as `GetObject` does.
 
 `DeleteObject`
 : Request: key. Response: none. Section 14.
@@ -1847,8 +1879,9 @@ coordinator, and those nodes send to each other. Every response is either
   previous page). Response: the metadata records found under that hash on
   any local device after the cursor, each tagged with the device UUID it
   was read from, sorted by version then device, in pages of at most 8 MiB
-  of encoded records with a flag saying more follow (15.2.2). Empty list
-  if none.
+  of encoded records with a flag saying more follow (15.2.2), and the
+  local devices the node cannot read (5.6), named on every page. Empty
+  lists if none.
 
 `LocalList`
 : Request: optional prefix, optional start-after, optional limit.
@@ -2499,6 +2532,17 @@ target cluster sizes. Fail-stop makes negative answers authoritative.
 **Fail-stop.** The administrator wants to know about failures immediately
 and failures on old hardware are expected to be noticed and fixed by hand.
 Removes quorum logic, hinted handoff, and read repair from the design.
+
+**Reads trust k record copies.** Settled 25 September 2026. Reads first
+demanded all k+m copies of the metadata record, so that a missing copy
+would be noticed; the effect was that one lost device within m, the case
+the coding exists to survive, made every object with a copy on it
+unreadable until each had been repaired. Reads now trust the record on
+the terms repair always had (agreeing copies from listed devices, at
+least k of them) and report the missing copies with the body, as they
+report reconstructed blocks. The missing copy is still noticed, by the
+client, the scrub, and the exit code; it is no longer a refusal, and
+nothing is written by a read. Every other operation keeps the k+m rule.
 
 **Most-free-first placement.** Deterministic and simple. Fills devices at
 equal absolute rates so mixed sizes reach full together. Uneven load under

@@ -443,8 +443,11 @@ pub enum Response {
     GetObject {
         record: MetadataRecord,
     },
+    /// The record, and the record copies the lookup went without
+    /// (9.4.4), empty when every listed device had one.
     HeadObject {
         record: MetadataRecord,
+        missing_records: Vec<MissingRecordCopy>,
     },
     DeleteObject,
     ListKeys {
@@ -480,10 +483,13 @@ pub enum Response {
         devices: Vec<DeviceStatus>,
     },
     /// A page of record copies; `truncated` says whether more follow
-    /// after the last one.
+    /// after the last one. `unread` names the node's devices whose
+    /// copies could not be looked for because the node cannot read them
+    /// (5.6); the same on every page.
     LocalLookup {
         records: Vec<LocatedRecord>,
         truncated: bool,
+        unread: Vec<DeviceId>,
     },
     /// A page of at most `MAX_LIST_PAGE_BYTES` of keys; `truncated` says
     /// whether more follow after the last entry.
@@ -714,6 +720,33 @@ pub struct Reconstruction {
     pub stripes: u64,
 }
 
+/// A record copy a read went without (SPEC 9.4.4, 18.4.2): the version
+/// was trusted on the copies that agreed, and this is where one was
+/// expected and not found, for the client to report and `repair` to
+/// rewrite. Nothing was written, and the body served is correct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingRecordCopy {
+    pub device: DeviceId,
+    pub fault: RecordCopyFault,
+}
+
+/// Why a listed device's record copy did not arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordCopyFault {
+    /// The device was consulted and has no copy: deleted, or a write
+    /// interrupted before it (9.4.3). Repair rewrites it.
+    Missing,
+    /// The device holds a copy at an older placement revision than the
+    /// one trusted: a re-placement was interrupted before reaching it
+    /// (18.8.1). Repair finishes the re-placement forwards.
+    Stale { revision: u64 },
+    /// The device could not be consulted (5.6): its node is unreachable,
+    /// its node cannot read it, or it has been removed from the cluster
+    /// (18.2.1). Nothing is known to be wrong with the copy itself.
+    Unavailable { reason: String },
+}
+
 /// A device left out of a write's placement because its node could not
 /// read it (SPEC 5.6), reported with the version so the client knows
 /// the write went around it. Nothing is wrong with the object.
@@ -731,12 +764,16 @@ pub struct ObjectWrite {
     pub unavailable: Vec<UnavailableDevice>,
 }
 
-/// What a read returns beside the body: the record, and every block that
-/// had to be reconstructed on the way (11.4), empty when none was.
+/// What a read returns beside the body: the record, every block that
+/// had to be reconstructed on the way (11.4), and every record copy the
+/// lookup went without (9.4.4); both empty when the object was whole.
+/// A `head` returns the same with nothing reconstructed, having read
+/// no block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRead {
     pub record: MetadataRecord,
     pub reconstructed: Vec<Reconstruction>,
+    pub missing_records: Vec<MissingRecordCopy>,
 }
 
 /// Terminates a stream. `error` is `None` on success. For `PutShard` the
@@ -744,7 +781,8 @@ pub struct ObjectRead {
 /// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
 /// coordinator reports the whole-object verification here (11.7), which
 /// is why a client must read this frame before trusting the body, and
-/// lists the blocks it reconstructed from parity on the way (11.4).
+/// lists the blocks it reconstructed from parity on the way (11.4) and
+/// the record copies it went without (9.4.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamEnd {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -754,6 +792,7 @@ pub struct StreamEnd {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_checksum: Option<BlockChecksum>,
     pub reconstructed: Vec<Reconstruction>,
+    pub missing_records: Vec<MissingRecordCopy>,
 }
 
 impl StreamEnd {
@@ -763,6 +802,7 @@ impl StreamEnd {
             object_size: None,
             object_checksum: None,
             reconstructed: Vec::new(),
+            missing_records: Vec::new(),
         }
     }
 
@@ -772,6 +812,7 @@ impl StreamEnd {
             object_size: None,
             object_checksum: None,
             reconstructed: Vec::new(),
+            missing_records: Vec::new(),
         }
     }
 }

@@ -17,7 +17,9 @@ use djbod_node::server;
 use djbod_node::transport::Connector;
 use djbod_proto::frame::{Frame, MessageType};
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{DrainEvent, ErrorCode, Message, Request, Response, ShardCondition};
+use djbod_proto::message::{
+    DrainEvent, ErrorCode, Message, RecordCopyFault, Request, Response, ShardCondition,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -185,7 +187,7 @@ async fn three_nodes_join_and_objects_spread_across_them() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let document = c.node.document();
@@ -224,6 +226,22 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         .put_object("k", &body, 100_000, None)
         .await
         .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record, .. } => record,
+        other => panic!("{other:?}"),
+    };
+    let on_b: Vec<DeviceId> = record
+        .shards
+        .iter()
+        .map(|s| s.device)
+        .filter(|d| b.node.device(*d).is_some())
+        .collect();
 
     b.stop();
     // Status is the one request that goes on without b (19.1.3, 5.6): it
@@ -247,16 +265,75 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         }
         other => panic!("expected Status, got {other:?}"),
     }
-    // Every other operation that must reach b fails, naming it (16.1, 16.2).
-    match client
+    // A read goes around b when the coding allows (9.4.4, 11.4): with one
+    // of k's three shards on b, two copies vouch for the record and two
+    // shards rebuild the body; the reply names b's device as unavailable.
+    // With two shards on b, one copy is fewer than k and the read is
+    // refused with b's own code, since b is what needs attention.
+    let head = client
         .request(Request::HeadObject {
             key: "k".to_string(),
         })
+        .await;
+    if on_b.len() <= 1 {
+        match head {
+            Ok(Response::HeadObject {
+                record: found,
+                missing_records,
+            }) => {
+                assert_eq!(found, record);
+                assert_eq!(missing_records.len(), on_b.len(), "{missing_records:?}");
+                for copy in &missing_records {
+                    assert!(on_b.contains(&copy.device));
+                    assert!(
+                        matches!(copy.fault, RecordCopyFault::Unavailable { .. }),
+                        "{copy:?}"
+                    );
+                }
+            }
+            other => panic!("expected the record, got {other:?}"),
+        }
+        let (read, got) = client.get_object("k").await.expect("get around b");
+        assert_eq!(got, body);
+        assert_eq!(read.missing_records.len(), on_b.len());
+        // A data shard on b is rebuilt from parity; a parity shard on b
+        // is simply not read (11.3).
+        let data_on_b = record
+            .shards
+            .iter()
+            .filter(|s| on_b.contains(&s.device) && s.index < record.k)
+            .count();
+        assert_eq!(
+            read.reconstructed.len(),
+            data_on_b,
+            "{:?}",
+            read.reconstructed
+        );
+    } else {
+        match head {
+            Err(ConnectionError::Remote(detail)) => {
+                assert_eq!(detail.code, ErrorCode::NodeUnreachable, "{detail:?}");
+                assert!(
+                    detail.message.contains("at least k = 2"),
+                    "{}",
+                    detail.message
+                );
+            }
+            other => panic!("expected NodeUnreachable, got {other:?}"),
+        }
+    }
+    // Two of four devices out is fewer than k+m: a key found nowhere is
+    // still an authoritative NotFound (13.3).
+    match client
+        .request(Request::HeadObject {
+            key: "nothing".to_string(),
+        })
         .await
     {
-        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
-        other => panic!("expected NodeUnreachable, got {other:?}"),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        other => panic!("expected NotFound, got {other:?}"),
     }
+    // Every other operation that must reach b fails, naming it (16.1, 16.2).
     match client.put_object("k2", &body, 100_000, None).await {
         Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::NodeUnreachable)
@@ -531,7 +608,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }
@@ -810,7 +887,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let nodes = [&a, &b, &c, &d];
@@ -976,7 +1053,7 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }
@@ -1030,7 +1107,7 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => assert!(record.shard_on(device).is_none()),
+            Response::HeadObject { record, .. } => assert!(record.shard_on(device).is_none()),
             other => panic!("{other:?}"),
         }
         let mut c_client = c.client().await;
@@ -1086,7 +1163,7 @@ async fn put_objects(
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }

@@ -13,6 +13,7 @@ class ObjectInfo:
     m: int
     block_size: int
     reconstructed: list[dict[str, Any]]
+    missing_records: list[dict[str, Any]]
 
 class KeyEntry:
     key: str

@@ -237,6 +237,7 @@ impl Connection {
                 object_size: Some(object_size),
                 object_checksum: Some(object_checksum),
                 reconstructed: Vec::new(),
+                missing_records: Vec::new(),
             },
         )
         .await?;
@@ -480,6 +481,7 @@ impl Connection {
                     return Ok(ObjectRead {
                         record,
                         reconstructed: end.reconstructed,
+                        missing_records: end.missing_records,
                     });
                 }
             }
