@@ -731,7 +731,7 @@ function renderBanners() {
   const warnings = [];
   if (state.unreachable) {
     warnings.push({ id: 'node-unreachable', level: 'critical', sticky: true,
-      text: `${state.unreachable.message}. The page retries every 30 seconds; start the node, or start `,
+      text: `${state.unreachable.message}. Start the node, or start `,
       code: 'djbod-ui', tail: ' against another node.', title: state.unreachable.detail || '' });
   }
   // The transport is unknown until the status has been fetched once.
