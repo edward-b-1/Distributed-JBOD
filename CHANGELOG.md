@@ -19,27 +19,43 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
-Pull request: The record's revision is required
+Pull request: An inventory of every object's state without reading a shard
+
+### Added
+
+- `djbod inventory`: every object's state against the devices that can be read now, from one pass over the record streams of every active node with no shard read and no check made, so it finishes in minutes where a scrub takes days. Each version is whole, degraded with only parity out (reads unaffected), degraded with a data shard out (every read decodes), unreadable (more than m out), or inconsistent (the copies read disagree or one is missing, which is the scrub's territory). Unlike the scrub it goes around a node that is down: that node's devices are unread, and the summary names them and says whether the counts are complete, which they are while fewer than k+m devices are unread. `--keys <state>` lists that state's objects one per line with their shards available; `--json` prints the events alone; the exit codes are the scrub's with "not whole" for damage (SPEC 20.1.5, 19.1.3, 16.1) (#218).
+- On the wire, `Request::Inventory` with an `InventoryQuery`, `Response::InventoryStarted`, and a stream of `InventoryEvent` frames (`Object`, `Progress`, `Summary`) with `ObjectState`; `Connection::start_inventory`, `Client::inventory` and its blocking wrapper.
+- Version 0.2.21.
+
+## [b36dbea] - 2026-09-26
+
+Pull request #157: The record's revision is required
 
 ### Changed
 
 - `MetadataRecord.revision` is always written and required on read. It had been omitted when 0 and defaulted when absent so that records from before 18.8.1 still verified; nothing is released, so nothing is kept for compatibility (SPEC 9.4.2, 19.1.5.2). A record without the field no longer parses, and a record's checksum now covers `"revision": 0`, so every record written by an earlier build must be rewritten once (#155, #260).
 - Version 0.2.20.
 
-Pull request: djbod takes --bootstrap-node and DJBOD_BOOTSTRAP_NODE, as the web UI does
+## [b1a9a3c] - 2026-09-26
+
+Pull request #263: djbod takes --bootstrap-node and DJBOD_BOOTSTRAP_NODE, as the web UI does
 
 ### Changed
 
 - `djbod --node` and `DJBOD_NODE` are `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE`, the names `djbod-ui` already uses (#207): one setting, one name across both tools, and one variable in `/etc/djbod/client.env` for the UI, the scrub timer and the command line. Nothing is kept for the old name (SPEC 19.1.5.2). `DJBOD_NODE_ID`, the node's own identity, is unrelated and unchanged. The README, SPEC, the guides, the deployment files and the tests follow (#262).
 - Version 0.2.19.
 
-Pull request: Ship a systemd unit for djbod-ui
+## [2fdbba1] - 2026-09-26
+
+Pull request #259: Ship a systemd unit for djbod-ui
 
 ### Added
 
 - `deploy/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user, reads `DJBOD_BOOTSTRAP_NODE`, `DJBOD_CLUSTER` and the TLS paths from `/etc/djbod/client.env`, which `deploy/systemd/client.env.example` shows and the `djbod` command line reads too, listens on localhost, and says how to serve the LAN instead. It does not wait for the local node, since the UI tries every listed node. The deployment guide points to it (#258).
 
-Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
+## [ea18734] - 2026-09-26
+
+Pull request #73: Deployment: Dockerfile, Compose stack, systemd units, and a guide
 
 ### Added
 
@@ -49,14 +65,18 @@ Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
 - `docs/deployment.md`: the three ways step by step, with TLS and upgrade notes; the README and the guides point to it (#73).
 - Version 0.2.18.
 
-Pull request: Remove the UI's deprecated --node and DJBOD_NODE
+## [57746ff] - 2026-09-26
+
+Pull request #261: Remove the UI's deprecated --node and DJBOD_NODE
 
 ### Removed
 
 - `djbod-ui --node` and `DJBOD_NODE`, the deprecated spelling of `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE` kept by #207 and accepted with a warning at every start. Nothing is released, so nothing is kept for compatibility (SPEC 19.1.5.2). `djbod` itself keeps `--node`, which is that tool's own name for the setting (#260).
 - Version 0.2.17.
 
-Pull request: Removed nodes stay in the cluster document as tombstones
+## [52c4f52] - 2026-09-26
+
+Pull request #255: Removed nodes stay in the cluster document as tombstones
 
 ### Changed
 
@@ -67,6 +87,22 @@ Pull request: Removed nodes stay in the cluster document as tombstones
 ### Added
 
 - `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
+
+## [15798b3] - 2026-09-26
+
+Pull request #256: Web UI: toggles to show or hide removed nodes and devices
+
+### Added
+
+- The web UI's overview can show or hide removed nodes and devices, which `status` now reports (#147).
+
+## [d42a7dc] - 2026-09-26
+
+Pull request #138: docs: add detailed user guide
+
+### Added
+
+- `docs/user-guide.md`, a step-by-step guide to running and using a cluster, linked from the README.
 
 ## [4e127a6] - 2026-09-26
 
