@@ -19,6 +19,18 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Removed nodes stay in the cluster document as tombstones
+
+### Changed
+
+- `remove-node`, plain and `--force`, marks the node and every one of its devices `removed` instead of deleting them, so both removals leave tombstones and nothing is ever deleted from the document. A removed node is asked nothing, proposed to nothing, and takes no part in any broadcast, listing or scrub; `status` and `cluster show` list it as `removed`, with its devices, for the record. A tombstone is never revived: a machine that comes back joins with a new node id, and its devices with `--wipe-removed-device`. A removed node's addresses and label no longer count against a new node (SPEC 6.2.2, 6.2.5.2, 6.2.6.3, 18.2.1) (#147).
+- `add-device` and `join` recognise a removed device by its tombstone, so a disk retired with `remove-device` can be wiped and added again, which the old check refused as "already in the document".
+- Version 0.2.16.
+
+### Added
+
+- `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
+
 ## [4e127a6] - 2026-09-26
 
 Pull request #253: djbod cluster get-name prints the cluster's name alone

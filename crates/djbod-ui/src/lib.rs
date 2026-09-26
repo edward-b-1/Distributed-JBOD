@@ -714,6 +714,7 @@ fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
         M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
         M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
         M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::NodeRemoved(_) => (StatusCode::CONFLICT, "node_removed"),
         M::UnknownNodeName(_) => (StatusCode::NOT_FOUND, "unknown_node_name"),
         M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
         M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
@@ -803,11 +804,12 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
         admin::fetch_document(&target.connector, app.peer().await?, target.cluster).await?;
     app.learn(&document);
     let reports = admin::fetch_all(&target.connector, &document).await;
-    let nodes: Vec<Value> = reports
+    let mut nodes: Vec<Value> = reports
         .iter()
         .map(|r| {
             json!({
                 "node": r.node,
+                "state": "active",
                 "address": r.address,
                 // From the node's Hello; null for a node that was unreachable
                 // or runs a build from before builds were sent (SPEC 6.2.6.4).
@@ -817,6 +819,22 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
             })
         })
         .collect();
+    // Removed nodes (SPEC 6.2.2) are tombstones: listed from the document
+    // for the record, asked nothing, so the page can show or hide them.
+    for n in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+    {
+        nodes.push(json!({
+            "node": n.id,
+            "state": "removed",
+            "address": n.addresses.first(),
+            "build": null,
+            "version": null,
+            "error": null,
+        }));
+    }
     Ok(Json(json!({ "document": document, "nodes": nodes })))
 }
 

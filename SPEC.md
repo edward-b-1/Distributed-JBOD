@@ -324,9 +324,12 @@ the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
 `max_user_metadata_bytes` (9.4.2), the transport mode `transport` (19.1.6:
 `plain`, `tls-optional`, or `tls`), the node list (UUID, addresses,
-optional label), and the device list (UUID, owning node, state, optional
-label). Every field is required except the names and labels, whose
-absence means unnamed (19.1.5.2). `djbod cluster set-limits` and `djbod
+state, optional label), and the device list (UUID, owning node, state,
+optional label). A node's state is `active` or `removed`; a removed node
+is a tombstone (18.2.1): listed for the record, asked nothing, never
+revived. Every field is required except the names and labels, whose
+absence means unnamed (19.1.5.2); a document from before nodes had a
+state is refused until each node entry carries one. `djbod cluster set-limits` and `djbod
 cluster set-transport` change the limits and the transport. The document
 never holds key material (20.6).
 
@@ -370,8 +373,10 @@ of a forced removal (6.2.6.3) remains the UUID.
 6.2.5.2 [D] **Node addresses.** A node entry lists one or more addresses,
 each an IP address and port (19.1.6.1: certificates name IP addresses, so
 host names are not used). The list is never empty, and no address is
-listed for two nodes; the validator refuses a document that breaks either
-rule. Nodes and clients use the first address; the others are recorded
+listed for two active nodes; the validator refuses a document that breaks
+either rule. A removed node keeps its addresses and its label for the
+record, and neither counts against a new node, so a replacement machine
+may take both. Nodes and clients use the first address; the others are recorded
 for the operator and are not tried. `init-cluster` and `join` list the
 node's configured advertised address (`advertise`, or `listen` when it is
 not set). Afterwards the list changes in two ways:
@@ -515,9 +520,10 @@ fetch within five seconds; `membership::plan_forced_removal` computes the
 cost from the other nodes' records (18.5) and `execute_forced_removal`
 proposes with the dead node skipped; the rebuild is one `RepairObject`
 per affected key, which relocates shards whose device has left the
-document (18.3). The node and its devices are dropped from the document
-together, so a device of a removed node is recognised at `join` by being
-initialised for the cluster yet unlisted.
+document (18.3). The node and its devices are marked `removed` together
+and stay in the document as tombstones (6.2.2), so a device of a removed
+node is recognised at `join` by its tombstone, and a machine that comes
+back joins with a new node id: a tombstoned id is refused.
 
 6.2.6.4 [D] **Mixed builds.** A node refuses a document that carries a
 field its build does not know, whether it arrives in `ApplyClusterConfig`
@@ -1531,10 +1537,16 @@ inspected before the next is run:
   `removed`, so that a later attempt to add the same disk is recognised
   (6.2.6.3), and the administrator takes it out of the node's
   configuration at the next restart; a removed device is never written
-  to or cleaned again, and a shard or record copy on it is lost (18.3); `remove-node` drops the node and its
-  devices, and the node, having acknowledged a document that no longer
-  lists it, stops accepting connections and its process exits. Both scans
-  are `membership::scan_references` (18.5). Removing the last node is
+  to or cleaned again, and a shard or record copy on it is lost (18.3);
+  `remove-node` marks the node and every one of its devices `removed` in
+  the same way, so both removals leave tombstones (6.2.2) and nothing is
+  ever deleted from the document; the node, having acknowledged a
+  document that lists it as removed, stops accepting connections and its
+  process exits, and every broadcast, proposal and listing thereafter
+  visits active nodes only. A tombstone is never revived: a disk that
+  comes back is wiped and added as a new device, a machine that comes
+  back joins with a new node id. Both scans are
+  `membership::scan_references` (18.5). Removing the last active node is
   refused.
 - **`djbod contents [<device>...] [--node-id <node>]`** shows what each
   device holds (18.2.3), so that the state of a drain, and whether a

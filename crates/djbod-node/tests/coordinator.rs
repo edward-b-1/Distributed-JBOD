@@ -1851,6 +1851,7 @@ async fn status_reports_an_unreachable_node_instead_of_failing() {
         id: ghost,
         addresses: vec!["127.0.0.1:1".to_string()],
         label: Some("ghost".to_string()),
+        state: djbod_core::cluster::NodeState::Active,
     });
     next.devices.push(djbod_core::cluster::DeviceEntry {
         id: ghost_device,

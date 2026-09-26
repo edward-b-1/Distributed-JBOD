@@ -26,7 +26,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use djbod_core::checksum::BlockChecksum;
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, Transport};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState, Transport};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::scrub::{Finding, ScrubSummary};
@@ -330,6 +330,8 @@ pub struct DeviceContents {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub node: NodeId,
+    /// A removed node (6.2.2) is listed for the record, not asked.
+    pub state: NodeState,
     pub reachable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,

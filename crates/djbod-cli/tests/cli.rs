@@ -1580,6 +1580,7 @@ async fn status_names_an_unreachable_node_and_still_succeeds() {
         id: ghost,
         addresses: vec!["127.0.0.1:1".to_string()],
         label: Some("ghost".to_string()),
+        state: djbod_core::cluster::NodeState::Active,
     });
     next.devices.push(djbod_core::cluster::DeviceEntry {
         id: djbod_core::record::DeviceId(Uuid::from_u128(0xbeef)),

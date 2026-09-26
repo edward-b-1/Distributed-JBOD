@@ -712,7 +712,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         }
                         // A node that could not be asked (5.6, 19.1.3): its
                         // devices are the unavailable ones above.
-                        for n in nodes.iter().filter(|n| !n.reachable) {
+                        for n in nodes.iter().filter(|n| {
+                            !n.reachable && n.state == djbod_core::cluster::NodeState::Active
+                        }) {
                             eprintln!(
                                 "node {} unreachable: {}",
                                 names::node_identity(n.node),
@@ -1252,12 +1254,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     let reports =
                         djbod_client::admin::fetch_all(&connector(&cli)?, &document).await;
                     if cli.json {
-                        let rows: Vec<serde_json::Value> = reports
+                        let mut rows: Vec<serde_json::Value> = reports
                             .iter()
                             .map(|r| {
                                 serde_json::json!({
                                     "node": r.node,
                                     "label": r.label,
+                                    "state": "active",
                                     "address": r.address,
                                     "addresses": document.node(r.node).map(|n| &n.addresses),
                                     "build": r.build,
@@ -1266,6 +1269,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 })
                             })
                             .collect();
+                        // Tombstones (6.2.2), from the document, not asked.
+                        for n in document
+                            .nodes
+                            .iter()
+                            .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+                        {
+                            rows.push(serde_json::json!({
+                                "node": n.id,
+                                "label": n.label,
+                                "state": "removed",
+                                "address": n.addresses.first(),
+                                "addresses": n.addresses,
+                                "build": null,
+                                "version": null,
+                                "error": null,
+                            }));
+                        }
                         println!("{}", serde_json::to_string_pretty(&rows)?);
                     } else {
                         println!("cluster   {}", document.title());
