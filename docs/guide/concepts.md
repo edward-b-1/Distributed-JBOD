@@ -167,7 +167,7 @@ You will see three kinds of name.
   set-node-label`) is a short name, unique in the cluster, 1 to 128
   bytes, with no spaces and not itself a UUID.
 - A **device id** is the UUID in `DISTRIBUTED-JBOD-DEVICE.json`. A
-  **device label** (`djbod cluster set-label`) has the same rules as a
+  **device label** (`djbod cluster set-device-label`) has the same rules as a
   node label. Commands that take a device or a node accept either the
   UUID or the label.
 

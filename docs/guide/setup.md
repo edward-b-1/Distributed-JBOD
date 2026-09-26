@@ -210,12 +210,12 @@ day.
 
 ```sh
 target/release/djbod cluster set-node-label <node-uuid> trial
-target/release/djbod cluster set-label <device-uuid> bay0
+target/release/djbod cluster set-device-label <device-uuid> bay0
 target/release/djbod status
 ```
 
 From then on `bay0` and `trial` work wherever a command takes a device
-or a node. `set-label <name> --clear` and `set-node-label <name> --clear`
+or a node. `set-device-label <name> --clear` and `set-node-label <name> --clear`
 remove them. `cluster set-name` changes the cluster's display name. The
 id clients send stays the same.
 

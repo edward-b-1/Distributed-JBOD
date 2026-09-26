@@ -105,7 +105,7 @@ Label the disks once you have the ids from `init-cluster` or from
 export DJBOD_NODE=10.0.0.1:5263
 export DJBOD_CLUSTER=$(djbod get-cluster-id)
 djbod cluster set-node-label <node-uuid> nas1
-djbod cluster set-label <device-uuid> nas1-bay0
+djbod cluster set-device-label <device-uuid> nas1-bay0
 ```
 
 ## Three servers
