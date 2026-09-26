@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Objects Availability</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --accent-track: #d6e6f9; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --accent: #2a78d6; --accent-track: #d6e6f9; --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding-block: 24px 48px; padding-inline: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; text-wrap: balance; }
+  .lede { color: var(--text-2); margin: 0 0 24px; max-width: 65ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 36px 0 6px; }
+  h3 { font-size: 13px; font-weight: 600; margin: 22px 0 4px; }
+  .note { color: var(--text-2); margin: 0 0 12px; max-width: 70ch; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
+  .state-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  .mock .frame { display: grid; grid-template-columns: 120px 1fr; }
+  .mock aside { background: var(--surface); border-right: 1px solid var(--line); padding: 8px 6px; font-size: 12px; }
+  .mock aside div { padding: 5px 8px; border-radius: 6px; color: var(--text-2); }
+  .mock aside div.on { background: var(--accent-track); color: var(--text); font-weight: 600; }
+  .mock main { padding: 10px 12px; display: grid; gap: 8px; align-content: start; }
+  .num { font-variant-numeric: tabular-nums; }
+  .mk { display: inline-block; width: .7em; height: .7em; margin-right: .45em; vertical-align: -.02em; background: var(--good); border-radius: 50%; flex: none; }
+  .mk.bad { background: var(--critical); border-radius: .12em; }
+  .mk.warn { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th { text-align: left; font-weight: 600; color: var(--text-2); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .id { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); }
+  .cap { font-size: 12px; color: var(--text-2); }
+  .btn { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 3px 9px; font-size: 12px; color: var(--text); white-space: nowrap; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .toolbar input { border: 1px solid var(--line); background: var(--surface); color: var(--text); border-radius: 6px; padding: 3px 8px; font-size: 12px; font-family: inherit; }
+  .split { display: grid; grid-template-columns: 1fr 150px; gap: 8px; }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text-2); }
+  /* A: the status line */
+  .avail { display: flex; align-items: baseline; gap: 10px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
+  .avail .h { font-weight: 600; white-space: nowrap; }
+  .avail .h .mk { vertical-align: -.02em; }
+  .avail .d { color: var(--text-2); }
+  .avail.warn { border-color: var(--warning); } .avail.bad { border-color: var(--critical); }
+  .avail .n { margin-left: auto; color: var(--muted); white-space: nowrap; font-size: 11.5px; }
+  /* B: chips */
+  .chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 12px; background: var(--surface); white-space: nowrap; }
+  .chip.bad { border-color: var(--critical); background: var(--critical-soft); }
+  .chip.warn { border-color: var(--warning); background: var(--warning-soft); }
+  /* C: banner */
+  .banner { display: flex; gap: 12px; align-items: baseline; padding: 8px 12px; font-size: 12.5px; background: var(--warning-soft); border-radius: 8px; }
+  .banner.bad { background: var(--critical-soft); }
+  .banner .what { flex: 1; }
+  .stack { display: grid; gap: 8px; }
+  .verdict { margin-top: 32px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); max-width: 70ch; }
+  .verdict p { margin: 0 0 8px; } .verdict p:last-child { margin: 0; }
+  .cases { max-width: 78ch; }
+  .cases td:first-child { white-space: nowrap; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Device availability on the Objects page</h1>
+<p class="lede">The Objects page should say how many devices are unavailable and what that means for the objects listed. The meaning depends on the scheme's k and m and on the count U of unavailable devices, in the five cases below. Every mock uses the demo cluster as it stands: scheme 2+1, five devices in use, two of them on the unreachable devbox4.</p>
+
+<h2>The five cases, and what the page can honestly say</h2>
+<p class="note">Cases 2 and 3 are one row here: the count alone cannot tell whether the missing shards were data or parity, so the sentence covers both without claiming either. Whether the listing is complete comes from the node, which since #218 reports the devices it could not read and whether any object could be hidden entirely.</p>
+<table class="cases">
+  <tr><th>Case</th><th>Condition</th><th>Mark</th><th>What the strip says</th></tr>
+  <tr><td>1</td><td>U = 0</td><td><i class="mk"></i>dot</td><td>Every object can be read at full speed; any m devices can fail without loss.</td></tr>
+  <tr><td>2, 3</td><td>0 &lt; U &le; m</td><td><i class="mk warn"></i>triangle</td><td>Every object can still be read. Objects with a shard on the unavailable devices are rebuilt from their other shards, slower when the missing shard held data. One more failure may make some objects unreadable.</td></tr>
+  <tr><td>4</td><td>m &lt; U &lt; k+m</td><td><i class="mk bad"></i>square</td><td>Objects with more than m shards on the unavailable devices cannot be read; the record view says which. The listing is complete.</td></tr>
+  <tr><td>5</td><td>U &ge; k+m</td><td><i class="mk bad"></i>square</td><td>As 4, and objects stored only on the unavailable devices are missing from the listing, which is incomplete.</td></tr>
+</table>
+
+<h2>A. A status line above the table</h2>
+<p class="note">One row between the filters and the key table, the width of the table: the mark and headline, the consequence in muted text, and the node count at the right. Recommended: it is read before the list, it fits the Objects page's existing rows, and it has room for the sentence that matters.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; today, case 4</p>
+  <div class="mock light"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <div class="avail bad"><span class="h"><i class="mk bad"></i>2 of 5 devices unavailable</span><span class="d">demo-d1, demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read; the record view says which. Listing complete.</span><span class="n">1 of 3 nodes unreachable</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00001_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_bid.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; case 2 or 3, one device down</p>
+  <div class="mock dark"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <div class="avail warn"><span class="h"><i class="mk warn"></i>1 of 5 devices unavailable</span><span class="d">demo-d2 on devbox4. Every object can still be read; those with a shard there are rebuilt from the other shards and may be slower. One more failure may make some unreadable.</span><span class="n">3 nodes reachable</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00001_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_bid.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+</div>
+
+<h3>The line in all four states</h3>
+<div class="pair">
+  <div class="stack light" style="padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+    <div class="avail"><span class="h"><i class="mk"></i>All 5 devices available</span><span class="d">Every object can be read at full speed; any 1 device can fail without loss (scheme 2+1).</span><span class="n">3 nodes reachable</span></div>
+    <div class="avail warn"><span class="h"><i class="mk warn"></i>1 of 5 devices unavailable</span><span class="d">demo-d2 on devbox4. Every object can still be read; those with a shard there are rebuilt from the other shards and may be slower. One more failure may make some unreadable.</span><span class="n">3 nodes reachable</span></div>
+    <div class="avail bad"><span class="h"><i class="mk bad"></i>2 of 5 devices unavailable</span><span class="d">demo-d1, demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read; the record view says which. Listing complete.</span><span class="n">1 of 3 nodes unreachable</span></div>
+    <div class="avail bad"><span class="h"><i class="mk bad"></i>3 of 6 devices unavailable</span><span class="d">demo-d0, demo-d1, demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read, and objects stored only on them are missing from this listing. Listing incomplete.</span><span class="n">1 of 3 nodes unreachable</span></div>
+  </div>
+  <div class="stack dark" style="padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)">
+    <div class="avail"><span class="h"><i class="mk"></i>All 5 devices available</span><span class="d">Every object can be read at full speed; any 1 device can fail without loss (scheme 2+1).</span><span class="n">3 nodes reachable</span></div>
+    <div class="avail warn"><span class="h"><i class="mk warn"></i>1 of 5 devices unavailable</span><span class="d">demo-d2 on devbox4. Every object can still be read; those with a shard there are rebuilt from the other shards and may be slower. One more failure may make some unreadable.</span><span class="n">3 nodes reachable</span></div>
+    <div class="avail bad"><span class="h"><i class="mk bad"></i>2 of 5 devices unavailable</span><span class="d">demo-d1, demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read; the record view says which. Listing complete.</span><span class="n">1 of 3 nodes unreachable</span></div>
+    <div class="avail bad"><span class="h"><i class="mk bad"></i>3 of 6 devices unavailable</span><span class="d">demo-d0, demo-d1, demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read, and objects stored only on them are missing from this listing. Listing incomplete.</span><span class="n">1 of 3 nodes unreachable</span></div>
+  </div>
+</div>
+
+<h2>B. Chips in the filter row</h2>
+<p class="note">Two chips at the right of the prefix row, devices and nodes, coloured by case, with the consequence sentence in the tooltip. Takes no vertical space, but the sentence is hidden until hovered, and case 4 against case 5 shows only as a word in the chip.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; today</p>
+  <div class="mock light"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:130px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="chip bad" style="margin-left:auto"><i class="mk bad" style="margin:0"></i>2 of 5 devices unavailable &middot; some unreadable</span><span class="chip bad"><i class="mk bad" style="margin:0"></i>1 of 3 nodes</span></div>
+      <div class="toolbar"><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; all available</p>
+  <div class="mock dark"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:130px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="chip" style="margin-left:auto"><i class="mk" style="margin:0"></i>5 of 5 devices</span><span class="chip"><i class="mk" style="margin:0"></i>3 of 3 nodes</span></div>
+      <div class="toolbar"><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+</div>
+
+<h2>C. A banner across the page</h2>
+<p class="note">The transport banners' treatment: a filled strip across the top of the Objects page, amber or red, only when U &gt; 0. Loudest, and nothing at all in case 1, which loses the reassurance that everything is available. It also reads as a page-wide warning although it is specific to the listing below.</p>
+<div class="pair">
+  <div><p class="state-label">light &middot; today</p>
+  <div class="mock light"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="banner bad"><span class="what"><b>2 of 5 devices unavailable</b>, demo-d1 and demo-d2 on devbox4. Objects with more than 1 shard on them cannot be read. Listing complete.</span></div>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+  <div><p class="state-label">dark &middot; case 2 or 3</p>
+  <div class="mock dark"><div class="frame"><aside><div>Overview</div><div>Nodes</div><div class="on">Objects</div><div>Maintenance</div><div>Settings</div></aside><main>
+    <div class="banner"><span class="what"><b>1 of 5 devices unavailable</b>, demo-d2 on devbox4. Every object can still be read; some reads are slower. One more failure may make some unreadable.</span></div>
+    <div class="toolbar"><input value="" placeholder="Choose file" style="width:150px"><input value="" placeholder="as key" style="width:110px"><span class="btn primary">Upload</span></div>
+    <div class="split"><div class="stack">
+      <div class="toolbar"><input value="" placeholder="prefix" style="width:150px"><span class="btn primary">List</span><span class="btn">Clear</span><span class="cap" style="margin-left:auto">page 1</span><span class="btn">Previous</span><span class="btn">Next</span></div>
+      <table><tr><th>Key</th><th>Size</th><th></th></tr>
+        <tr><td class="id">Zed-x86_64.exe</td><td class="num">92.1 MB</td><td></td></tr>
+        <tr><td class="id">bench/n230-r1/cli/00000_data_ohlcv-1m_xcbt_2025-06-23_ZFU25_ask.arrow</td><td class="num">3.5 KB</td><td></td></tr>
+      </table></div>
+      <div class="panel">Select an object to see its record.</div></div>
+  </main></div></div></div>
+</div>
+
+<div class="verdict">
+  <p><b>Recommendation: A.</b> It is the only treatment with room for the consequence, which is the point, and it is present in case 1 as well, so an operator learns to look there. Every input is already on the page: k and m from the document, each device's availability from the status, and the listing's own completeness from the node since #218. It is a UI-only change.</p>
+  <p>The device count is of devices in use, active and draining, since a removed device holds nothing. The nodes figure is the muted text at the right, because a node matters here only through its devices.</p>
+</div>
+
+</body>
+</html>
