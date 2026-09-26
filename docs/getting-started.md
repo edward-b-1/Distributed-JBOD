@@ -92,8 +92,8 @@ grow, but it warns, and every `put` fails with `InsufficientDevices`
 until enough devices exist.
 
 You need the **cluster id** for the client. If you lose it, any running
-node repeats it: `djbod get-cluster-id --node 127.0.0.1:5263` needs no
-`--cluster`, and `djbod identity --node 127.0.0.1:5263` says in words who
+node repeats it: `djbod get-cluster-id --bootstrap-node 127.0.0.1:5263` needs no
+`--cluster`, and `djbod identity --bootstrap-node 127.0.0.1:5263` says in words who
 is there: cluster, node, build, and document version. The id is also in
 `/tmp/djbod/state/cluster.json`.
 
@@ -116,7 +116,7 @@ add `--log-format json`.
 In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=4e9a31f4-e921-4767-8477-250de7f1640f   # yours
 
 target/release/djbod status
@@ -546,7 +546,7 @@ devices; every existing node must accept it. Then:
 ```sh
 target/release/djbod cluster show          # every node and the document version it holds
 target/release/djbod put big/file some.bin  # shards now land on both nodes
-target/release/djbod --node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
+target/release/djbod --bootstrap-node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
 ```
 
 Stop one node and any request needing it fails naming the node, then

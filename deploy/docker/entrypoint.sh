@@ -41,7 +41,7 @@ fi
 if [ ! -f "$state/cluster.json" ]; then
     if [ -n "${DJBOD_JOIN_PEER:-}" ]; then
         # The peer says which cluster it serves; it may still be starting.
-        until cluster=$(djbod get-cluster-id --node "$DJBOD_JOIN_PEER" 2>/dev/null); do
+        until cluster=$(djbod get-cluster-id --bootstrap-node "$DJBOD_JOIN_PEER" 2>/dev/null); do
             echo "djbod-entrypoint: $DJBOD_JOIN_PEER does not answer yet; retrying in 3 seconds" >&2
             sleep 3
         done

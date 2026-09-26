@@ -52,7 +52,7 @@ target/release/djbod-node run --config /tmp/djbod/node.toml
 shard, so any one of the four devices may be lost. In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=$(target/release/djbod get-cluster-id)   # or paste what init-cluster printed
 
 target/release/djbod put photos/cat.jpg cat.jpg --content-type image/jpeg
@@ -292,7 +292,7 @@ djbod-node run --config /etc/djbod/node.toml
 ```
 
 `init-cluster` prints the cluster id, and any running node repeats it to
-`djbod get-cluster-id --node <address>`. `4+2` puts six shards of
+`djbod get-cluster-id --bootstrap-node <address>`. `4+2` puts six shards of
 every object on six different disks and survives any two of them
 failing, for 50% overhead; `3+1` costs 33% and survives one. Nine disks
 is comfortably more than the six a `4+2` write needs, and the choice can
@@ -318,9 +318,9 @@ was off while the cluster changed catches up on its own.
 request, so point the client at whichever is nearest:
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
 export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you
-djbod identity              # who is at DJBOD_NODE: cluster, node, build, document version
+djbod identity              # who is at DJBOD_BOOTSTRAP_NODE: cluster, node, build, document version
 djbod cluster show          # three nodes, one document version, each node's build
 djbod status                # nine disks, their labels, state, and free space
 djbod put backups/2026-09.tar backup.tar

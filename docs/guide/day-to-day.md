@@ -1,7 +1,7 @@
 # Day to day
 
 The client environment from [Setup](setup.md#the-client) is assumed:
-`DJBOD_NODE` and `DJBOD_CLUSTER`.
+`DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER`.
 
 ## Objects
 
@@ -137,7 +137,7 @@ djbod-ui --listen 127.0.0.1:5264 --bootstrap-node 10.0.0.1:5263,10.0.0.2:5263
 `--listen` defaults to `127.0.0.1:5264`. `--bootstrap-node` is one or
 more `ip:port` addresses, comma-separated, also `DJBOD_BOOTSTRAP_NODE`.
 They are tried in order, and the first that answers coordinates the
-page's requests, for the same reason as `djbod --node`: that machine
+page's requests, for the same reason as `djbod --bootstrap-node`: that machine
 does the encoding and the fan-out.
 [Concepts](concepts.md#which-node-coordinates) is why a fast local
 server belongs first. After the UI has read the cluster document it also tries

@@ -8,7 +8,7 @@
 #     docker compose -f deploy/docker-compose.yml up -d --build
 #   open http://127.0.0.1:5264/            (DJBOD_UI_PORT=... to publish elsewhere)
 #   docker compose -f deploy/docker-compose.yml exec node1 sh -c \
-#     'djbod --node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --node 172.28.0.11:5263) status'
+#     'djbod --bootstrap-node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --bootstrap-node 172.28.0.11:5263) status'
 #   docker compose -f deploy/docker-compose.yml down -v      # and delete the data
 #
 # Nodes are addressed by IP and port in the cluster document, so each

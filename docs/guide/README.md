@@ -28,7 +28,7 @@ Two facts decide most of the procedures later in this guide:
 - The node your client connects to is the coordinator for that request.
   It fans the work out to the other machines, encodes and decodes, and
   streams the object. You choose it. On a cluster whose machines differ
-  in CPU, link speed, or region, point `--node` at a machine that can
+  in CPU, link speed, or region, point `--bootstrap-node` at a machine that can
   do that work well. [Concepts](concepts.md#which-node-coordinates) is
   the full account. The web UI's `--bootstrap-node` is the same choice,
   and once it has read the cluster document it will try the other

@@ -429,7 +429,7 @@ it is not the one expected. The check of 19.1.5 then rests on the name being uni
 clusters rather than on the id, and names would have to be
 distinguishable from a UUID so `--cluster` could take either. This
 concerns only the check, not how a client finds a node, which stays
-`--node ip:port`. The alternatives and the reasons for deferring are in
+`--bootstrap-node ip:port`. The alternatives and the reasons for deferring are in
 `docs/proposals/cluster-name.md`, section 5.
 
 6.2.6 [D] **Changing the document without a master.** Any process holding
@@ -1522,7 +1522,7 @@ inspected before the next is run:
   outcome for individual versions, so it cannot loop. The list cannot
   grow while it runs, because a `draining` device receives no new shards.
   It prints progress per version and is safe to interrupt and rerun; a
-  rerun is the administrator's decision, not the tool's. `--node <id>` drains every `draining` device of a node in turn.
+  rerun is the administrator's decision, not the tool's. `--node-id <id>` drains every `draining` device of a node in turn.
   A version the cluster cannot rebuild (more than m damaged shards) is
   reported and left. The operation is `Drain` (19.1.3), served by any
   node like the other administrative operations: the list of versions
@@ -2024,10 +2024,10 @@ accepts that from a client only, never from a node, answers with its own
 build, and then closes the connection; nothing else is served to a
 client that did not name the cluster. Every other command still requires
 the id, so a client pointed at the wrong cluster still fails before it
-can act. `djbod get-cluster-id --node <address>` is the command, needing
+can act. `djbod get-cluster-id --bootstrap-node <address>` is the command, needing
 no `--cluster`; it prints the id alone so that `export
 DJBOD_CLUSTER=$(djbod get-cluster-id ...)` works, and with `--json` the
-name and build too. `djbod identity --node <address>` asks the same way
+name and build too. `djbod identity --bootstrap-node <address>` asks the same way
 and then, with the answer, fetches the document to say in words who is
 there: the cluster's name and id, the node's label, id, and addresses,
 its build, the document version it holds, and the transport. A node from
@@ -2483,8 +2483,8 @@ argument, as an environment variable, or in the configuration file, and
 they take precedence in that order: an argument overrides a variable,
 which overrides the file. Environment variables are named `DJBOD_` plus
 the setting in upper case. Existing settings are brought under this rule
-as they are touched; `djbod` already takes `--node` and `--cluster` from
-`DJBOD_NODE` and `DJBOD_CLUSTER`.
+as they are touched; `djbod` already takes `--bootstrap-node` and `--cluster` from
+`DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER`.
 
 20.6.2 [D] Secrets never live in a configuration file or in the cluster
 document. A private key is its own file, with owner-only permissions, and
@@ -2510,8 +2510,8 @@ writer and hold one body chunk at a time (3.6); errors carry the node's
 detail of 16.2.
 A blocking facade runs the same client on a runtime of its own, for
 programs and language bindings that call from ordinary threads. The
-`djbod` command is itself built on the client: `--node` (or
-`DJBOD_NODE`) takes several addresses, comma-separated, tried in order.
+`djbod` command is itself built on the client: `--bootstrap-node` (or
+`DJBOD_BOOTSTRAP_NODE`) takes several addresses, comma-separated, tried in order.
 Administration is part of the library too: the document-change
 procedures of 6.2.6 and everything built on them live beside the object
 operations, so the command-line tool and the web UI depend on the client

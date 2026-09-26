@@ -8,4 +8,4 @@ state="${DJBOD_STATE_DIR:-/var/lib/djbod}"
 cluster=$(sed -n 's/.*"cluster_id": *"\([^"]*\)".*/\1/p' "$state/cluster.json" 2>/dev/null | head -1)
 [ -n "$cluster" ] || exit 1
 port="${DJBOD_LISTEN##*:}"
-exec djbod --node "127.0.0.1:${port:-5263}" --cluster "$cluster" status > /dev/null
+exec djbod --bootstrap-node "127.0.0.1:${port:-5263}" --cluster "$cluster" status > /dev/null

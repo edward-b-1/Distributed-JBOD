@@ -1,7 +1,7 @@
 //! `djbod`: the command-line client (SPEC C.2).
 //!
 //! ```text
-//! djbod --node 10.0.0.1:5263 --cluster <uuid> status
+//! djbod --bootstrap-node 10.0.0.1:5263 --cluster <uuid> status
 //! djbod ... put photos/cat.jpg ./cat.jpg
 //! djbod ... get photos/cat.jpg ./copy.jpg
 //! djbod ... head photos/cat.jpg
@@ -10,7 +10,7 @@
 //! djbod ... cluster-config
 //! ```
 //!
-//! `--node` and `--cluster` may also come from `DJBOD_NODE` and
+//! `--bootstrap-node` and `--cluster` may also come from `DJBOD_BOOTSTRAP_NODE` and
 //! `DJBOD_CLUSTER`. `init-cluster` prints the cluster id to use.
 //!
 //! Object bodies stream: `put` reads the file a chunk at a time, `get`
@@ -48,8 +48,8 @@ struct Cli {
     /// Address of a node in the cluster; several, comma-separated, are
     /// tried in order, and a request moves to the next when one fails.
     #[arg(
-        long = "node",
-        env = "DJBOD_NODE",
+        long = "bootstrap-node",
+        env = "DJBOD_BOOTSTRAP_NODE",
         global = true,
         value_delimiter = ','
     )]
@@ -117,13 +117,13 @@ enum Command {
         #[arg(long)]
         node_id: Option<String>,
     },
-    /// Ask a node which cluster it serves. Needs --node only; prints the
+    /// Ask a node which cluster it serves. Needs --bootstrap-node only; prints the
     /// cluster id alone, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
     /// --json adds the name and the node's build.
     GetClusterId,
-    /// Who is at --node: the cluster's name and id, the node's label, id
+    /// Who is at --bootstrap-node: the cluster's name and id, the node's label, id
     /// and address, its build, the document version it holds, and the
-    /// transport. Needs --node only.
+    /// transport. Needs --bootstrap-node only.
     Identity,
     /// Store a file (or standard input with `-`) under a key.
     Put {
@@ -349,7 +349,7 @@ async fn main() -> ExitCode {
 /// `get-cluster-id` requires.
 async fn connect(cli: &Cli) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let cluster = cli
         .cluster
@@ -359,7 +359,7 @@ async fn connect(cli: &Cli) -> anyhow::Result<Client> {
 
 async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
     options.cluster = cluster;
@@ -383,7 +383,7 @@ async fn reachable_node(cli: &Cli) -> anyhow::Result<(SocketAddr, Uuid)> {
 /// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1).
 async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let connector = connector(cli)?;
     let mut attempts = Vec::new();
