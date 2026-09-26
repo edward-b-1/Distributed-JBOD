@@ -290,9 +290,10 @@ export DJBOD_CLUSTER=<cluster-id>
 Put the web UI on one machine, bound to localhost, and reach it with an
 SSH tunnel (`ssh -L 5264:127.0.0.1:5264 nas1`) or from the machine
 itself. The UI has no login of its own. [Day to day](day-to-day.md#the-web-ui)
-has the details. [`contrib/systemd/djbod-ui.service`](../../contrib/systemd/djbod-ui.service)
+has the details. [`deploy/systemd/djbod-ui.service`](../../deploy/systemd/djbod-ui.service)
 is a unit that keeps it running, with the steps to install it at the
-top. Turn on [TLS](tls.md) before any of these addresses are
+top; its settings come from `/etc/djbod/client.env`, which the `djbod`
+command line reads too. Turn on [TLS](tls.md) before any of these addresses are
 reachable from a network you do not trust. Until then the protocol is
 plain TCP and any client that can connect can do everything, including
 administration.

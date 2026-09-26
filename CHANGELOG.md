@@ -19,6 +19,12 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Ship a systemd unit for djbod-ui
+
+### Added
+
+- `deploy/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user, reads `DJBOD_BOOTSTRAP_NODE`, `DJBOD_CLUSTER` and the TLS paths from `/etc/djbod/client.env`, which `deploy/systemd/client.env.example` shows and the `djbod` command line reads too, listens on localhost, and says how to serve the LAN instead. It does not wait for the local node, since the UI tries every listed node. The deployment guide points to it (#258).
+
 Pull request: Remove the UI's deprecated --node and DJBOD_NODE
 
 ### Removed
@@ -36,7 +42,6 @@ Pull request: Removed nodes stay in the cluster document as tombstones
 
 ### Added
 
-- `contrib/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user after `djbod-node.service`, takes the nodes and cluster from `DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER`, listens on localhost, and says how to serve the LAN instead. The deployment guide points to it (#258).
 - `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
 
 ## [4e127a6] - 2026-09-26

@@ -2,10 +2,17 @@
 #
 # Install:
 #   sudo install -m 755 target/release/djbod-ui /usr/local/bin/djbod-ui
-#   sudo install -m 644 contrib/systemd/djbod-ui.service /etc/systemd/system/
-#   (edit DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER below)
+#   sudo install -m 644 deploy/systemd/djbod-ui.service /etc/systemd/system/
+#   sudo install -m 640 -o root -g djbod deploy/systemd/client.env.example /etc/djbod/client.env
+#   (edit /etc/djbod/client.env: DJBOD_BOOTSTRAP_NODE, DJBOD_CLUSTER, and
+#    the DJBOD_TLS_* paths when the cluster's transport is tls)
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now djbod-ui
+#
+# The unit carries no site settings; they live in /etc/djbod/client.env,
+# which djbod-scrub.service and the djbod command line read too. The UI
+# does not need the node on this machine: it tries every address in
+# DJBOD_BOOTSTRAP_NODE, then every node the cluster document lists.
 #
 # The UI has no login: anyone who can reach its address can administer the
 # cluster. It listens on localhost; reach it with an SSH tunnel
@@ -16,19 +23,14 @@
 [Unit]
 Description=Distributed-JBOD administration web UI
 Documentation=https://github.com/edward-b-1/Distributed-JBOD
-After=network-online.target djbod-node.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=djbod
 Group=djbod
-# the nodes to connect through, tried in order; a local node belongs first
-Environment=DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
-# as printed by djbod-node init-cluster, or djbod get-cluster-id
-Environment=DJBOD_CLUSTER=<cluster-id>
-# for a cluster whose transport is tls, also set DJBOD_TLS_CA,
-# DJBOD_TLS_CERT and DJBOD_TLS_KEY to files the djbod user can read
+EnvironmentFile=-/etc/djbod/client.env
 ExecStart=/usr/local/bin/djbod-ui --listen 127.0.0.1:5264
 Restart=on-failure
 RestartSec=5s
