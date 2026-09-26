@@ -19,6 +19,12 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Ship a systemd unit for djbod-ui
+
+### Added
+
+- `deploy/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user, reads `DJBOD_BOOTSTRAP_NODE`, `DJBOD_CLUSTER` and the TLS paths from `/etc/djbod/client.env`, which `deploy/systemd/client.env.example` shows and the `djbod` command line reads too, listens on localhost, and says how to serve the LAN instead. It does not wait for the local node, since the UI tries every listed node. The deployment guide points to it (#258).
+
 Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
 
 ### Added
