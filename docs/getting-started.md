@@ -177,7 +177,7 @@ download, in a browser. It takes the same two settings as the client and
 serves on localhost:
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE (or the deprecated DJBOD_NODE) and DJBOD_CLUSTER as above
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER as above
 ```
 
 `--bootstrap-node` takes several addresses, comma-separated, tried in
