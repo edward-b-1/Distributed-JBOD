@@ -80,7 +80,8 @@ One machine, one node, started at boot and restarted if it fails.
    `ExecStart=` if you would rather it fixed what it finds unattended.
    The report is in `journalctl -u djbod-scrub`.
 
-7. **The web UI**, optionally, from the same `client.env`:
+7. **The web UI**, optionally, from the same `client.env`, which gives
+   it the nodes as `DJBOD_BOOTSTRAP_NODE`:
 
    ```sh
    sudo install -m 644 deploy/systemd/djbod-ui.service /etc/systemd/system/

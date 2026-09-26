@@ -241,10 +241,13 @@ which is a different command and requires a restart of that node.
 
 ## Keep the node running
 
-The repository does not ship a service unit. This is a unit that runs
-the binary you installed as `/usr/local/bin/djbod-node`, as a user that
-can read the config, the certificates, and the device directories.
-Standard error goes to the journal.
+[`deploy/systemd/djbod-node.service`](../../deploy/systemd/djbod-node.service)
+is the unit the repository ships, with a scrub timer and the web UI's
+unit beside it and the steps to install them in
+[deployment.md](../deployment.md). In outline it runs the binary you
+installed as `/usr/local/bin/djbod-node`, as a user that can read the
+config, the certificates, and the device directories. Standard error
+goes to the journal.
 
 ```ini
 [Unit]

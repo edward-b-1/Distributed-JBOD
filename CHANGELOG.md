@@ -19,6 +19,17 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
+
+### Added
+
+- `Dockerfile` and `.dockerignore`: a multi-stage, `--locked` build of all four binaries into a slim image with an unprivileged `djbod` user, volumes for the state directory and two device paths, a health check that asks the node for `status`, and an entry point that runs `init-cluster` or `join` the first time and `djbod-node run` after, all from `DJBOD_*` variables (SPEC 20.6). `DJBOD_GIT_COMMIT` is a build argument so the image's binaries carry a real build id.
+- `deploy/docker-compose.yml`: three nodes with two volumes each plus the web UI on a private network, a `2+1` cluster with a fixed id, each node listing the others as bootstrap peers.
+- `deploy/systemd/`: `djbod-node.service` (runs as `djbod`, restarts on failure, confined to its state directory and device mounts, which `RequiresMountsFor=` lists so an unmounted disk stops the node), `djbod-scrub.service` and `djbod-scrub.timer` (weekly, randomised, rate-limited, report-only, exit 2 not a failure), and `node.env.example`. The web UI's unit and `client.env.example` come with #259.
+- `docs/deployment.md`: the three ways step by step, with TLS and upgrade notes; the README and the guides point to it.
+- `djbod-node init-cluster --cluster-id <uuid>` (`DJBOD_CLUSTER_ID`) creates a cluster with a chosen id, so a Compose file can hand every node the same id before the first node has printed it (#73).
+- Version 0.2.18.
+
 Pull request: Remove the UI's deprecated --node and DJBOD_NODE
 
 ### Removed

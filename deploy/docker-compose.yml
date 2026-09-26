@@ -88,7 +88,8 @@ services:
     entrypoint: ["djbod-ui"]
     command: ["--listen", "0.0.0.0:5264"]
     environment:
-      DJBOD_NODE: 172.28.0.11:5263
+      # The UI tries these in order, then every node the document lists.
+      DJBOD_BOOTSTRAP_NODE: 172.28.0.11:5263,172.28.0.12:5263,172.28.0.13:5263
       DJBOD_CLUSTER: 3d1e7b3a-0c3f-4b0e-9a7f-1a2b3c4d5e6f
     ports:
       # Published on localhost only. Set DJBOD_UI_PORT if 5264 is taken on
