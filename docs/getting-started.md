@@ -126,9 +126,11 @@ target/release/djbod status
 cluster   4e9a31f4-...
 document  version 1
 answered  by node 15dd0194-...
+build     0.1.0+3c3fd58b0
+transport plain
 
-DEVICE                                NODE                                  STATE          TOTAL          FREE
-2bb98674-...                          15dd0194-...                          active      22.5 GiB      13.2 GiB
+LABEL  DEVICE        NODE LABEL  NODE          NODE BUILD       STATE      TOTAL      FREE
+-      2bb98674-...  -           15dd0194-...  0.1.0+3c3fd58b0  active  22.5 GiB  13.2 GiB
 ...
 ```
 
@@ -146,6 +148,24 @@ target/release/djbod delete notes/hello.txt
 target/release/djbod head notes/hello.txt         # NotFound, exit code 1
 ```
 
+A `get` whose data had to be reconstructed from parity, because a block on
+some disk failed its checksum, still writes the correct bytes, then says
+on standard error which block was bad and exits 2: the data is right, the
+disk is not, and every read of that object pays again until `djbod repair
+<key>` fixes it. A `get` or `head` of an object whose metadata record is
+missing from one of its disks, because the disk is dead or the copy was
+deleted, goes on with the copies that remain, names the disk on standard
+error, and exits 2 as well; `repair` rewrites a deleted copy, and a dead
+disk mends nothing until it is back or removed. A `put` that had to go
+around a disk the cluster cannot read stores the object on the others,
+names the disk on standard error, and exits 2 for the same reason. A
+`list` names the disks it could not read too; it exits 0 while fewer
+than k+m are out, since every object still has a record on a disk that
+was read, and 2 once that many are out and an object could be hidden.
+
+```sh
+```
+
 Add `--json` before the subcommand for machine-readable output, for
 example `djbod --json head photos/cat.jpg`.
 
@@ -157,8 +177,13 @@ download, in a browser. It takes the same two settings as the client and
 serves on localhost:
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_NODE and DJBOD_CLUSTER as above
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE (or the deprecated DJBOD_NODE) and DJBOD_CLUSTER as above
 ```
+
+`--bootstrap-node` takes several addresses, comma-separated, tried in
+order; when one node stops answering the UI moves to the next, and to
+any other node the cluster document lists, so a node leaving does not
+take the page down.
 
 Open <http://127.0.0.1:5264/>. Each action the page offers is one
 `djbod` command underneath, and it holds no state of its own, so the two
@@ -269,8 +294,11 @@ Each node reads every record and every block on its own devices against
 their checksums, no data crosses the network for that, and streams its
 findings back as it goes. The coordinator then checks what no single node
 can: that every object's record copies are complete and agree, and that
-every holder has its shard file. Exit code 0 when clean, 2 when anything
-was found or a node could not be scrubbed. `--rate-mib 50` caps each
+every listed device has its shard file. The exit code says what to do
+next: 0 clean, 2 damage found (or, with `--repair`, some of it could not
+be repaired), 3 the run did not finish and nothing was seen, so run it
+again, 4 the run did not finish and damage was seen (SPEC.md 20.1.2.3).
+`--rate-mib 50` caps each
 node's read rate; `--json` gives one event per line. On a real
 installation this runs from a cron job or a systemd timer on any one
 machine.
@@ -294,14 +322,14 @@ matches (SPEC.md 9.4.5).
 label wherever a command takes a device:
 
 ```sh
-target/release/djbod cluster set-label <device-uuid> nas1-bay0
+target/release/djbod cluster set-device-label <device-uuid> nas1-bay0
 target/release/djbod status                       # LABEL column
 target/release/djbod cluster set-state nas1-bay0 draining
 ```
 
 Labels are unique, up to 128 characters with no spaces, and live in the
 cluster document, so they follow the disk if it moves to another machine.
-`set-label <label> --clear` removes one. Nodes take labels the same way:
+`set-device-label <label> --clear` removes one. Nodes take labels the same way:
 
 ```sh
 target/release/djbod cluster set-node-label <node-uuid> nas1
@@ -316,6 +344,7 @@ log:
 
 ```sh
 target/release/djbod cluster set-name home-nas
+target/release/djbod cluster get-name             # prints home-nas; exit 1 when unnamed
 target/release/djbod status                       # cluster   home-nas (2e79b3df-…)
 ```
 
@@ -343,7 +372,7 @@ target/release/djbod move-shard photos/cat.jpg 2 --to <device-uuid>
 
 The shard is copied from its current device when that device is intact
 and rebuilt from the other shards when it is not. The record on every
-holder then gains a placement `revision` (SPEC.md 18.8.1), and the old
+device then gains a placement `revision` (SPEC.md 18.8.1), and the old
 copy is removed. If the old device was unreachable at the time, its copy
 stays behind; the next `scrub` reports it as a stale copy and `scrub
 --repair` removes it.
@@ -423,7 +452,22 @@ target/release/djbod cluster remove-device <device-uuid>
 
 The device stays listed as `removed` so the cluster recognises the disk
 if it ever comes back; remove the path from that node's configuration and
-restart the node. A whole node goes the same way: drain each of its
+restart the node.
+
+A disk that has died cannot be drained. `djbod status` shows it as
+`active, unavailable`; reads and writes go around it, and the scrub exits
+3 until it is dealt with. Retire it with
+
+```sh
+target/release/djbod cluster remove-device <device-uuid> --force
+```
+
+which marks it `removed` without draining, after telling you what that
+means and asking for the id back (`--yes` in a script). Nothing is moved
+by the command itself. Run `djbod scrub --repair` afterwards: every
+object that had a shard on the disk is rebuilt from its other shards onto
+the remaining disks. An object that had more than `m` shards on the disk
+cannot be, and the scrub says so. A whole node goes the same way: drain each of its
 devices, then
 
 ```sh

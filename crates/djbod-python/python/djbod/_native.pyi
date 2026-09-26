@@ -12,6 +12,8 @@ class ObjectInfo:
     k: int
     m: int
     block_size: int
+    reconstructed: list[dict[str, Any]]
+    missing_records: list[dict[str, Any]]
 
 class KeyEntry:
     key: str
@@ -21,6 +23,8 @@ class KeyEntry:
 class ListPage:
     keys: list[KeyEntry]
     truncated: bool
+    unread: list[dict[str, Any]]
+    complete: bool
     @property
     def next_start_after(self) -> Optional[str]: ...
 
@@ -29,6 +33,7 @@ class Status:
     cluster_name: Optional[str]
     document_version: int
     coordinator: str
+    nodes: list[dict[str, Any]]
     transport: str
     devices: list[dict[str, Any]]
 
@@ -37,7 +42,7 @@ class Identity:
     cluster_id: str
     cluster_name: Optional[str]
     node: Optional[str]
-    build: Optional[str]
+    build: str
     document_version: int
 
 class Client:

@@ -712,7 +712,7 @@ async fn sustained_writes_over_tls_all_complete() {
 
 /// A client that starts an upload and then goes silent must not hold
 /// shard writes open forever: the coordinator gives up after the idle
-/// timeout, aborts the holders, and no temporary file remains.
+/// timeout, aborts the shard writes, and no temporary file remains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_silent_upload_is_abandoned_after_the_idle_timeout() {
     let (listener, addr) = reserve_port().await;

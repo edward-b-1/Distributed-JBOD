@@ -13,10 +13,10 @@ use uuid::Uuid;
 
 use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_core::version::VersionId;
 use djbod_proto::message::{
     DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    NodeStatus, ObjectRead, ObjectWrite, RepairReport, Request, Response, ScrubEvent, StreamEnd,
+    UnavailableDevice,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -117,6 +117,8 @@ pub struct Status {
     pub cluster_name: Option<String>,
     pub document_version: u64,
     pub coordinator: NodeId,
+    /// Every node asked, with its build.
+    pub nodes: Vec<NodeStatus>,
     pub transport: Transport,
     pub devices: Vec<DeviceStatus>,
 }
@@ -128,7 +130,7 @@ pub struct Identity {
     pub cluster_id: Uuid,
     pub cluster_name: Option<String>,
     pub node: Option<NodeId>,
-    pub build: Option<String>,
+    pub build: String,
     pub document_version: u64,
 }
 
@@ -168,6 +170,14 @@ impl<E: serde::de::DeserializeOwned> EventRun<E> {
 pub struct ListPage {
     pub keys: Vec<KeyEntry>,
     pub truncated: bool,
+    /// The devices whose records did not contribute (SPEC 5.6, 15.1):
+    /// on a node that could not be reached, or unreadable by their node.
+    pub unread: Vec<UnavailableDevice>,
+    /// Whether every key can nonetheless appear: true while fewer than
+    /// k+m devices are unread, since every version has a record copy on
+    /// k+m devices; false once that many are out, when a key stored only
+    /// on them cannot be seen.
+    pub complete: bool,
 }
 
 impl ListPage {
@@ -308,13 +318,15 @@ impl Client {
 
     // ---------------------------------------------------------- objects
 
-    /// Store `body` under `key`. Returns the version id.
+    /// Store `body` under `key`. Returns the version id and the devices
+    /// the write went around because their node could not read them
+    /// (SPEC 5.6), empty when none.
     pub async fn put(
         &mut self,
         key: &str,
         body: &[u8],
         content_type: Option<String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let mut cursor = body;
         self.put_from_reader(
             key,
@@ -336,7 +348,7 @@ impl Client {
         source: &mut R,
         content_type: Option<String>,
         user_metadata: BTreeMap<String, String>,
-    ) -> Result<VersionId, ClientError> {
+    ) -> Result<ObjectWrite, ClientError> {
         let chunk = self.options.body_chunk;
         let result = self
             .connection()
@@ -348,22 +360,27 @@ impl Client {
         result
     }
 
-    /// Fetch an object and its record.
-    pub async fn get(&mut self, key: &str) -> Result<(MetadataRecord, Vec<u8>), ClientError> {
+    /// Fetch an object: its record, what the read had to reconstruct
+    /// from parity (SPEC 11.4) and which record copies it went without
+    /// (9.4.4), both empty when the object was whole, and the body.
+    pub async fn get(&mut self, key: &str) -> Result<(ObjectRead, Vec<u8>), ClientError> {
         let mut body = Vec::new();
-        let record = self.get_to_writer(key, &mut body).await?;
-        Ok((record, body))
+        let read = self.get_to_writer(key, &mut body).await?;
+        Ok((read, body))
     }
 
     /// Fetch an object, writing the body to `sink` as it arrives. Every
     /// block is checked against its checksum by the node before it is
     /// sent, and the whole object's checksum at the end; a failure part
-    /// way leaves `sink` with what arrived so far, and says so.
+    /// way leaves `sink` with what arrived so far, and says so. A block
+    /// the node reconstructed from parity is listed in the result: the
+    /// bytes are correct, the damage on disk is not repaired, and every
+    /// read pays again until it is (11.4).
     pub async fn get_to_writer<W: AsyncWrite + Unpin>(
         &mut self,
         key: &str,
         sink: &mut W,
-    ) -> Result<MetadataRecord, ClientError> {
+    ) -> Result<ObjectRead, ClientError> {
         let result = self
             .connection()
             .await?
@@ -374,8 +391,10 @@ impl Client {
         result
     }
 
-    /// The object's record without its body.
-    pub async fn head(&mut self, key: &str) -> Result<MetadataRecord, ClientError> {
+    /// The object's record without its body, and the record copies the
+    /// lookup went without (9.4.4), empty when every device had one.
+    /// Nothing is reconstructed, no block being read.
+    pub async fn head(&mut self, key: &str) -> Result<ObjectRead, ClientError> {
         match self
             .request(
                 Request::HeadObject {
@@ -385,7 +404,14 @@ impl Client {
             )
             .await?
         {
-            Response::HeadObject { record } => Ok(record),
+            Response::HeadObject {
+                record,
+                missing_records,
+            } => Ok(ObjectRead {
+                record,
+                reconstructed: Vec::new(),
+                missing_records,
+            }),
             other => Err(Self::unexpected("HeadObject", other)),
         }
     }
@@ -410,15 +436,32 @@ impl Client {
     /// One page of keys (15.2.1).
     pub async fn list(&mut self, query: ListQuery) -> Result<ListPage, ClientError> {
         match self.request(Request::ListKeys(query), true).await? {
-            Response::ListKeys { keys, truncated } => Ok(ListPage { keys, truncated }),
+            Response::ListKeys {
+                keys,
+                truncated,
+                unread,
+                complete,
+            } => Ok(ListPage {
+                keys,
+                truncated,
+                unread,
+                complete,
+            }),
             other => Err(Self::unexpected("ListKeys", other)),
         }
     }
 
-    /// Every key under `prefix`, page after page. Holds them all in
+    /// Every key under `prefix`, page after page, as one page that is
+    /// never truncated: `unread` is every device any page went without
+    /// and `complete` holds only if every page was. Holds them all in
     /// memory; for large listings page with [`Client::list`].
-    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<Vec<KeyEntry>, ClientError> {
-        let mut keys = Vec::new();
+    pub async fn list_all(&mut self, prefix: Option<&str>) -> Result<ListPage, ClientError> {
+        let mut all = ListPage {
+            keys: Vec::new(),
+            truncated: false,
+            unread: Vec::new(),
+            complete: true,
+        };
         let mut start_after: Option<String> = None;
         loop {
             let page = self
@@ -429,9 +472,15 @@ impl Client {
                 })
                 .await?;
             start_after = page.next_start_after().map(str::to_string);
-            keys.extend(page.keys);
+            all.keys.extend(page.keys);
+            for device in page.unread {
+                if !all.unread.contains(&device) {
+                    all.unread.push(device);
+                }
+            }
+            all.complete &= page.complete;
             if start_after.is_none() {
-                return Ok(keys);
+                return Ok(all);
             }
         }
     }
@@ -544,6 +593,7 @@ impl Client {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             } => Ok(Status {
@@ -551,6 +601,7 @@ impl Client {
                 cluster_name,
                 document_version,
                 coordinator,
+                nodes,
                 transport,
                 devices,
             }),

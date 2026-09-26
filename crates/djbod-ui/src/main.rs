@@ -2,12 +2,15 @@
 //! cluster.
 //!
 //! ```text
-//! djbod-ui --node 10.0.0.1:5263 --cluster <uuid> [--listen 127.0.0.1:5264]
+//! djbod-ui --bootstrap-node 10.0.0.1:5263,10.0.0.2:5263 --cluster <uuid> [--listen 127.0.0.1:5264]
 //! ```
 //!
-//! `--node`, `--cluster`, and the `--tls-*` settings may also come from
-//! the same environment variables as for the `djbod` client, and mean
-//! the same. The HTTP side has no authentication and listens on
+//! `--bootstrap-node`, `--cluster`, and the `--tls-*` settings may also
+//! come from the same environment variables as for the `djbod` client,
+//! and mean the same: the addresses are connection endpoints, tried in
+//! order, and once the cluster document has been fetched the other nodes
+//! it lists are tried too. `--node` and `DJBOD_NODE` are the deprecated
+//! spelling. The HTTP side has no authentication and listens on
 //! localhost unless told otherwise.
 
 use std::net::SocketAddr;
@@ -28,9 +31,26 @@ use djbod_ui::{router_for_hosts, Target};
     version
 )]
 struct Cli {
-    /// Address of any node in the cluster.
-    #[arg(long, env = "DJBOD_NODE")]
-    node: SocketAddr,
+    /// Addresses of nodes to connect through, comma-separated and tried
+    /// in order; when one fails the next is used, and the other nodes
+    /// the cluster document lists are tried after them. Connection
+    /// endpoints only: an operation always covers the whole cluster.
+    #[arg(
+        long = "bootstrap-node",
+        env = "DJBOD_BOOTSTRAP_NODE",
+        value_name = "ADDR[,ADDR...]",
+        value_delimiter = ','
+    )]
+    bootstrap_nodes: Vec<SocketAddr>,
+    /// Deprecated spelling of --bootstrap-node, with DJBOD_NODE as its
+    /// variable; used only when --bootstrap-node is not given.
+    #[arg(
+        long = "node",
+        env = "DJBOD_NODE",
+        value_name = "ADDR[,ADDR...]",
+        value_delimiter = ','
+    )]
+    nodes: Vec<SocketAddr>,
     /// The cluster id, as printed by `djbod-node init-cluster`.
     #[arg(long, env = "DJBOD_CLUSTER")]
     cluster: Uuid,
@@ -78,9 +98,25 @@ async fn main() -> ExitCode {
     }
 }
 
+/// The node addresses to use: the new spelling when given, else the
+/// deprecated one with a notice, else an error. Either may come from the
+/// command line or its variable; the new spelling wins from either.
+fn bootstrap_nodes(cli: &Cli) -> anyhow::Result<Vec<SocketAddr>> {
+    if !cli.bootstrap_nodes.is_empty() {
+        return Ok(cli.bootstrap_nodes.clone());
+    }
+    if !cli.nodes.is_empty() {
+        eprintln!(
+            "warning: --node and DJBOD_NODE are deprecated; use --bootstrap-node or DJBOD_BOOTSTRAP_NODE"
+        );
+        return Ok(cli.nodes.clone());
+    }
+    anyhow::bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE")
+}
+
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let target = Target {
-        node: cli.node,
+        nodes: bootstrap_nodes(&cli)?,
         cluster: cli.cluster,
         connector: connector(&cli)?,
     };
@@ -89,9 +125,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         .with_context(|| format!("listening on {}", cli.listen))?;
     let address = listener.local_addr()?;
     eprintln!(
-        "djbod-ui serving http://{address}/ for cluster {} via node {}{}",
+        "djbod-ui serving http://{address}/ for cluster {} via node{} {}{}",
         target.cluster,
-        target.node,
+        if target.nodes.len() == 1 { "" } else { "s" },
+        target
+            .nodes
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
         if cli.tls_ca.is_some() {
             " over TLS"
         } else {

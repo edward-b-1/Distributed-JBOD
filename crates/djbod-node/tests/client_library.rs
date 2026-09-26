@@ -127,19 +127,27 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
     assert_eq!(client.node_address(), Some(via_a));
 
     let body: Vec<u8> = (0..(2 * BLOCK as usize)).map(|i| (i % 251) as u8).collect();
-    let version = client
+    let write = client
         .put("k", &body, Some("application/octet-stream".to_string()))
         .await
         .expect("put");
-    let (record, got) = client.get("k").await.expect("get");
+    assert!(write.unavailable.is_empty());
+    let version = write.version;
+    let (read, got) = client.get("k").await.expect("get");
     assert_eq!(got, body);
-    assert_eq!(record.version, version);
+    assert_eq!(read.record.version, version);
+    assert!(read.reconstructed.is_empty());
     assert_eq!(
-        record.content_type.as_deref(),
+        read.record.content_type.as_deref(),
         Some("application/octet-stream")
     );
     let head = client.head("k").await.expect("head");
-    assert_eq!(head.size, body.len() as u64);
+    assert_eq!(head.record.size, body.len() as u64);
+    assert!(
+        head.missing_records.is_empty(),
+        "{:?}",
+        head.missing_records
+    );
     let missing = client.head("nothing").await.expect_err("missing");
     assert!(missing.is_not_found(), "{missing}");
 
@@ -159,18 +167,19 @@ async fn a_client_learns_the_cluster_id_does_every_operation_and_fails_over() {
     assert_eq!(page.next_start_after(), Some("k"));
     let all = client.list_all(None).await.expect("list all");
     assert_eq!(
-        all.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+        all.keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
         vec!["k", "k2", "k3"]
     );
+    assert!(all.unread.is_empty() && all.complete, "{all:?}");
     let under_prefix = client.list_all(Some("k2")).await.expect("list prefix");
-    assert_eq!(under_prefix.len(), 1);
+    assert_eq!(under_prefix.keys.len(), 1);
 
     let status = client.status().await.expect("status");
     assert_eq!(status.cluster_id, cluster);
     assert_eq!(status.devices.len(), 2);
     let identity = client.identity().await.expect("identity");
     assert_eq!(identity.node, Some(a.node.id()));
-    assert_eq!(identity.build.as_deref(), Some(djbod_client::BUILD));
+    assert_eq!(identity.build, djbod_client::BUILD);
     let document = client.cluster_document().await.expect("document");
     assert_eq!(document.version, a.node.document_version());
     let report = client.repair("k").await.expect("repair");
@@ -219,9 +228,9 @@ async fn the_blocking_client_does_the_same_without_async() {
             Default::default(),
         )?;
         let mut sink = Vec::new();
-        let record = client.get_to_writer("two", &mut sink)?;
+        let record = client.get_to_writer("two", &mut sink)?.record;
         assert_eq!(sink, body);
-        let keys = client.list_all(None)?;
+        let keys = client.list_all(None)?.keys;
         let status = client.status()?;
         Ok((
             keys.len(),
@@ -328,14 +337,14 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
         .expect("connect");
     let body: Vec<u8> = vec![3u8; BLOCK as usize + 1];
     client.put("k", &body, None).await.expect("put");
-    let record = client.head("k").await.expect("head");
-    let holders: Vec<_> = record.shards.iter().map(|s| s.device).collect();
+    let record = client.head("k").await.expect("head").record;
+    let listed: Vec<_> = record.shards.iter().map(|s| s.device).collect();
     let spare = a
         .node
         .devices()
         .iter()
         .map(|d| d.id())
-        .find(|d| !holders.contains(d))
+        .find(|d| !listed.contains(d))
         .expect("a device without a shard");
 
     // Move shard 0 to the spare device.
@@ -343,22 +352,30 @@ async fn move_shard_scrub_and_drain_are_client_methods() {
         .move_shard("k", 0, Some(spare))
         .await
         .expect("move shard");
-    assert_eq!(moved.source, holders[0]);
+    assert_eq!(moved.source, listed[0]);
     assert_eq!(moved.record.shards[0].device, spare);
     assert_eq!(moved.record.revision, record.revision + 1);
     assert!(moved.source_cleaned && !moved.rebuilt);
 
-    // A scrub: one summary per device, then a clean end.
+    // A scrub: one summary per device, every version whole, then a
+    // clean end.
     let mut run = client.scrub(None, false).await.expect("start scrub");
     let mut summaries = 0;
+    let mut whole = false;
     let end = loop {
         match run.next_event().await.expect("scrub event") {
             Ok(ScrubEvent::NodeSummary { .. }) => summaries += 1,
+            Ok(ScrubEvent::CrossCheckAvailability { versions, .. }) => {
+                whole = versions
+                    .iter()
+                    .all(|v| v.shards_available == v.shards_total);
+            }
             Ok(other) => panic!("unexpected scrub event {other:?}"),
             Err(end) => break end,
         }
     };
     assert_eq!(summaries, 3);
+    assert!(whole);
     assert!(end.error.is_none(), "{end:?}");
 
     // Drain the device shard 0 now sits on: an estimate, one move, an end.

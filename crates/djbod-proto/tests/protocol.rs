@@ -10,15 +10,17 @@ use djbod_core::keyhash::hash_key;
 use djbod_core::record::{
     DeviceId, MetadataRecord, ShardLocation, RECORD_FORMAT_VERSION, SYSTEM_NAME,
 };
+use djbod_core::stripe::FaultKind;
 use djbod_core::version::VersionId;
 use djbod_proto::frame::{
     Frame, FrameError, FrameHeader, MessageType, HEADER_LEN, MAX_PAYLOAD_LEN,
 };
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DataFrame, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord,
-    LookupCursor, Message, MessageError, RecordCursor, RepairReport, Request, Response,
-    ShardCondition, ShardRepair, StreamEnd, DATA_PREFIX_LEN,
+    DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, MessageError, MissingRecordCopy, NodeStatus,
+    Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response, ShardCondition,
+    ShardRepair, StreamEnd, UnavailableDevice, DATA_PREFIX_LEN,
 };
 use time::macros::datetime;
 use uuid::Uuid;
@@ -88,6 +90,7 @@ fn sample_document() -> ClusterDocument {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
             label: Some("nas1".to_string()),
+            state: djbod_core::cluster::NodeState::Active,
         }],
         devices: vec![DeviceEntry {
             id: device(1),
@@ -223,7 +226,7 @@ fn hello_round_trips_for_nodes_and_clients() {
         node_id: Some(node(1)),
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 7,
-        build: None,
+        build: "0.1.0+0123456789".to_string(),
         cluster_name: None,
     };
     round_trip(Message::Hello(hello.clone()));
@@ -245,7 +248,7 @@ fn hello_checks_catch_wrong_cluster_wrong_version_and_stale_nodes() {
         node_id: Some(node(1)),
         cluster_id: ours,
         document_version: 7,
-        build: None,
+        build: "0.1.0+0123456789".to_string(),
         cluster_name: None,
     };
     assert_eq!(good.check_against(ours, 7), Ok(()));
@@ -386,7 +389,7 @@ fn every_request_round_trips() {
         Request::LocalRecords {
             device: device(4),
             after: Some(RecordCursor {
-                key: "k".to_string(),
+                key_hash: hash_key(b"k"),
                 version: VersionId([1u8; 16]),
             }),
         },
@@ -455,6 +458,7 @@ fn every_response_round_trips() {
         label: Some("nas1-bay0".to_string()),
         node_label: Some("nas1".to_string()),
         state: DeviceState::Active,
+        available: true,
         total_bytes: 4 << 40,
         free_bytes: 3 << 40,
     };
@@ -481,21 +485,50 @@ fn every_response_round_trips() {
             document_version: 7,
             transport: djbod_core::cluster::Transport::Plain,
             coordinator: node(1),
+            nodes: vec![
+                NodeStatus {
+                    state: djbod_core::cluster::NodeState::Active,
+                    node: node(1),
+                    reachable: true,
+                    build: Some("0.1.0+0123456789".to_string()),
+                    error: None,
+                },
+                NodeStatus {
+                    state: djbod_core::cluster::NodeState::Active,
+                    node: node(2),
+                    reachable: false,
+                    build: None,
+                    error: Some("connection refused".to_string()),
+                },
+            ],
             devices: vec![status.clone()],
         },
         Response::PutObject {
             version: VersionId([1u8; 16]),
+            unavailable: vec![UnavailableDevice {
+                device: device(2),
+                node: node(1),
+            }],
         },
         Response::GetObject {
             record: sample_record(),
         },
         Response::HeadObject {
             record: sample_record(),
+            missing_records: vec![MissingRecordCopy {
+                device: device(3),
+                fault: RecordCopyFault::Stale { revision: 0 },
+            }],
         },
         Response::DeleteObject,
         Response::ListKeys {
             keys: vec![entry.clone()],
             truncated: false,
+            unread: vec![UnavailableDevice {
+                device: device(2),
+                node: node(1),
+            }],
+            complete: true,
         },
         Response::RepairObject(RepairReport {
             key: "k".to_string(),
@@ -548,10 +581,14 @@ fn every_response_round_trips() {
             node: node(1),
             document_version: 7,
             tls_ready: true,
+            build: "0.1.0+0123456789".to_string(),
             devices: vec![status],
         },
         Response::LocalRecords {
-            records: vec![sample_record()],
+            records: vec![DeviceRecord {
+                record: sample_record(),
+                shard_present: true,
+            }],
             truncated: false,
         },
         Response::LocalLookup {
@@ -560,10 +597,12 @@ fn every_response_round_trips() {
                 record: sample_record(),
             }],
             truncated: false,
+            unread: vec![device(2)],
         },
         Response::LocalList {
             entries: vec![entry],
             truncated: true,
+            unread: vec![device(2)],
         },
         Response::PutShardReady,
         Response::PutShardDone,
@@ -611,9 +650,43 @@ fn stream_end_round_trips_in_all_three_shapes() {
             error: None,
             object_size: Some(10 << 20),
             object_checksum: Some(BlockChecksum(5)),
+            reconstructed: vec![
+                Reconstruction {
+                    shard_index: 2,
+                    device: device(1),
+                    fault: FaultKind::ChecksumMismatch {
+                        stored: BlockChecksum(1),
+                        computed: BlockChecksum(2),
+                    },
+                    first_stripe: 7,
+                    stripes: 1,
+                },
+                Reconstruction {
+                    shard_index: 0,
+                    device: device(2),
+                    fault: FaultKind::Unavailable {
+                        reason: "node unreachable".to_string(),
+                    },
+                    first_stripe: 0,
+                    stripes: 40,
+                },
+            ],
+            missing_records: vec![
+                MissingRecordCopy {
+                    device: device(2),
+                    fault: RecordCopyFault::Unavailable {
+                        reason: "node unreachable".to_string(),
+                    },
+                },
+                MissingRecordCopy {
+                    device: device(3),
+                    fault: RecordCopyFault::Missing,
+                },
+            ],
         },
     });
-    // The success case is tiny.
+    // The success case is tiny: one map with an empty `reconstructed`
+    // and an empty `missing_records`.
     let ok = Message::EndOfStream {
         id: 1,
         end: StreamEnd::ok(),
@@ -621,7 +694,7 @@ fn stream_end_round_trips_in_all_three_shapes() {
     .encode()
     .expect("encode");
     assert!(
-        ok.len() <= HEADER_LEN + 4,
+        ok.len() <= HEADER_LEN + 6 + "reconstructed".len() + "missing_records".len(),
         "StreamEnd::ok is {} bytes",
         ok.len()
     );
@@ -642,7 +715,7 @@ fn request_ids_are_carried_and_handshake_frames_have_none() {
         node_id: None,
         cluster_id: Uuid::from_u128(0xC1),
         document_version: 0,
-        build: None,
+        build: "0.1.0+0123456789".to_string(),
         cluster_name: None,
     });
     assert_eq!(hello.request_id(), None);

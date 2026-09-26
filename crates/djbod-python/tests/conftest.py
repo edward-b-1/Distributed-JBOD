@@ -30,6 +30,10 @@ def _wait_for(port: int, process: subprocess.Popen, seconds: float = 20.0) -> No
     raise RuntimeError("djbod-node did not start listening")
 
 
+# The device directories of the test node, for tests that damage a shard.
+DEVICE_DIRS: list = []
+
+
 @pytest.fixture(scope="session")
 def node(tmp_path_factory):
     binary = os.environ.get("DJBOD_NODE_BIN") or shutil.which("djbod-node")
@@ -37,6 +41,7 @@ def node(tmp_path_factory):
         pytest.skip("set DJBOD_NODE_BIN to a built djbod-node")
     root = tmp_path_factory.mktemp("node")
     devices = [root / "d0", root / "d1"]
+    DEVICE_DIRS.extend(devices)
     for device in devices:
         device.mkdir()
     (root / "state").mkdir()

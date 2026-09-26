@@ -589,3 +589,146 @@ fn cleanup_removes_only_old_temporaries() {
     assert!(fresh.exists());
     assert!(real.exists());
 }
+
+/// SPEC 15.2.2: a walk from a cursor visits the records after it, in key
+/// hash then version order, reports whether the shard file is present,
+/// and stops when asked.
+#[test]
+fn walk_records_from_a_cursor_resumes_in_hash_order_and_reports_shard_presence() {
+    use djbod_core::device::WalkStep;
+    let dir = tempfile::tempdir().expect("failed to create temp dir");
+    let device = new_device(dir.path());
+    let scheme = Scheme::new(1, 0).expect("valid scheme");
+    let mut expected: Vec<(KeyHash, VersionId)> = Vec::new();
+    for i in 0..12u8 {
+        let key = format!("key-{i}");
+        let version = VersionId([i; 16]);
+        store_object(
+            std::slice::from_ref(&device),
+            scheme,
+            &key,
+            version,
+            &xorshift64_bytes(50, i as u64),
+        );
+        expected.push((hash_key(key.as_bytes()), version));
+    }
+    expected.sort();
+    // A second version of one key, to check the version order within a
+    // key directory; and one shard file removed, to check the flag.
+    let extra_key = "key-3";
+    store_object(
+        std::slice::from_ref(&device),
+        scheme,
+        extra_key,
+        VersionId([200; 16]),
+        &xorshift64_bytes(50, 99),
+    );
+    expected.push((hash_key(extra_key.as_bytes()), VersionId([200; 16])));
+    expected.sort();
+    let (missing_hash, missing_version) = expected[5];
+    fs::remove_file(
+        device
+            .object_directory(&missing_hash)
+            .join(shard_file_name(&missing_version, ShardIndex(0))),
+    )
+    .expect("remove shard");
+
+    let mut seen = Vec::new();
+    device
+        .walk_records_from(
+            None,
+            |r, present| {
+                seen.push((r.key_hash, r.version, present));
+                WalkStep::Continue
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk");
+    assert_eq!(
+        seen.iter().map(|(h, v, _)| (*h, *v)).collect::<Vec<_>>(),
+        expected,
+        "hash then version order"
+    );
+    assert!(seen
+        .iter()
+        .all(|(h, v, present)| *present != ((*h, *v) == (missing_hash, missing_version))));
+
+    // From a cursor in the middle: exactly what follows it.
+    let cursor = expected[4];
+    let mut after = Vec::new();
+    device
+        .walk_records_from(
+            Some((&cursor.0, cursor.1)),
+            |r, _| {
+                after.push((r.key_hash, r.version));
+                WalkStep::Continue
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk from cursor");
+    assert_eq!(after, expected[5..].to_vec());
+
+    // Stopping stops.
+    let mut count = 0;
+    device
+        .walk_records_from(
+            None,
+            |_, _| {
+                count += 1;
+                if count == 3 {
+                    WalkStep::Stop
+                } else {
+                    WalkStep::Continue
+                }
+            },
+            |p, e| panic!("{}: {e}", p.display()),
+        )
+        .expect("walk with stop");
+    assert_eq!(count, 3);
+}
+
+/// SPEC 5.6: a write creates the partition and key directories with plain
+/// `mkdir` and never the objects tree above them; with the tree gone the
+/// write is refused as unavailable and nothing reappears.
+#[test]
+fn a_write_never_recreates_the_objects_tree() {
+    let dirs: Vec<tempfile::TempDir> = (0..3)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let devices: Vec<Device> = dirs.iter().map(|d| new_device(d.path())).collect();
+    let scheme = Scheme::new(2, 1).expect("scheme");
+    let object = xorshift64_bytes(3000, 4);
+    let record = store_object(&devices, scheme, "k", VersionId([4u8; 16]), &object);
+    let device = &devices[0];
+    let dir = &dirs[0];
+    let objects = dir.path().join("objects");
+    fs::remove_dir_all(&objects).expect("destroy the objects tree");
+
+    let mut again = record.clone();
+    again.version = VersionId([5u8; 16]);
+    assert!(matches!(
+        device.write_record(&again),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    let header = ShardFileHeader {
+        scheme,
+        shard_index: ShardIndex(0),
+        key_hash: record.key_hash,
+        version_id: again.version,
+        block_length: record.block_size,
+    };
+    assert!(matches!(
+        device.begin_shard(&record.key_hash, header, object.len() as u64),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    assert!(!objects.exists(), "the write recreated the objects tree");
+
+    // The identity file alone is not enough either: the tree is made by
+    // initialise and by nothing else.
+    fs::remove_file(dir.path().join(DEVICE_IDENTITY_FILE)).expect("remove identity");
+    assert!(matches!(
+        device.write_record(&again),
+        Err(DeviceError::Unavailable { .. })
+    ));
+    assert!(!objects.exists());
+}

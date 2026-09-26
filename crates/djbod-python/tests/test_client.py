@@ -49,6 +49,7 @@ def test_objects_round_trip(client, tmp_path):
     assert len(page.keys) == 1 and page.truncated and page.next_start_after == page.keys[0].key
     rest = client.list(start_after=page.next_start_after)
     assert not rest.truncated
+    assert rest.complete and rest.unread == []
     assert [k.key for k in page.keys + rest.keys] == ["big", "photos/cat.jpg"]
 
     report = client.repair("big")
@@ -83,6 +84,8 @@ def test_status_and_document(client):
     assert status.transport == "plain"
     assert len(status.devices) == 2
     assert status.devices[0]["state"] == "active"
+    assert [n["node"] for n in status.nodes] == [status.coordinator]
+    assert status.nodes[0]["build"] == client.identity().build
     document = client.cluster_document()
     assert document["name"] == "pytest"
     assert document["version"] == status.document_version
@@ -102,3 +105,61 @@ def test_device_contents_are_counted(client):
     with pytest.raises(ValueError):
         client.device_contents("not a uuid")
     client.delete("counted")
+
+
+def test_a_reconstructed_read_warns_and_returns_correct_data(client):
+    import warnings
+
+    from conftest import DEVICE_DIRS
+
+    body = bytes(range(256)) * 300
+    client.put("damaged", body)
+    # 1+1: shard 0 is the data, shard 1 the parity. Flip a byte of block 0.
+    shard = next(p for d in DEVICE_DIRS for p in d.rglob("*.0.shard"))
+    raw = bytearray(shard.read_bytes())
+    raw[4096 + 3] ^= 0x01
+    shard.write_bytes(raw)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert client.get("damaged") == body
+    degraded = [w.message for w in caught if isinstance(w.message, djbod.DegradedRead)]
+    assert len(degraded) == 1, [str(w.message) for w in caught]
+    assert degraded[0].key == "damaged"
+    assert degraded[0].reconstructed[0]["first_stripe"] == 0
+    assert degraded[0].reconstructed[0]["stripes"] == 1
+    assert degraded[0].reconstructed[0]["shard_index"] == 0
+    assert degraded[0].reconstructed[0]["fault"]["kind"] == "checksum_mismatch"
+    # Nothing was repaired: the next read reconstructs again.
+    with warnings.catch_warnings(record=True) as again:
+        warnings.simplefilter("always")
+        info = client.get_to_file("damaged", str(shard.parent / "out.bin"))
+    assert any(isinstance(w.message, djbod.DegradedRead) for w in again)
+    assert info.reconstructed[0]["first_stripe"] == 0
+    assert info.missing_records == []
+
+
+def test_a_read_without_every_record_copy_warns_and_names_the_copy(client):
+    import warnings
+
+    from conftest import DEVICE_DIRS
+
+    body = b"copies" * 1000
+    client.put("thin", body)
+    # 1+1: two record copies, one beside each shard. Delete one; the other
+    # vouches for the record (k = 1), so reads go on and say so (SPEC 9.4.4).
+    copies = [p for d in DEVICE_DIRS for p in d.rglob("*.meta.json") if b"thin" in p.read_bytes()]
+    assert len(copies) == 2
+    copies[0].unlink()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        info = client.head("thin")
+        assert client.get("thin") == body
+    degraded = [w.message for w in caught if isinstance(w.message, djbod.DegradedRead)]
+    assert len(degraded) == 2, [str(w.message) for w in caught]
+    assert degraded[0].reconstructed == []
+    assert len(degraded[0].missing_records) == 1
+    assert degraded[0].missing_records[0]["fault"]["kind"] == "missing"
+    assert info.missing_records == degraded[0].missing_records
+    assert "record cop" in str(degraded[0])
+    # Nothing was rewritten by the read.
+    assert not copies[0].exists()

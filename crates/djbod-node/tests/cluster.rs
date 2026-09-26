@@ -17,7 +17,9 @@ use djbod_node::server;
 use djbod_node::transport::Connector;
 use djbod_proto::frame::{Frame, MessageType};
 use djbod_proto::handshake::{Hello, PeerKind, PROTOCOL_VERSION};
-use djbod_proto::message::{DrainEvent, ErrorCode, Message, Request, Response, ShardCondition};
+use djbod_proto::message::{
+    DrainEvent, ErrorCode, ListQuery, Message, RecordCopyFault, Request, Response, ShardCondition,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -185,7 +187,7 @@ async fn three_nodes_join_and_objects_spread_across_them() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let document = c.node.document();
@@ -224,25 +226,145 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
         .put_object("k", &body, 100_000, None)
         .await
         .expect("put");
-
-    b.stop();
-    // Every operation that must reach b fails, naming it (16.1, 16.2).
-    match client.request(Request::Status).await {
-        Err(ConnectionError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::NodeUnreachable);
-            assert_eq!(detail.node, Some(b.node.id()));
-        }
-        other => panic!("expected NodeUnreachable, got {other:?}"),
-    }
-    match client
+    let record = match client
         .request(Request::HeadObject {
             key: "k".to_string(),
         })
         .await
+        .expect("head")
     {
-        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NodeUnreachable),
-        other => panic!("expected NodeUnreachable, got {other:?}"),
+        Response::HeadObject { record, .. } => record,
+        other => panic!("{other:?}"),
+    };
+    let on_b: Vec<DeviceId> = record
+        .shards
+        .iter()
+        .map(|s| s.device)
+        .filter(|d| b.node.device(*d).is_some())
+        .collect();
+
+    b.stop();
+    // Status is the one request that goes on without b (19.1.3, 5.6): it
+    // names b as unreachable and lists b's devices as unavailable.
+    match client.request(Request::Status).await {
+        Ok(Response::Status { nodes, devices, .. }) => {
+            let gone = nodes
+                .iter()
+                .find(|n| n.node == b.node.id())
+                .expect("b listed");
+            assert!(!gone.reachable, "{gone:?}");
+            assert!(gone.error.is_some(), "{gone:?}");
+            assert!(devices
+                .iter()
+                .filter(|d| d.node == b.node.id())
+                .all(|d| !d.available && d.free_bytes == 0));
+            assert!(devices
+                .iter()
+                .filter(|d| d.node == a.node.id())
+                .all(|d| d.available));
+        }
+        other => panic!("expected Status, got {other:?}"),
     }
+    // A read goes around b when the coding allows (9.4.4, 11.4): with one
+    // of k's three shards on b, two copies vouch for the record and two
+    // shards rebuild the body; the reply names b's device as unavailable.
+    // With two shards on b, one copy is fewer than k and the read is
+    // refused with b's own code, since b is what needs attention.
+    let head = client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await;
+    if on_b.len() <= 1 {
+        match head {
+            Ok(Response::HeadObject {
+                record: found,
+                missing_records,
+            }) => {
+                assert_eq!(found, record);
+                assert_eq!(missing_records.len(), on_b.len(), "{missing_records:?}");
+                for copy in &missing_records {
+                    assert!(on_b.contains(&copy.device));
+                    assert!(
+                        matches!(copy.fault, RecordCopyFault::Unavailable { .. }),
+                        "{copy:?}"
+                    );
+                }
+            }
+            other => panic!("expected the record, got {other:?}"),
+        }
+        let (read, got) = client.get_object("k").await.expect("get around b");
+        assert_eq!(got, body);
+        assert_eq!(read.missing_records.len(), on_b.len());
+        // A data shard on b is rebuilt from parity; a parity shard on b
+        // is simply not read (11.3).
+        let data_on_b = record
+            .shards
+            .iter()
+            .filter(|s| on_b.contains(&s.device) && s.index < record.k)
+            .count();
+        assert_eq!(
+            read.reconstructed.len(),
+            data_on_b,
+            "{:?}",
+            read.reconstructed
+        );
+    } else {
+        match head {
+            Err(ConnectionError::Remote(detail)) => {
+                assert_eq!(detail.code, ErrorCode::NodeUnreachable, "{detail:?}");
+                assert!(
+                    detail.message.contains("at least k = 2"),
+                    "{}",
+                    detail.message
+                );
+            }
+            other => panic!("expected NodeUnreachable, got {other:?}"),
+        }
+    }
+    // Two of four devices out is fewer than k+m: a key found nowhere is
+    // still an authoritative NotFound (13.3).
+    match client
+        .request(Request::HeadObject {
+            key: "nothing".to_string(),
+        })
+        .await
+    {
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+    // A listing goes around b too (15.1): two of four devices out is
+    // fewer than k+m, so every key still appears, and the page names
+    // b's devices as the ones it went without.
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: None,
+            start_after: None,
+            limit: None,
+        }))
+        .await
+    {
+        Ok(Response::ListKeys {
+            keys,
+            unread,
+            complete,
+            ..
+        }) => {
+            assert_eq!(
+                keys.iter().map(|k| k.key.as_str()).collect::<Vec<_>>(),
+                vec!["k"]
+            );
+            assert!(complete, "{unread:?}");
+            let mut named: Vec<DeviceId> = unread.iter().map(|u| u.device).collect();
+            named.sort();
+            let mut on_b_node: Vec<DeviceId> = b.node.devices().iter().map(|d| d.id()).collect();
+            on_b_node.sort();
+            assert_eq!(named, on_b_node);
+            assert!(unread.iter().all(|u| u.node == b.node.id()));
+        }
+        other => panic!("expected ListKeys, got {other:?}"),
+    }
+    // Every other operation that must reach b fails, naming it (16.1, 16.2).
     match client.put_object("k2", &body, 100_000, None).await {
         Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::NodeUnreachable)
@@ -263,6 +385,55 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
     let mut client = a.client().await;
     let (_, got) = client.get_object("k").await.expect("get after restart");
     assert_eq!(got, body);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
+    // 1+1: two record copies per version over four devices, two on each
+    // node. With b down, two devices are out, which is k+m, so a version
+    // with both copies on b leaves no trace on a: the listing shows what
+    // a holds and says it may be incomplete (15.1, 13.3). Whether any
+    // version is in fact hidden depends on placement, which on one
+    // shared filesystem ties on free space and picks the same pair every
+    // time (10.5); the listing is right either way.
+    let a = first_node(2, 1, 1).await;
+    let mut b = joined_node(2, &a).await;
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 8, 300).await;
+    let on_a: Vec<DeviceId> = a.node.devices().iter().map(|d| d.id()).collect();
+    let mut visible: Vec<String> = records
+        .iter()
+        .filter(|r| on_a.iter().any(|d| r.shard_on(*d).is_some()))
+        .map(|r| r.key.clone())
+        .collect();
+    visible.sort();
+
+    b.stop();
+    match client
+        .request(Request::ListKeys(ListQuery {
+            prefix: None,
+            start_after: None,
+            limit: None,
+        }))
+        .await
+    {
+        Ok(Response::ListKeys {
+            keys,
+            truncated,
+            unread,
+            complete,
+        }) => {
+            assert!(!complete);
+            assert!(!truncated);
+            assert_eq!(unread.len(), 2, "{unread:?}");
+            assert!(unread.iter().all(|u| u.node == b.node.id()));
+            assert_eq!(
+                keys.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
+                visible
+            );
+        }
+        other => panic!("expected ListKeys, got {other:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -517,7 +688,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }
@@ -566,7 +737,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
     std::fs::write(&path1, &bytes).expect("write");
 
     // Damage 2: obj-1's shard 2 file deleted (local finding: record
-    // without shard; cross-node: shard missing on holder).
+    // without shard; cross-node: shard missing on its device).
     let (_node2, device2, path2) = shard_path(&records[1], 2);
     std::fs::remove_file(&path2).expect("remove");
 
@@ -619,7 +790,7 @@ async fn cluster_scrub_finds_local_and_cross_node_damage_and_repairs_it() {
         })
         .collect();
     assert!(
-        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnHolder { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
+        cluster.iter().any(|f| matches!(f, ClusterFinding::ShardMissingOnDevice { key, device, shard_index: 2, .. } if key == "obj-1" && *device == device2)),
         "{cluster:?}"
     );
     assert!(
@@ -679,7 +850,7 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
         .await
         .expect("put");
     b.stop();
-    let (events, end) = run_scrub(&mut client, false).await;
+    let (events, end) = run_scrub(&mut client, true).await;
     assert!(events
         .iter()
         .any(|e| matches!(e, ScrubEvent::NodeFailed { node, .. } if *node == b.node.id())));
@@ -690,8 +861,31 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
             .count(),
         1
     );
+    // The cross-node checks cannot run without b: its device's stream
+    // cannot be opened, so they stop before the first version; nothing is
+    // damaged and nothing is repaired.
+    assert!(
+        events.iter().any(|e| matches!(e,
+            ScrubEvent::CrossCheckStopped { node, versions_checked: 0, versions_unchecked: None, .. }
+            if *node == b.node.id())),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            ScrubEvent::ClusterFinding(_)
+                | ScrubEvent::Repaired { .. }
+                | ScrubEvent::RepairFailed { .. }
+        )),
+        "an unreachable node is not damage: {events:?}"
+    );
     let error = end.error.expect("incomplete scrub is reported");
     assert_eq!(error.code, ErrorCode::NodeUnreachable);
+    assert!(
+        error.message.contains("stopped after 0 versions"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -716,7 +910,7 @@ async fn a_second_concurrent_write_of_the_same_shard_is_refused() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: a.node.cluster_id(),
         document_version: a.node.document_version(),
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     let mut first = Connection::connect(a.addr, hello()).await.expect("connect");
@@ -773,7 +967,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let nodes = [&a, &b, &c, &d];
@@ -789,7 +983,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
         .find(|dev| before.shard_on(*dev).is_none())
         .expect("one device holds nothing");
 
-    // Move shard 0 from its holder to the spare device on another node.
+    // Move shard 0 from its device to the spare device on another node.
     let source = before.shards[0].device;
     let after = match client
         .request(Request::MoveShard {
@@ -821,7 +1015,7 @@ async fn move_shard_across_nodes_and_a_stale_copy_is_found_and_removed_by_scrub(
     let (_, got) = client.get_object("k").await.expect("get");
     assert_eq!(got, body);
 
-    // While a holder's node is down, the lookup itself is fail-stop (16.1).
+    // While a device's node is down, the lookup itself is fail-stop (16.1).
     let victim = after
         .shards
         .iter()
@@ -939,7 +1133,7 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }
@@ -993,7 +1187,7 @@ async fn set_state_reaches_every_node_and_drain_moves_shards_across_nodes() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => assert!(record.shard_on(device).is_none()),
+            Response::HeadObject { record, .. } => assert!(record.shard_on(device).is_none()),
             other => panic!("{other:?}"),
         }
         let mut c_client = c.client().await;
@@ -1049,7 +1243,7 @@ async fn put_objects(
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => records.push(record),
+            Response::HeadObject { record, .. } => records.push(record),
             other => panic!("{other:?}"),
         }
     }
@@ -1180,8 +1374,21 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = admin::remove_node(&Connector::plain(), a.addr, cluster, d_id)
         .await
         .expect("remove node");
-    assert!(document.node(d_id).is_none());
-    assert!(document.device(device).is_none());
+    // Tombstones (18.2.1): the node and its device stay, marked removed,
+    // and a second removal says so.
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert_eq!(
+        document.device(device).map(|d| d.state),
+        Some(DeviceState::Removed)
+    );
+    assert_eq!(document.active_nodes().count(), 3);
+    match admin::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
+        Err(admin::AdminError::NodeRemoved(node)) => assert_eq!(node, d_id),
+        other => panic!("expected NodeRemoved, got {other:?}"),
+    }
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }
@@ -1203,7 +1410,14 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
         Err(other) => panic!("expected NotAMember, got {other:?}"),
         Ok(_) => panic!("expected NotAMember, but the node opened"),
     }
-    // Nor can its device rejoin unwiped; wiped, it joins as a new device.
+    // Nor can it rejoin under its old id, which is a tombstone; with a
+    // new id, its device is refused unwiped and, wiped, joins as a new
+    // device.
+    match membership::join(&d.config, a.addr, cluster, true).await {
+        Err(membership::MembershipError::RemovedNode { node }) => assert_eq!(node, d_id),
+        other => panic!("expected RemovedNode, got {other:?}"),
+    }
+    d.config.node_id = Uuid::new_v4();
     match membership::join(&d.config, a.addr, cluster, false).await {
         Err(membership::MembershipError::RemovedDevice {
             path,
@@ -1217,6 +1431,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = membership::join(&d.config, a.addr, cluster, true)
         .await
         .expect("join wiped");
+    let d_id = djbod_core::cluster::NodeId(d.config.node_id);
     let new_device = document
         .devices
         .iter()
@@ -1277,7 +1492,15 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
     let document = admin::execute_forced_removal(&Connector::plain(), &plan)
         .await
         .expect("execute");
-    assert!(document.node(d_id).is_none());
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert!(document
+        .devices
+        .iter()
+        .filter(|d| d.node == d_id)
+        .all(|d| d.state == DeviceState::Removed));
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }
@@ -1321,7 +1544,6 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
-    use djbod_proto::message::ListQuery;
     let a = first_node(1, 2, 1).await;
     let b = joined_node(1, &a).await;
     let c = joined_node(1, &b).await;
@@ -1345,7 +1567,9 @@ async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
                 .await
                 .expect("list")
             {
-                Response::ListKeys { keys, truncated } => {
+                Response::ListKeys {
+                    keys, truncated, ..
+                } => {
                     assert!(!keys.is_empty());
                     assert!(keys.len() <= limit as usize);
                     start_after = keys.last().map(|k| k.key.clone());
@@ -1370,7 +1594,9 @@ async fn a_paged_listing_over_several_nodes_yields_every_key_once() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let got: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(got, vec!["obj-5", "obj-6"]);
             assert!(!truncated);
@@ -1467,7 +1693,9 @@ async fn a_short_key_on_one_node_does_not_hide_a_long_key_left_out_by_another() 
             .await
             .expect("list")
         {
-            Response::ListKeys { keys, truncated } => {
+            Response::ListKeys {
+                keys, truncated, ..
+            } => {
                 if first {
                     assert_eq!(keys.len(), 8, "first page stops at the horizon");
                     assert!(keys.last().expect("non-empty").key.starts_with("a7-"));
@@ -1703,7 +1931,7 @@ async fn a_document_with_a_field_this_build_does_not_know_is_refused() {
         .await
         .expect("hello");
     match wire::read_message(&mut stream).await.expect("peer hello") {
-        Message::Hello(peer) => assert_eq!(peer.build.as_deref(), Some(djbod_client::BUILD)),
+        Message::Hello(peer) => assert_eq!(peer.build, djbod_client::BUILD),
         other => panic!("expected Hello, got {other:?}"),
     }
     stream
@@ -1877,10 +2105,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
         asking.peer_hello().cluster_name.as_deref(),
         Some("Home NAS")
     );
-    assert_eq!(
-        asking.peer_hello().build.as_deref(),
-        Some(djbod_client::BUILD)
-    );
+    assert_eq!(asking.peer_hello().build, djbod_client::BUILD);
     assert_eq!(asking.peer_hello().node_id, Some(a.node.id()));
     // Nothing else is served on that connection.
     assert!(
@@ -1897,7 +2122,7 @@ async fn a_client_can_ask_which_cluster_a_node_serves() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: Uuid::nil(),
         document_version: a.node.document_version(),
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     match Connection::connect(a.addr, asking_node).await {
