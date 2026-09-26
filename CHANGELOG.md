@@ -29,6 +29,7 @@ Pull request: Removed nodes stay in the cluster document as tombstones
 
 ### Added
 
+- `contrib/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user after `djbod-node.service`, takes the nodes and cluster from `DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER`, listens on localhost, and says how to serve the LAN instead. The deployment guide points to it (#258).
 - `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
 
 ## [4e127a6] - 2026-09-26
