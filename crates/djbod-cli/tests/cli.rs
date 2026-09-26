@@ -906,6 +906,13 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     let (ok, out, _) = djbod(&test, &["--json", "status"]);
     assert!(ok);
     assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
+    // The name alone, for scripts.
+    let (ok, out, err) = djbod(&test, &["cluster", "get-name"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "Home NAS\n");
+    let (ok, out, _) = djbod(&test, &["--json", "cluster", "get-name"]);
+    assert!(ok);
+    assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
 
     let (ok, out, _) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
     assert!(ok);
@@ -920,6 +927,11 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     let (ok, out, _) = djbod(&test, &["status"]);
     assert!(ok);
     assert!(out.contains(&format!("cluster   {cluster}\n")), "{out}");
+    // No name: nothing on standard output, and a non-zero exit.
+    let (ok, out, err) = djbod(&test, &["cluster", "get-name"]);
+    assert!(!ok);
+    assert_eq!(out, "");
+    assert!(err.contains("has no name"), "{err}");
 }
 
 /// `get-cluster-id` needs only `--node` (SPEC 19.1.5.1).

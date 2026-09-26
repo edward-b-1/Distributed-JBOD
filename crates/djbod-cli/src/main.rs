@@ -212,6 +212,10 @@ enum ClusterCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Print the cluster's name alone, for scripts, as get-cluster-id
+    /// prints the id. Exits 1 with a message on standard error when no
+    /// name is set. --json gives the id and the name, null when none.
+    GetName,
     /// Give a node a short name shown beside its UUID, or clear it with
     /// --clear. Node labels are unique within the cluster.
     SetNodeLabel {
@@ -1558,6 +1562,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             "name cleared from cluster {cluster} (document version {})",
                             document.version
                         );
+                    }
+                }
+                ClusterCommand::GetName => {
+                    let document =
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "cluster_id": cluster,
+                                "cluster_name": document.name,
+                            }))?
+                        );
+                    } else if let Some(name) = &document.name {
+                        println!("{name}");
+                    } else {
+                        eprintln!("the cluster has no name; set one with `djbod cluster set-name`");
+                        std::process::exit(1);
                     }
                 }
                 ClusterCommand::SetNodeLabel {
