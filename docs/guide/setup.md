@@ -253,8 +253,7 @@ target/release/djbod-ui --listen 127.0.0.1:5264 --bootstrap-node 127.0.0.1:5263
 ```
 
 `--bootstrap-node` is the ordered list of nodes to try, the same choice
-as `djbod --node`. `DJBOD_BOOTSTRAP_NODE` is its variable. `--node` and
-`DJBOD_NODE` still work and print a warning. It also needs
+as `djbod --node`. `DJBOD_BOOTSTRAP_NODE` is its variable. It also needs
 `DJBOD_CLUSTER`. Open `http://127.0.0.1:5264/`.
 
 The page has no login. Leave it on localhost. [Day to day](day-to-day.md#the-web-ui)

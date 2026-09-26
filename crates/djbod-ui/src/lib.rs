@@ -811,8 +811,8 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
                 "node": r.node,
                 "state": "active",
                 "address": r.address,
-                // From the node's Hello; null for a node that was unreachable
-                // or runs a build from before builds were sent (SPEC 6.2.6.4).
+                // From the node's Hello (SPEC 6.2.6.4); null for a node
+                // that was unreachable.
                 "build": r.build,
                 "version": r.result.as_ref().ok().map(|d| d.version),
                 "error": r.result.as_ref().err(),

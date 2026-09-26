@@ -241,10 +241,13 @@ which is a different command and requires a restart of that node.
 
 ## Keep the node running
 
-The repository does not ship a service unit. This is a unit that runs
-the binary you installed as `/usr/local/bin/djbod-node`, as a user that
-can read the config, the certificates, and the device directories.
-Standard error goes to the journal.
+[`deploy/systemd/djbod-node.service`](../../deploy/systemd/djbod-node.service)
+is the unit the repository ships, with a scrub timer and the web UI's
+unit beside it and the steps to install them in
+[deployment.md](../deployment.md). In outline it runs the binary you
+installed as `/usr/local/bin/djbod-node`, as a user that can read the
+config, the certificates, and the device directories. Standard error
+goes to the journal.
 
 ```ini
 [Unit]
@@ -290,7 +293,10 @@ export DJBOD_CLUSTER=<cluster-id>
 Put the web UI on one machine, bound to localhost, and reach it with an
 SSH tunnel (`ssh -L 5264:127.0.0.1:5264 nas1`) or from the machine
 itself. The UI has no login of its own. [Day to day](day-to-day.md#the-web-ui)
-has the details. Turn on [TLS](tls.md) before any of these addresses are
+has the details. [`deploy/systemd/djbod-ui.service`](../../deploy/systemd/djbod-ui.service)
+is a unit that keeps it running, with the steps to install it at the
+top; its settings come from `/etc/djbod/client.env`, which the `djbod`
+command line reads too. Turn on [TLS](tls.md) before any of these addresses are
 reachable from a network you do not trust. Until then the protocol is
 plain TCP and any client that can connect can do everything, including
 administration.

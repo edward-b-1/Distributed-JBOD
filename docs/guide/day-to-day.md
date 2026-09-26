@@ -140,9 +140,7 @@ They are tried in order, and the first that answers coordinates the
 page's requests, for the same reason as `djbod --node`: that machine
 does the encoding and the fan-out.
 [Concepts](concepts.md#which-node-coordinates) is why a fast local
-server belongs first. `--node` and `DJBOD_NODE` are the old spelling.
-They still work, print a warning, and are ignored when the new spelling
-is also set. After the UI has read the cluster document it also tries
+server belongs first. After the UI has read the cluster document it also tries
 the other node addresses listed there, and it retries the address that
 answered last before the configured list. `--cluster` and the TLS file
 flags match `djbod`. Towards the cluster it is a client, so a cluster

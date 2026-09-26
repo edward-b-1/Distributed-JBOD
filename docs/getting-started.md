@@ -177,7 +177,7 @@ download, in a browser. It takes the same two settings as the client and
 serves on localhost:
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE (or the deprecated DJBOD_NODE) and DJBOD_CLUSTER as above
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER as above
 ```
 
 `--bootstrap-node` takes several addresses, comma-separated, tried in
@@ -566,7 +566,8 @@ path>`, and restart the node.
 
 On real machines, `listen` is that machine's own address, or `0.0.0.0`
 with `advertise` set to the address the others should use, and
-`allow_shared_filesystem` is omitted.
+`allow_shared_filesystem` is omitted. [deployment.md](deployment.md) has
+systemd units, a Docker image, and a Compose stack for that.
 
 ## TLS
 

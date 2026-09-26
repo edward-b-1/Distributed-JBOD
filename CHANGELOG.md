@@ -19,11 +19,35 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 Pull request: The record's revision is required
 
 ### Changed
 
 - `MetadataRecord.revision` is always written and required on read. It had been omitted when 0 and defaulted when absent so that records from before 18.8.1 still verified; nothing is released, so nothing is kept for compatibility (SPEC 9.4.2, 19.1.5.2). A record without the field no longer parses, and a record's checksum now covers `"revision": 0`, so every record written by an earlier build must be rewritten once (#155, #260).
+=======
+Pull request: Ship a systemd unit for djbod-ui
+
+### Added
+
+- `deploy/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user, reads `DJBOD_BOOTSTRAP_NODE`, `DJBOD_CLUSTER` and the TLS paths from `/etc/djbod/client.env`, which `deploy/systemd/client.env.example` shows and the `djbod` command line reads too, listens on localhost, and says how to serve the LAN instead. It does not wait for the local node, since the UI tries every listed node. The deployment guide points to it (#258).
+
+Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
+
+### Added
+
+- `Dockerfile` and `.dockerignore`: a multi-stage, `--locked` build of all four binaries into a slim image with an unprivileged `djbod` user, no volume declarations (the state directory and devices are bind mounts, one physical disk per device path), a health check that asks the node for `status`, and an entry point that generates the node's id on the first start and keeps it in the state directory, asks the peer for the cluster id when joining, runs `init-cluster` or `join` once and `djbod-node run` after, all from `DJBOD_*` variables (SPEC 20.6). `DJBOD_GIT_COMMIT` is a build argument so the image's binaries carry a real build id.
+- `deploy/docker-compose.node.yml` and `deploy/docker/node.env.example`: one node on a real machine, bind mounts, host network, one env file per machine. `deploy/docker-compose.yml`: a three-node trial on volumes with the web UI, which asks node 1 for the cluster id; no id appears in either file.
+- `deploy/systemd/`: `djbod-node.service` (runs as `djbod`, restarts on failure, `StateDirectory=` and `ProtectSystem=full` so it names no site paths and an unmounted disk leaves the node running with that device unavailable, as SPEC 5.6 has it), `djbod-scrub.service` and `djbod-scrub.timer` (weekly, randomised, rate-limited, report-only, exit 2 not a failure), and `node.env.example`. The web UI's unit and `client.env.example` come with #259.
+- `docs/deployment.md`: the three ways step by step, with TLS and upgrade notes; the README and the guides point to it (#73).
+- Version 0.2.18.
+
+Pull request: Remove the UI's deprecated --node and DJBOD_NODE
+
+### Removed
+
+- `djbod-ui --node` and `DJBOD_NODE`, the deprecated spelling of `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE` kept by #207 and accepted with a warning at every start. Nothing is released, so nothing is kept for compatibility (SPEC 19.1.5.2). `djbod` itself keeps `--node`, which is that tool's own name for the setting (#260).
+>>>>>>> origin/main
 - Version 0.2.17.
 
 Pull request: Removed nodes stay in the cluster document as tombstones
