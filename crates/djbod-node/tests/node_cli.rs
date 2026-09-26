@@ -57,6 +57,20 @@ fn a_cluster_can_be_created_from_the_environment_alone() {
     );
     assert_eq!(document.devices.len(), 2);
 
+    // A chosen cluster id is honoured, for provisioning.
+    let state2 = tempfile::tempdir().expect("temp dir");
+    let d2 = tempfile::tempdir().expect("temp dir");
+    let chosen = uuid::Uuid::new_v4();
+    let (ok, out, err) = run(node_binary()
+        .env("DJBOD_NODE_ID", uuid::Uuid::new_v4().to_string())
+        .env("DJBOD_STATE_DIR", state2.path())
+        .env("DJBOD_DEVICES", d2.path())
+        .env("DJBOD_CLUSTER_ID", chosen.to_string())
+        .args(["init-cluster", "--k", "1", "--m", "0"]));
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("cluster {chosen} created")), "{out}");
+    assert_eq!(saved_document(state2.path()).cluster_id, chosen);
+
     // Without the required settings the error names what is missing.
     let (ok, _, err) = run(node_binary().args(["init-cluster"]));
     assert!(!ok);

@@ -1,0 +1,26 @@
+# /etc/systemd/system/djbod-scrub.service
+#
+# One cluster-wide scrub (SPEC 20.1.2), started by djbod-scrub.timer. Run
+# it on one machine only: the scrub is cluster-wide whichever node it is
+# pointed at. Add --repair to the command to rebuild what it finds, or
+# leave it out to be told first and repair by hand with `djbod repair`.
+# Exit code 2 means findings; the journal has the report:
+#   journalctl -u djbod-scrub
+
+[Unit]
+Description=Distributed-JBOD cluster-wide scrub
+Documentation=https://github.com/edward-b-1/Distributed-JBOD
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=djbod
+Group=djbod
+EnvironmentFile=/etc/djbod/client.env
+ExecStart=/usr/local/bin/djbod scrub --rate-mib 100
+SuccessExitStatus=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

@@ -1,0 +1,15 @@
+# /etc/systemd/system/djbod-scrub.timer
+#
+#   systemctl enable --now djbod-scrub.timer
+#   systemctl list-timers djbod-scrub.timer
+
+[Unit]
+Description=Weekly Distributed-JBOD scrub
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

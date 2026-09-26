@@ -1,0 +1,39 @@
+# /etc/systemd/system/djbod-node.service
+#
+# One node. Settings come from /etc/djbod/node.toml, and anything in
+# /etc/djbod/node.env (DJBOD_* variables) overrides the file (SPEC 20.6).
+# Logs go to the journal: journalctl -u djbod-node -f
+#
+# A node that has been removed from the cluster exits cleanly on its own;
+# Restart=on-failure leaves it stopped, which is what should happen.
+
+[Unit]
+Description=Distributed-JBOD node
+Documentation=https://github.com/edward-b-1/Distributed-JBOD
+After=network-online.target local-fs.target
+Wants=network-online.target
+# Add every device mount here, so the node never starts against an
+# unmounted disk and writes into the empty mount point instead.
+RequiresMountsFor=/var/lib/djbod /srv/djbod/disk0 /srv/djbod/disk1
+
+[Service]
+Type=simple
+User=djbod
+Group=djbod
+EnvironmentFile=-/etc/djbod/node.env
+ExecStart=/usr/local/bin/djbod-node run --config /etc/djbod/node.toml
+Restart=on-failure
+RestartSec=5s
+# Hardening. The node needs to write only its state directory and its
+# device mounts; list every device path here.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/djbod /srv/djbod
+# The node keeps one file open per active shard transfer plus its devices;
+# the default limit of 1024 is enough for a home cluster but not generous.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
