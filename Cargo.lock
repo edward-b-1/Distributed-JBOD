@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-cli"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-client"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "djbod-core",
  "djbod-proto",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-core"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "reed-solomon-erasure",
  "rustix",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-node"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "ciborium",
@@ -418,7 +418,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-proto"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "ciborium",
  "djbod-core",
@@ -430,7 +430,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-python"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "djbod-client",
  "djbod-core",
@@ -443,7 +443,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-recover"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "djbod-ui"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "anyhow",
  "axum",
