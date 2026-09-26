@@ -14,7 +14,7 @@ use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 
 #[derive(Parser)]
-#[command(name = "djbod-node", about = "Distributed-JBOD node", version = djbod_node::BUILD)]
+#[command(name = "djbod-node", about = "Distributed-JBOD node", version = djbod_client::BUILD)]
 struct Cli {
     /// Log output format (SPEC 20.4.3).
     #[arg(long, value_enum, default_value_t = LogFormat::Text, global = true)]
@@ -229,7 +229,8 @@ enum Command {
     AddDevice {
         #[command(flatten)]
         config: ConfigArgs,
-        /// The device path(s) to add; must appear in the configuration.
+        /// The device paths to add, one or more; each must appear in the
+        /// configuration.
         #[arg(long, required = true)]
         path: Vec<PathBuf>,
         /// Address of any running node; defaults to this node's own.
@@ -413,7 +414,7 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("adding devices")?;
             println!("document version {}", document.version);
-            println!("restart the node to serve the new device(s)");
+            println!("restart the node to serve what was added");
             Ok(())
         }
         Command::Scrub {
@@ -501,25 +502,25 @@ async fn scrub(config: &NodeConfig, rate_mib: Option<u64>, json: bool) -> anyhow
         totals.3 += summary.bytes_read;
         if !json {
             eprintln!(
-                "{}: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+                "{}: {} records, {} shards, {} blocks, {} read, {}",
                 path.display(),
                 summary.records_checked,
                 summary.shards_checked,
                 summary.blocks_checked,
                 human_bytes(summary.bytes_read),
-                summary.findings.len()
+                djbod_core::text::counted(summary.findings.len(), "finding", "findings")
             );
         }
         all_findings.extend(summary.findings);
     }
     if !json {
         eprintln!(
-            "total: {} records, {} shards, {} blocks, {} read, {} finding(s)",
+            "total: {} records, {} shards, {} blocks, {} read, {}",
             totals.0,
             totals.1,
             totals.2,
             human_bytes(totals.3),
-            all_findings.len()
+            djbod_core::text::counted(all_findings.len(), "finding", "findings")
         );
     }
 
@@ -563,6 +564,7 @@ fn describe_finding(finding: &djbod_core::scrub::Finding) -> String {
         StaleTemporary { path, age_secs } => {
             format!("stale temporary     {}  {age_secs}s old", path.display())
         }
+        DeviceUnavailable { reason } => format!("device unavailable  {reason}"),
     }
 }
 

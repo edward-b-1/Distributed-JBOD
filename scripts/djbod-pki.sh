@@ -135,12 +135,22 @@ case "$COMMAND" in
         ;;
     list)
         need_ca
+        names=() subjects=() expiries=() sans=()
+        name_width=20 subject_width=40
         for crt in "$DIR"/*.crt; do
             name="$(basename "$crt" .crt)"
             subject="$(openssl x509 -in "$crt" -noout -subject | sed 's/^subject=//')"
             until="$(openssl x509 -in "$crt" -noout -enddate | sed 's/^notAfter=//')"
             san="$(openssl x509 -in "$crt" -noout -ext subjectAltName 2>/dev/null | tail -n +2 | tr -d ' ' || true)"
-            printf '%-20s %-40s until %s %s\n' "$name" "$subject" "$until" "${san:+[$san]}"
+            names+=("$name") subjects+=("$subject") expiries+=("$until") sans+=("${san:+[$san]}")
+            # Node and client names are ASCII; openssl escapes non-ASCII
+            # subject bytes. Size every row before printing any of them.
+            if [ "${#name}" -gt "$name_width" ]; then name_width=${#name}; fi
+            if [ "${#subject}" -gt "$subject_width" ]; then subject_width=${#subject}; fi
+        done
+        for i in "${!names[@]}"; do
+            printf '%-*s %-*s until %s %s\n' \
+                "$name_width" "${names[i]}" "$subject_width" "${subjects[i]}" "${expiries[i]}" "${sans[i]}"
         done
         ;;
     -h|--help) usage 0 ;;

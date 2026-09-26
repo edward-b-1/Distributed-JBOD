@@ -32,9 +32,10 @@ use crate::version::VersionId;
 pub const RECORD_FORMAT_VERSION: u32 = 1;
 pub const SYSTEM_NAME: &str = "distributed-jbod";
 
-/// The identity of a device (5.2): a UUID written into `device.json` on
-/// first use, and the device's name in every record. Never a path, and
-/// never a node: a disk moved to another machine keeps its identity.
+/// The identity of a device (5.2): a UUID written into
+/// `DISTRIBUTED-JBOD-DEVICE.json` on first use, and the device's name in
+/// every record. Never a path, and never a node: a disk moved to another
+/// machine keeps its identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DeviceId(pub Uuid);

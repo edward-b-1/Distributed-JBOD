@@ -5,8 +5,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use djbod_client::admin;
+use djbod_client::connection::{Connection, ConnectionError};
 use djbod_core::cluster::Transport;
-use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
 use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node, NodeError};
@@ -173,7 +174,7 @@ async fn joined_node(peer: &TestNode, tls: Option<TlsPaths>) -> TestNode {
 
 impl TestNode {
     #[allow(clippy::result_large_err)]
-    async fn client(&self, connector: &Connector) -> Result<Connection, ClientError> {
+    async fn client(&self, connector: &Connector) -> Result<Connection, ConnectionError> {
         Connection::connect_with(
             connector,
             self.addr,
@@ -254,10 +255,9 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
 
     // tls-optional: nodes speak TLS to each other from now on. A write
     // through a reaches b and c only over TLS.
-    let (document, changed) =
-        membership::set_transport(&plain, a.addr, cluster, Transport::TlsOptional)
-            .await
-            .expect("set transport");
+    let (document, changed) = admin::set_transport(&plain, a.addr, cluster, Transport::TlsOptional)
+        .await
+        .expect("set transport");
     assert!(changed);
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
@@ -295,7 +295,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
     );
 
     // tls: plain is refused with a message saying so; the TLS client works.
-    let (document, changed) = membership::set_transport(&plain, a.addr, cluster, Transport::Tls)
+    let (document, changed) = admin::set_transport(&plain, a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     assert!(changed);
@@ -303,7 +303,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
         assert_eq!(n.node.document().version, document.version);
     }
     match a.client(&plain).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::TlsRequired);
             assert_eq!(detail.node, Some(a.node.id()));
         }
@@ -322,11 +322,11 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
         other => panic!("{other:?}"),
     }
     // Membership operations work over TLS too, and a repeat is a no-op.
-    let (_, changed) = membership::set_transport(&tls, a.addr, cluster, Transport::Tls)
+    let (_, changed) = admin::set_transport(&tls, a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport again");
     assert!(!changed);
-    let (_, changed) = membership::set_device_state(
+    let (_, changed) = admin::set_device_state(
         &tls,
         b.addr,
         cluster,
@@ -338,7 +338,7 @@ async fn a_cluster_moves_from_plain_to_tls_and_back() {
     assert!(changed);
 
     // Back to plain, proposed over TLS since plain is refused.
-    let (document, _) = membership::set_transport(&tls, c.addr, cluster, Transport::Plain)
+    let (document, _) = admin::set_transport(&tls, c.addr, cluster, Transport::Plain)
         .await
         .expect("back to plain");
     for n in [&a, &b, &c] {
@@ -358,10 +358,8 @@ async fn moving_off_plain_is_refused_while_a_node_lacks_material() {
     let a = first_node(1, 1, Some(authority.issue("127.0.0.1"))).await;
     let b = joined_node(&a, None).await;
     let cluster = a.node.cluster_id();
-    match membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::TlsOptional)
-        .await
-    {
-        Err(membership::MembershipError::NodeNotTlsReady { node, .. }) => {
+    match admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::TlsOptional).await {
+        Err(admin::AdminError::NodeNotTlsReady { node, .. }) => {
             assert_eq!(node, b.node.id())
         }
         other => panic!("expected NodeNotTlsReady, got {other:?}"),
@@ -382,7 +380,7 @@ async fn a_node_without_material_refuses_to_start_under_a_tls_transport() {
     let mut authority = Authority::new();
     let a = first_node(1, 0, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     let mut config = a.config.clone();
@@ -404,7 +402,7 @@ async fn a_server_certificate_for_another_address_is_refused() {
     let a = first_node(1, 0, Some(authority.issue("10.0.0.1"))).await;
     let tls = tls_connector(&authority.issue("admin"));
     match a.client(&tls).await {
-        Err(ClientError::Wire(_)) => {}
+        Err(ConnectionError::Wire(_)) => {}
         Err(other) => panic!("expected a handshake failure, got {other}"),
         Ok(_) => panic!("a certificate for another address must be refused"),
     }
@@ -418,16 +416,18 @@ async fn a_node_joins_a_tls_cluster_with_its_own_certificate() {
     let a = first_node(1, 1, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
     let tls = tls_connector(&authority.issue("admin"));
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     // Joining without material is refused with a clear reason.
     let (_, addr) = reserve_port().await;
     let (config, _dirs, _state) = make_config(addr, vec![a.addr.to_string()], None);
     match membership::join(&config, a.addr, cluster, false).await {
-        Err(membership::MembershipError::Unreachable { .. })
-        | Err(membership::MembershipError::PeerUnreachable { .. })
-        | Err(membership::MembershipError::TlsRequired { .. }) => {}
+        Err(membership::MembershipError::Admin(
+            admin::AdminError::Unreachable { .. }
+            | admin::AdminError::PeerUnreachable { .. }
+            | admin::AdminError::TlsRequired { .. },
+        )) => {}
         other => panic!("expected a refusal, got {other:?}"),
     }
     // With its own certificate the node joins and serves over TLS.
@@ -483,9 +483,9 @@ fn a_client_connector_comes_from_three_optional_settings() {
 /// TLS stream again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_last_frame_of_a_tls_stream_is_flushed() {
+    use djbod_client::wire::{read_message, write_message};
     use djbod_core::checksum::checksum_block;
     use djbod_node::transport::{accept, Accepted};
-    use djbod_node::wire::{read_message, write_message};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
@@ -676,7 +676,7 @@ async fn sustained_writes_over_tls_all_complete() {
     let c = joined_node(&b, Some(authority.issue("127.0.0.1"))).await;
     let cluster = a.node.cluster_id();
     let tls = tls_connector(&authority.issue("admin"));
-    membership::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
+    admin::set_transport(&Connector::plain(), a.addr, cluster, Transport::Tls)
         .await
         .expect("set transport");
     let mut client = a.client(&tls).await.expect("tls client");
@@ -712,7 +712,7 @@ async fn sustained_writes_over_tls_all_complete() {
 
 /// A client that starts an upload and then goes silent must not hold
 /// shard writes open forever: the coordinator gives up after the idle
-/// timeout, aborts the holders, and no temporary file remains.
+/// timeout, aborts the shard writes, and no temporary file remains.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_silent_upload_is_abandoned_after_the_idle_timeout() {
     let (listener, addr) = reserve_port().await;
@@ -759,7 +759,7 @@ async fn a_silent_upload_is_abandoned_after_the_idle_timeout() {
             .await
             .expect("the coordinator must give up");
     match outcome {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert!(detail.message.contains("no frame arrived"), "{detail:?}")
         }
         Err(_) => {}

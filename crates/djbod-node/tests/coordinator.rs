@@ -5,6 +5,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use djbod_client::admin;
+use djbod_client::connection::{Connection, ConnectionError};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::DeviceState;
 use djbod_core::erasure::ShardIndex;
@@ -12,14 +14,13 @@ use djbod_core::keyhash::hash_key;
 use djbod_core::layout::shard_file_name;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
-use djbod_node::client::{ClientError, Connection};
 use djbod_node::config::NodeConfig;
-use djbod_node::membership;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
 use djbod_node::transport::Connector;
 use djbod_proto::message::{
-    ClusterFinding, DrainEvent, ErrorCode, ListQuery, Request, Response, ScrubEvent, ShardCondition,
+    ClusterFinding, DrainEvent, ErrorCode, ListQuery, MissingRecordCopy, RecordCopyFault, Request,
+    Response, ScrubEvent, ShardCondition,
 };
 use tokio::net::TcpListener;
 use uuid::Uuid;
@@ -143,7 +144,8 @@ async fn put_head_get_list_delete_round_trip() {
                 Some("application/octet-stream".to_string()),
             )
             .await
-            .expect("put");
+            .expect("put")
+            .version;
         objects.push((key, body, version));
     }
 
@@ -153,7 +155,7 @@ async fn put_head_get_list_delete_round_trip() {
             .await
             .expect("head")
         {
-            Response::HeadObject { record } => {
+            Response::HeadObject { record, .. } => {
                 assert_eq!(record.key, *key);
                 assert_eq!(record.version, *version);
                 assert_eq!(record.size, body.len() as u64);
@@ -172,7 +174,7 @@ async fn put_head_get_list_delete_round_trip() {
             other => panic!("expected HeadObject, got {other:?}"),
         }
         let (record, got) = client.get_object(key).await.expect("get");
-        assert_eq!(record.version, *version);
+        assert_eq!(record.record.version, *version);
         assert_eq!(&got, body, "body mismatch for {key}");
     }
 
@@ -186,7 +188,9 @@ async fn put_head_get_list_delete_round_trip() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let names: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(
                 names,
@@ -206,7 +210,9 @@ async fn put_head_get_list_delete_round_trip() {
         .await
         .expect("list")
     {
-        Response::ListKeys { keys, truncated } => {
+        Response::ListKeys {
+            keys, truncated, ..
+        } => {
             let names: Vec<&str> = keys.iter().map(|k| k.key.as_str()).collect();
             assert_eq!(names, vec!["data/object-3", "data/object-4"]);
             assert!(!truncated);
@@ -233,12 +239,12 @@ async fn put_head_get_list_delete_round_trip() {
         },
     ] {
         match client.request(request).await {
-            Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+            Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
             other => panic!("expected NotFound, got {other:?}"),
         }
     }
     match client.get_object("data/object-1").await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
         other => panic!("expected NotFound, got {other:?}"),
     }
     match client
@@ -264,7 +270,8 @@ async fn put_replaces_the_previous_version_and_removes_it() {
     let v1 = client
         .put_object("k", &first, CHUNK, None)
         .await
-        .expect("put 1");
+        .expect("put 1")
+        .version;
     let record1 = match client
         .request(Request::HeadObject {
             key: "k".to_string(),
@@ -272,17 +279,18 @@ async fn put_replaces_the_previous_version_and_removes_it() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let v2 = client
         .put_object("k", &second, CHUNK, None)
         .await
-        .expect("put 2");
+        .expect("put 2")
+        .version;
     assert!(v2 > v1, "versions must increase");
 
     let (record2, body) = client.get_object("k").await.expect("get");
-    assert_eq!(record2.version, v2);
+    assert_eq!(record2.record.version, v2);
     assert_eq!(body, second);
 
     // The old version's files are gone from every device; only v2 remains.
@@ -317,7 +325,7 @@ async fn put_replaces_the_previous_version_and_removes_it() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_corrupt_block_fails_the_read_and_names_the_device() {
+async fn a_corrupt_block_is_reconstructed_from_parity_and_named() {
     let test = start_node(4, 3, 1).await;
     let mut client = test.client().await;
     let body = xorshift64_bytes(4 * 3 * BLOCK as usize, 9);
@@ -332,7 +340,7 @@ async fn a_corrupt_block_fails_the_read_and_names_the_device() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -346,14 +354,38 @@ async fn a_corrupt_block_fails_the_read_and_names_the_device() {
     bytes[offset] ^= 0x01;
     std::fs::write(&path, &bytes).expect("write");
 
-    // Fail-stop: the stream ends with an error naming the device, shard,
-    // and stripe, and no reconstruction is served (11.4). The bytes for
-    // stripes 0 and 1 may have been delivered before the failure.
+    // The stripe is reconstructed from parity and served, and the read's
+    // terminating status names the block (11.4). Nothing is written.
+    let damaged = std::fs::read(&path).expect("read");
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.reconstructed.len(), 1, "{:?}", read.reconstructed);
+    let block = &read.reconstructed[0];
+    assert_eq!((block.first_stripe, block.stripes), (2, 1));
+    assert_eq!(block.shard_index, 1);
+    assert_eq!(block.device, device);
+    assert!(matches!(
+        block.fault,
+        djbod_core::stripe::FaultKind::ChecksumMismatch { .. }
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("read"),
+        damaged,
+        "the read repaired the disk"
+    );
+
+    // Beyond m: damage the parity shard's block of the same stripe too,
+    // and the read fails naming the stripe.
+    let parity_device = record
+        .device_for(djbod_core::erasure::ShardIndex(3))
+        .expect("device");
+    let parity_path = test.shard_path(parity_device, "k", &record);
+    let mut parity = std::fs::read(&parity_path).expect("read");
+    parity[offset] ^= 0x01;
+    std::fs::write(&parity_path, &parity).expect("write");
     match client.get_object("k").await {
-        Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch);
-            assert_eq!(detail.device, Some(device));
-            assert_eq!(detail.shard_index, Some(1));
             assert_eq!(detail.stripe, Some(2));
             assert_eq!(detail.key.as_deref(), Some("k"));
         }
@@ -400,7 +432,7 @@ async fn a_corrupt_record_copy_fails_lookups_as_inconsistent() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
             assert_eq!(detail.device, Some(device.id()));
         }
@@ -415,7 +447,7 @@ async fn insufficient_devices_refuses_the_write_before_any_body_is_stored() {
     let mut client = test.client().await;
     let body = xorshift64_bytes(BLOCK as usize, 4);
     match client.put_object("k", &body, CHUNK, None).await {
-        Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices);
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -441,7 +473,7 @@ async fn a_body_shorter_or_longer_than_declared_is_refused_and_leaves_nothing() 
             .await
             .expect("send");
         client
-            .send_data(id, djbod_node::client::body_frame(0, body))
+            .send_data(id, djbod_client::connection::body_frame(0, body))
             .await
             .expect("data");
         client
@@ -451,7 +483,7 @@ async fn a_body_shorter_or_longer_than_declared_is_refused_and_leaves_nothing() 
         // The refusal arrives as a failed stream end, then the connection
         // is closed.
         match client.read_stream_item(id).await {
-            Ok(djbod_node::client::StreamItem::End(end)) => {
+            Ok(djbod_client::connection::StreamItem::End(end)) => {
                 let error = end.error.expect("stream end carries the error");
                 assert_eq!(error.code, ErrorCode::ProtocolViolation);
             }
@@ -475,14 +507,16 @@ async fn oversized_keys_and_empty_keys_are_refused() {
     let mut client = test.client().await;
     let long = "x".repeat(16 * 1024 + 1);
     match client.request(Request::HeadObject { key: long }).await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
         other => panic!("expected KeyTooLong, got {other:?}"),
     }
     match client
         .request(Request::HeadObject { key: String::new() })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::ProtocolViolation),
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation)
+        }
         other => panic!("expected ProtocolViolation, got {other:?}"),
     }
 }
@@ -500,8 +534,8 @@ async fn replication_and_jbod_schemes_work_too() {
             .expect("put");
         let (record, got) = client.get_object("k").await.expect("get");
         assert_eq!(got, body);
-        assert_eq!(record.k, k);
-        assert_eq!(record.m, m);
+        assert_eq!(record.record.k, k);
+        assert_eq!(record.record.m, m);
     }
 }
 
@@ -535,7 +569,7 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -556,12 +590,11 @@ async fn repair_rewrites_a_corrupt_shard_and_the_object_reads_again() {
     bytes[4096 + BLOCK as usize + 7] ^= 0x01; // stripe 1
     bytes[4096 + 4 * BLOCK as usize + 7] ^= 0x01; // stripe 4
     std::fs::write(&path, &bytes).expect("write");
-    assert!(matches!(
-        client.get_object("k").await,
-        Err(ClientError::StreamFailed(_))
-    ));
-    // A failed stream closes the connection; open another.
-    let mut client = test.client().await;
+    // The read reconstructs both stripes from parity and says so (11.4).
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let stripes: Vec<u64> = read.reconstructed.iter().map(|r| r.first_stripe).collect();
+    assert_eq!(stripes, vec![1, 4], "{:?}", read.reconstructed);
 
     let report = repair(&mut client, "k").await;
     let shard2 = report
@@ -600,7 +633,7 @@ async fn repair_recreates_a_missing_or_structurally_broken_shard() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 
@@ -629,7 +662,7 @@ async fn repair_recreates_a_missing_or_structurally_broken_shard() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::BlockChecksumMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -680,7 +713,7 @@ async fn repair_of_a_missing_key_and_an_empty_object() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::NotFound),
         other => panic!("expected NotFound, got {other:?}"),
     }
     client
@@ -708,7 +741,7 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
     let record_path = |device: DeviceId| {
@@ -719,21 +752,27 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
             .join(djbod_core::layout::record_file_name(&record.version))
     };
 
-    // Delete one record copy: reads refuse (9.4.4), repair rewrites it.
+    // Delete one record copy: three agreeing copies remain, k = 3 vouch,
+    // so reads go on and name the copy they went without (9.4.4, 18.4.2);
+    // the device was consulted and had none, so the fault is `Missing`.
+    // Nothing is rewritten by the read; repair rewrites it.
     let victim = record.shards[1].device;
     let before = std::fs::read(record_path(victim)).expect("read");
     std::fs::remove_file(record_path(victim)).expect("remove");
-    match client
-        .request(Request::HeadObject {
-            key: "k".to_string(),
-        })
-        .await
-    {
-        Err(ClientError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::RecordsInconsistent)
-        }
-        other => panic!("expected RecordsInconsistent, got {other:?}"),
-    }
+    let (head_record, missing) = head_with_missing(&mut client, "k").await.expect("head");
+    assert_eq!(head_record, record);
+    assert_eq!(
+        missing,
+        vec![MissingRecordCopy {
+            device: victim,
+            fault: RecordCopyFault::Missing,
+        }]
+    );
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.missing_records, missing);
+    assert!(read.reconstructed.is_empty(), "{:?}", read.reconstructed);
+    assert!(!record_path(victim).exists(), "a read writes nothing");
     let report = repair(&mut client, "k").await;
     assert_eq!(report.record_copies_rewritten, vec![victim]);
     assert!(
@@ -748,16 +787,31 @@ async fn repair_rewrites_a_missing_record_copy_and_refuses_when_fewer_than_k_rem
         .await
         .expect("head after repair");
 
-    // Delete two of four: only two remain, fewer than k = 3; repair refuses.
+    // Delete two of four: only two remain, fewer than k = 3; reads and
+    // repair both refuse, and the read names every copy it lacks.
     std::fs::remove_file(record_path(record.shards[0].device)).expect("remove");
     std::fs::remove_file(record_path(record.shards[2].device)).expect("remove");
+    match head_with_missing(&mut client, "k").await {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
+            assert!(
+                detail
+                    .message
+                    .contains("only 2 record copies of 4 can be read"),
+                "{}",
+                detail.message
+            );
+            assert_eq!(detail.key.as_deref(), Some("k"));
+        }
+        other => panic!("expected RecordsInconsistent, got {other:?}"),
+    }
     match client
         .request(Request::RepairObject {
             key: "k".to_string(),
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
             assert!(
                 detail.message.contains("fewer than k"),
@@ -810,14 +864,28 @@ fn spare_device(test: &TestNode, record: &MetadataRecord) -> DeviceId {
 }
 
 #[allow(clippy::result_large_err)]
-async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ClientError> {
+async fn head(client: &mut Connection, key: &str) -> Result<MetadataRecord, ConnectionError> {
+    head_with_missing(client, key)
+        .await
+        .map(|(record, _)| record)
+}
+
+/// `HeadObject`: the record, and the copies the lookup went without.
+#[allow(clippy::result_large_err)]
+async fn head_with_missing(
+    client: &mut Connection,
+    key: &str,
+) -> Result<(MetadataRecord, Vec<MissingRecordCopy>), ConnectionError> {
     match client
         .request(Request::HeadObject {
             key: key.to_string(),
         })
         .await?
     {
-        Response::HeadObject { record } => Ok(record),
+        Response::HeadObject {
+            record,
+            missing_records,
+        } => Ok((record, missing_records)),
         other => panic!("{other:?}"),
     }
 }
@@ -839,7 +907,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     let old_record =
         std::fs::read(record_path(&test, source, "k", &before.version)).expect("read record");
 
-    // A holder is not an eligible destination.
+    // A device already carrying a shard is not an eligible destination.
     match client
         .request(Request::MoveShard {
             key: "k".to_string(),
@@ -848,7 +916,7 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices)
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -903,25 +971,25 @@ async fn move_shard_relocates_the_shard_and_raises_the_record_revision() {
     let events = run_scrub(&mut client, false).await;
     assert!(no_findings(&events), "{events:?}");
 
-    // An interrupted re-placement: one holder still has the revision 0
-    // copy. Reads fail until repair finishes the move forwards (18.8.1).
+    // An interrupted re-placement: one device still has the revision 0
+    // copy. Reads trust the highest revision, which three copies agree
+    // on and the stale copy vouches for (18.8.1), and report the lagging
+    // device; repair finishes the move forwards.
     let lagging = after.shards[0].device;
     std::fs::write(
         record_path(&test, lagging, "k", &after.version),
         &old_record,
     )
     .expect("write");
-    match head(&mut client, "k").await {
-        Err(ClientError::Remote(detail)) => {
-            assert_eq!(detail.code, ErrorCode::RecordsInconsistent);
-            assert!(
-                detail.message.contains("3 record copies found, 4 expected"),
-                "{}",
-                detail.message
-            );
-        }
-        other => panic!("expected RecordsInconsistent, got {other:?}"),
-    }
+    let (head_record, missing) = head_with_missing(&mut client, "k").await.expect("head");
+    assert_eq!(head_record, after);
+    assert_eq!(
+        missing,
+        vec![MissingRecordCopy {
+            device: lagging,
+            fault: RecordCopyFault::Stale { revision: 0 },
+        }]
+    );
     let report = repair(&mut client, "k").await;
     assert_eq!(report.record_copies_rewritten, vec![lagging]);
     assert!(report.stale_copies_removed.is_empty());
@@ -1036,7 +1104,7 @@ async fn move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged() 
 }
 
 async fn set_state(test: &TestNode, device: DeviceId, state: DeviceState) -> bool {
-    let (_, changed) = membership::set_device_state(
+    let (_, changed) = admin::set_device_state(
         &Connector::plain(),
         test.addr,
         test.node.cluster_id(),
@@ -1118,7 +1186,7 @@ async fn set_state_changes_placement_and_nothing_else() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::InsufficientDevices)
         }
         other => panic!("expected InsufficientDevices, got {other:?}"),
@@ -1130,7 +1198,7 @@ async fn set_state_changes_placement_and_nothing_else() {
         device_state(&status_devices(&mut client).await, device),
         DeviceState::Active
     );
-    match membership::set_device_state(
+    match admin::set_device_state(
         &Connector::plain(),
         test.addr,
         test.node.cluster_id(),
@@ -1139,7 +1207,7 @@ async fn set_state_changes_placement_and_nothing_else() {
     )
     .await
     {
-        Err(membership::MembershipError::UnknownDevice(_)) => {}
+        Err(admin::AdminError::UnknownDevice(_)) => {}
         other => panic!("expected UnknownDevice, got {other:?}"),
     }
 }
@@ -1179,7 +1247,7 @@ async fn drain_moves_every_version_off_the_device_and_reports_stale_copies() {
     // An active device cannot be drained: the state change is a separate,
     // explicit step.
     match client.start_drain(device, false).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::ProtocolViolation);
             assert!(detail.message.contains("set-state"), "{}", detail.message);
         }
@@ -1342,12 +1410,18 @@ async fn repair_rebuilds_the_shards_of_a_device_that_left_the_document() {
     next.version += 1;
     next.devices.retain(|d| d.id != lost);
     test.node.apply_document(next).expect("apply");
-    match client.get_object("k").await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
-            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
-        }
-        other => panic!("expected DeviceUnavailable, got {other:?}"),
-    }
+    // The read reconstructs around the lost shard and says so (11.4).
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert!(
+        matches!(
+            read.reconstructed.as_slice(),
+            [r] if r.shard_index == 2
+                && matches!(r.fault, djbod_core::stripe::FaultKind::Unavailable { .. })
+        ),
+        "{:?}",
+        read.reconstructed
+    );
 
     // Repair rebuilds the lost shard onto the spare device and moves the
     // record on by one revision (18.3).
@@ -1395,7 +1469,7 @@ async fn size_limits_come_from_the_cluster_document() {
         other => panic!("1000 bytes is within the limit: {other:?}"),
     }
     match client.put_object("short", &[7u8; 1001], CHUNK, None).await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::ObjectTooLarge);
             assert!(detail.message.contains("1000"), "{}", detail.message);
         }
@@ -1407,7 +1481,7 @@ async fn size_limits_come_from_the_cluster_document() {
         .put_object("nine-long", &[7u8; 10], CHUNK, None)
         .await
     {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::KeyTooLong);
             assert!(detail.message.contains("limit is 8"), "{}", detail.message);
         }
@@ -1420,7 +1494,7 @@ async fn size_limits_come_from_the_cluster_document() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::KeyTooLong),
         other => panic!("expected KeyTooLong, got {other:?}"),
     }
     // The object stored under the old limits is untouched.
@@ -1442,7 +1516,7 @@ async fn oversized_metadata_is_refused_before_any_body_is_stored() {
     let body = [1u8; 10];
     let long_type = Some("x".repeat(MAX_CONTENT_TYPE_BYTES + 1));
     match client.put_object("k", &body, CHUNK, long_type).await {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
         }
         other => panic!("expected MetadataTooLarge, got {other:?}"),
@@ -1455,7 +1529,7 @@ async fn oversized_metadata_is_refused_before_any_body_is_stored() {
         .put_object_with_metadata("k", 10, &mut cursor, CHUNK, None, big)
         .await
     {
-        Err(ClientError::Remote(detail)) | Err(ClientError::StreamFailed(detail)) => {
+        Err(ConnectionError::Remote(detail)) | Err(ConnectionError::StreamFailed(detail)) => {
             assert_eq!(detail.code, ErrorCode::MetadataTooLarge, "{detail:?}")
         }
         other => panic!("expected MetadataTooLarge, got {other:?}"),
@@ -1522,7 +1596,9 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             .await
             .expect("list")
         {
-            Response::ListKeys { keys, truncated } => {
+            Response::ListKeys {
+                keys, truncated, ..
+            } => {
                 pages += 1;
                 let bytes: usize = keys.iter().map(|k| k.key.len()).sum();
                 assert!(bytes <= MAX_LIST_PAGE_BYTES, "page of {bytes} bytes");
@@ -1535,7 +1611,7 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             other => panic!("{other:?}"),
         }
     }
-    assert!(pages >= 2, "{pages} page(s)");
+    assert!(pages >= 2, "{pages} pages");
     assert_eq!(seen.len(), count as usize);
     let mut sorted = seen.clone();
     sorted.sort();
@@ -1558,7 +1634,9 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
                 .await
                 .expect("list")
             {
-                Response::ListKeys { keys, truncated } => {
+                Response::ListKeys {
+                    keys, truncated, ..
+                } => {
                     pages += 1;
                     assert!(!keys.is_empty(), "a page never comes back empty");
                     assert!(keys.len() <= limit.max(1) as usize);
@@ -1572,7 +1650,7 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             }
         }
         assert_eq!(walked, seen, "limit {limit}");
-        assert!(pages >= (count / limit.max(1)) as usize, "{pages} page(s)");
+        assert!(pages >= (count / limit.max(1)) as usize, "{pages} pages");
     }
 
     // The per-device record listing pages the same way.
@@ -1596,8 +1674,8 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
                 pages += 1;
                 records += page.len();
                 after = page.last().map(|r| RecordCursor {
-                    key: r.key.clone(),
-                    version: r.version,
+                    key_hash: r.record.key_hash,
+                    version: r.record.version,
                 });
                 if !truncated {
                     break;
@@ -1606,10 +1684,217 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             other => panic!("{other:?}"),
         }
     }
-    assert!(pages >= 2, "{pages} page(s)");
+    assert!(pages >= 2, "{pages} pages");
     assert_eq!(records, count as usize);
 
     // Everything that walks the whole key space still sees all of it.
     let events = run_scrub(&mut client, false).await;
     assert!(no_findings(&events), "{events:?}");
+}
+
+/// SPEC 11.4: a shard whose file is gone is reconstructed around from
+/// the first stripe and reported once, for every stripe; a second one
+/// beyond m refuses the read with the first shard's own code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_deleted_shard_file_is_reconstructed_around_and_reported_once() {
+    // 3+2: room for a missing shard and a bad block in the same stripe.
+    let test = start_node(5, 3, 2).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(5 * 3 * BLOCK as usize + 17, 13);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let record = match client
+        .request(Request::HeadObject {
+            key: "k".to_string(),
+        })
+        .await
+        .expect("head")
+    {
+        Response::HeadObject { record, .. } => record,
+        other => panic!("{other:?}"),
+    };
+    let device = record
+        .device_for(djbod_core::erasure::ShardIndex(2))
+        .expect("device");
+    let path = test.shard_path(device, "k", &record);
+    std::fs::remove_file(&path).expect("delete the shard file");
+
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert_eq!(read.reconstructed.len(), 1, "{:?}", read.reconstructed);
+    let shard = &read.reconstructed[0];
+    assert_eq!(shard.shard_index, 2);
+    assert_eq!(shard.device, device);
+    assert_eq!(shard.fault, djbod_core::stripe::FaultKind::Missing);
+    let stripe_count = (body.len() as u64).div_ceil(3 * BLOCK);
+    assert_eq!((shard.first_stripe, shard.stripes), (0, stripe_count));
+    assert!(!path.exists(), "the read recreated the shard file");
+
+    // A bad block elsewhere on top is one more entry, for its stripe.
+    let other = record
+        .device_for(djbod_core::erasure::ShardIndex(0))
+        .expect("device");
+    let other_path = test.shard_path(other, "k", &record);
+    let mut bytes = std::fs::read(&other_path).expect("read");
+    bytes[4096 + 3 * BLOCK as usize + 1] ^= 0x01;
+    std::fs::write(&other_path, &bytes).expect("write");
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    let mut summary: Vec<(u8, u64, u64)> = read
+        .reconstructed
+        .iter()
+        .map(|r| (r.shard_index, r.first_stripe, r.stripes))
+        .collect();
+    summary.sort();
+    assert_eq!(
+        summary,
+        vec![(0, 3, 1), (2, 0, stripe_count)],
+        "{:?}",
+        read.reconstructed
+    );
+
+    // Three shards gone with m = 2: refused before any body, as NotFound,
+    // the message listing every shard that could not be read.
+    std::fs::remove_file(&other_path).expect("delete a second shard file");
+    let third = record
+        .device_for(djbod_core::erasure::ShardIndex(1))
+        .expect("device");
+    std::fs::remove_file(test.shard_path(third, "k", &record)).expect("delete a third");
+    match client.get_object("k").await {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::NotFound, "{detail:?}");
+            assert!(
+                detail.message.contains("3 of 5 shards cannot be read"),
+                "{detail:?}"
+            );
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// SPEC 18.2.1.1, 18.3: a device marked `removed` is lost to repair as one
+/// dropped from the document is: with its directory destroyed, the read
+/// reconstructs around it, the repair relocates its shard onto the spare
+/// device without touching the removed one, and a later write replacing
+/// the object cleans nothing there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repair_rebuilds_the_shards_of_a_device_marked_removed() {
+    let test = start_node(5, 3, 1).await;
+    let mut client = test.client().await;
+    let body = xorshift64_bytes(2 * 3 * BLOCK as usize + 9, 81);
+    client
+        .put_object("k", &body, CHUNK, None)
+        .await
+        .expect("put");
+    let before = head(&mut client, "k").await.expect("head");
+    let dead = before.shards[2].device;
+    let spare = spare_device(&test, &before);
+
+    // The forced removal: the device stays in the document as removed.
+    // (Its directory is intact here so that the read's record lookup,
+    // which still wants every copy, succeeds; #174 is that rule.)
+    let mut next = test.node.document();
+    next.version += 1;
+    for d in next.devices.iter_mut() {
+        if d.id == dead {
+            d.state = DeviceState::Removed;
+        }
+    }
+    test.node.apply_document(next).expect("apply");
+    let (_, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+
+    let report = repair(&mut client, "k").await;
+    let shard = report
+        .shards
+        .iter()
+        .find(|s| s.index == 2)
+        .expect("shard 2");
+    assert_eq!(shard.condition, ShardCondition::Lost);
+    assert!(shard.rewritten);
+    assert_eq!(shard.relocated_to, Some(spare));
+    let after = head(&mut client, "k").await.expect("head");
+    assert_eq!(after.revision, 1);
+    assert_eq!(after.device_for(ShardIndex(2)), Some(spare));
+    assert!(after.shard_on(dead).is_none());
+    let (read, got) = client.get_object("k").await.expect("get");
+    assert_eq!(got, body);
+    assert!(read.reconstructed.is_empty(), "{:?}", read.reconstructed);
+
+    // Now the directory goes too. Replacing the object deletes the old
+    // version everywhere it can be deleted; the removed device is skipped
+    // rather than failing the put, and nothing is recreated there.
+    let root = test.node.device(dead).expect("device").root().to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+    client
+        .put_object("k", &body[..BLOCK as usize], CHUNK, None)
+        .await
+        .expect("put again");
+    assert!(!root.exists());
+}
+
+/// SPEC 19.1.3, 5.6: a node the coordinator cannot reach does not fail
+/// `Status`. It is reported unreachable with the reason, and its devices
+/// are listed from the document as unavailable with no space.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_reports_an_unreachable_node_instead_of_failing() {
+    let test = start_node(3, 2, 1).await;
+    let mut client = test.client().await;
+    // A node nobody is listening for, with one device.
+    let ghost = djbod_core::cluster::NodeId(Uuid::from_u128(0xdead));
+    let ghost_device = DeviceId(Uuid::from_u128(0xbeef));
+    let mut next = test.node.document();
+    next.version += 1;
+    next.nodes.push(djbod_core::cluster::NodeEntry {
+        id: ghost,
+        addresses: vec!["127.0.0.1:1".to_string()],
+        label: Some("ghost".to_string()),
+        state: djbod_core::cluster::NodeState::Active,
+    });
+    next.devices.push(djbod_core::cluster::DeviceEntry {
+        id: ghost_device,
+        node: ghost,
+        state: DeviceState::Active,
+        label: Some("ghost-d0".to_string()),
+    });
+    test.node.apply_document(next).expect("apply");
+
+    match client.request(Request::Status).await.expect("status") {
+        Response::Status { nodes, devices, .. } => {
+            assert_eq!(nodes.len(), 2, "{nodes:?}");
+            let here = nodes
+                .iter()
+                .find(|n| n.node == test.node.id())
+                .expect("this node");
+            assert!(here.reachable);
+            assert_eq!(here.build.as_deref(), Some(djbod_client::BUILD));
+            assert!(here.error.is_none());
+            let gone = nodes.iter().find(|n| n.node == ghost).expect("ghost");
+            assert!(!gone.reachable);
+            assert!(gone.build.is_none());
+            assert!(
+                gone.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("127.0.0.1:1")),
+                "{gone:?}"
+            );
+            assert_eq!(devices.len(), 4, "{devices:?}");
+            let listed = devices
+                .iter()
+                .find(|d| d.device == ghost_device)
+                .expect("ghost device");
+            assert!(!listed.available);
+            assert_eq!(listed.state, DeviceState::Active);
+            assert_eq!(listed.label.as_deref(), Some("ghost-d0"));
+            assert_eq!(listed.node_label.as_deref(), Some("ghost"));
+            assert_eq!((listed.total_bytes, listed.free_bytes), (0, 0));
+            assert!(devices
+                .iter()
+                .filter(|d| d.node != ghost)
+                .all(|d| d.available));
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
 }

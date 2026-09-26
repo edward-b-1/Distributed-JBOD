@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="700" height="200" viewBox="0 0 700 200">
+  <rect width="700" height="200" fill="#F1F5F9"/>
+  <g font-family="Segoe UI" font-size="13" fill="#64748B">
+    <text x="30" y="30">app icon 96</text><text x="170" y="30">icon 64/48/32</text>
+    <text x="400" y="30">favicon 32/24/16</text><text x="560" y="30">mark @64</text>
+  </g>
+  <image xlink:href="png/djbod-appicon-96.png" x="30" y="60" width="96" height="96"/>
+  <image xlink:href="png/djbod-icon-64.png" x="170" y="70" width="64" height="64"/>
+  <image xlink:href="png/djbod-icon-48.png" x="250" y="78" width="48" height="48"/>
+  <image xlink:href="png/djbod-icon-32.png" x="312" y="86" width="32" height="32"/>
+  <image xlink:href="png/djbod-favicon-32.png" x="400" y="86" width="32" height="32"/>
+  <image xlink:href="png/djbod-favicon-24.png" x="446" y="90" width="24" height="24"/>
+  <image xlink:href="png/djbod-favicon-16.png" x="484" y="94" width="16" height="16"/>
+  <image xlink:href="png/djbod-mark-64.png" x="560" y="70" width="64" height="64"/>
+</svg>

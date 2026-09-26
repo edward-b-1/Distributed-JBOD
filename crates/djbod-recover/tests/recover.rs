@@ -7,12 +7,13 @@ use djbod_core::checksum::checksum_block;
 use djbod_core::device::Device;
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::hash_key;
-use djbod_core::layout::shard_file_name;
+use djbod_core::layout::{record_file_name, shard_file_name};
 use djbod_core::record::{MetadataRecord, ShardLocation, RECORD_FORMAT_VERSION, SYSTEM_NAME};
 use djbod_core::shardfile::ShardFileHeader;
 use djbod_core::stripe::encode_stripe;
 use djbod_core::version::VersionId;
 use time::OffsetDateTime;
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 const BLOCK: usize = 64 * 1024;
@@ -116,6 +117,92 @@ fn shard_path(device: &Device, record: &MetadataRecord, index: u8) -> std::path:
 }
 
 #[test]
+fn listing_aligns_long_unicode_keys_large_numbers_and_orphan_shards() {
+    let scheme = Scheme::new(1, 1).expect("scheme");
+    let cluster = Uuid::new_v4();
+    let dirs: Vec<_> = (0..2).map(|_| tempfile::tempdir().expect("dir")).collect();
+    let devices: Vec<_> = dirs
+        .iter()
+        .map(|d| Device::initialise(d.path(), cluster).expect("init"))
+        .collect();
+    let keys = [
+        "short".to_string(),
+        "a".repeat(120),
+        "界".repeat(21),
+        "e\u{301}".repeat(25),
+    ];
+    for (i, key) in keys.iter().enumerate() {
+        let mut record = store_object(&devices, scheme, key, VersionId([i as u8; 16]), b"value");
+        if i == 1 {
+            // A metadata-only entry lets the listing exercise the full
+            // numeric range without allocating an enormous object.
+            record.revision = u64::MAX;
+            record.size = u64::MAX;
+            for (index, device) in devices.iter().enumerate() {
+                std::fs::remove_file(shard_path(device, &record, index as u8))
+                    .expect("remove shard");
+                let path = device
+                    .object_directory(&record.key_hash)
+                    .join(record_file_name(&record.version));
+                std::fs::write(path, record.to_json()).expect("write record");
+            }
+        }
+    }
+    let orphan = store_object(&devices, scheme, "unknown", VersionId([9; 16]), b"orphan");
+    for device in &devices {
+        std::fs::remove_file(
+            device
+                .object_directory(&orphan.key_hash)
+                .join(record_file_name(&orphan.version)),
+        )
+        .expect("remove record");
+    }
+
+    let (ok, out, err) = recover(&[
+        "list",
+        dirs[0].path().to_str().unwrap(),
+        dirs[1].path().to_str().unwrap(),
+    ]);
+    assert!(
+        !ok,
+        "missing shards and records must still produce exit status 2"
+    );
+    assert!(
+        err.contains("4 versions, 2 not recoverable, 0 problems"),
+        "{err}"
+    );
+    assert!(out.contains("no record found; key unknown"), "{out}");
+    assert!(out.contains(&u64::MAX.to_string()), "{out}");
+    for key in &keys {
+        assert!(out.contains(key), "key was truncated: {out}");
+    }
+
+    // Check left edges for text and right edges for REV/SIZE, measured in
+    // display columns. Single spaces within key hashes/statuses are data.
+    let edges = |line: &str| {
+        let mut offset = 0;
+        let mut columns = Vec::new();
+        for cell in line.split("  ") {
+            let start = offset + cell.len() - cell.trim_start().len();
+            offset += cell.len() + 2;
+            if !cell.trim().is_empty() {
+                let right = matches!(columns.len(), 2 | 3);
+                columns.push(line[..start].width() + if right { cell.trim().width() } else { 0 });
+            }
+        }
+        columns
+    };
+    let mut lines = out.lines();
+    let header = edges(lines.next().expect("header"));
+    assert_eq!(header.len(), 6, "{out}");
+    let rows: Vec<_> = lines.collect();
+    assert_eq!(rows.len(), 5, "{out}");
+    for row in rows {
+        assert_eq!(edges(row), header, "misaligned row:\n{out}");
+    }
+}
+
+#[test]
 fn lists_and_extracts_from_device_directories_alone() {
     let scheme = Scheme::new(3, 1).expect("scheme");
     let cluster = Uuid::new_v4();
@@ -153,7 +240,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     assert_eq!(out.matches("4/4").count(), 3, "{out}");
     assert_eq!(out.matches("recoverable").count(), 3, "{out}");
     assert!(
-        err.contains("3 version(s), 0 not recoverable, 0 problem(s)"),
+        err.contains("3 versions, 0 not recoverable, 0 problems"),
         "{err}"
     );
 
@@ -233,7 +320,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     assert!(ok, "{err}");
     assert_eq!(std::fs::read(&repaired).expect("read"), newer);
     assert!(
-        err.contains("stripe 0: reconstructed around shard(s) [1]"),
+        err.contains("stripe 0: reconstructed around 1 shard [1]"),
         "{err}"
     );
 
@@ -259,7 +346,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     );
     assert!(!ok);
     assert!(
-        err.contains("stripe 0: only 2 usable block(s) of 3 needed; damaged shard(s) [1, 2]"),
+        err.contains("stripe 0: only 2 usable blocks of 3 needed; 2 damaged shards [1, 2]"),
         "{err}"
     );
     assert!(!failed.exists());
@@ -290,7 +377,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     );
     assert!(!ok);
     assert!(
-        err.contains("only 2 intact shard(s) of 3+1 found; need at least 3"),
+        err.contains("only 2 intact shards of 3+1 found; need at least 3"),
         "{err}"
     );
     assert!(!refused.exists());

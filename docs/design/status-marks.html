@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Status Marks</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984; --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding: 24px 16px 48px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .lede { color: var(--text-2); margin: 0 0 24px; max-width: 65ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 30px 0 6px; }
+  .note { color: var(--text-2); margin: 0 0 10px; max-width: 70ch; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 800px) { .pair { grid-template-columns: 1fr; } }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 6px 9px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--text-2); font-weight: 600; font-size: 11.5px; }
+  tr:last-child td { border-bottom: none; }
+  .why { display: block; color: var(--muted); font-size: 12px; }
+  .cell { display: inline-flex; align-items: center; gap: 6px; }
+  .cell svg, .state svg { width: 15px; height: 15px; flex: none; }
+  .health { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .health svg { width: 36px; height: 36px; flex: none; }
+  .health .t { font-weight: 600; } .health .s { color: var(--text-2); font-size: 12px; }
+  .states { display: flex; gap: 14px; margin-top: 10px; color: var(--text-2); }
+  .state { display: inline-flex; align-items: center; gap: 6px; }
+  .g { color: var(--good); } .r { color: var(--critical); } .y { color: var(--warning); } .m { color: var(--muted); }
+  .k { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- A: filled circles, white glyphs -->
+    <symbol id="a-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M7.5 12.5l3 3 6-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="a-bad" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="a-warn" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M12 7v6" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.5" fill="#fff"/></symbol>
+    <symbol id="a-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M8 12h8" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <!-- B: outline circles, stroke glyphs, same stroke as the rail icons -->
+    <symbol id="b-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 12.5l2.7 2.7 5.3-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="b-bad" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="b-warn" viewBox="0 0 24 24"><path d="M12 3.5l9.5 16.5H2.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.5v4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="17" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="b-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.5 12h7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <!-- C: rounded squares, white glyphs -->
+    <symbol id="c-ok" viewBox="0 0 24 24"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="currentColor"/><path d="M7.5 12.5l3 3 6-7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="c-bad" viewBox="0 0 24 24"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="currentColor"/><path d="M8.5 8.5l7 7M15.5 8.5l-7 7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <symbol id="c-warn" viewBox="0 0 24 24"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="currentColor"/><path d="M12 7v6" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.5" fill="#fff"/></symbol>
+    <symbol id="c-off" viewBox="0 0 24 24"><rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="currentColor"/><path d="M8 12h8" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></symbol>
+    <!-- D: bare glyphs, no container -->
+    <symbol id="d-ok" viewBox="0 0 24 24"><path d="M4.5 12.5l5 5L19.5 7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="d-bad" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></symbol>
+    <symbol id="d-warn" viewBox="0 0 24 24"><path d="M12 4v11" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"/><circle cx="12" cy="19.5" r="1.8" fill="currentColor"/></symbol>
+    <symbol id="d-off" viewBox="0 0 24 24"><path d="M5 12h14" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></symbol>
+    <!-- E: dots, the shape carries the state too -->
+    <symbol id="e-ok" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="currentColor"/></symbol>
+    <symbol id="e-bad" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+    <symbol id="e-warn" viewBox="0 0 24 24"><path d="M12 5l7.5 13h-15z" fill="currentColor"/></symbol>
+    <symbol id="e-off" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+  </defs>
+</svg>
+
+<h1>Status marks for the djbod console</h1>
+<p class="lede">The page marks pass, fail, and warning in many places: the nodes table, the health card, device states, verify results, the object list, logs. Today they are text glyphs from the font, which is why the check, the cross, and the black triangle do not match. Five drawn sets below, each shown in a nodes-table row, a health card, and the device states, in both themes. Every set uses the same four colours: green, red, amber, and grey for off or removed.</p>
+
+<script>
+  const SETS = [
+    ['a', 'A · Filled circles', 'Solid discs with a white check, cross, or exclamation, and a dash for removed. The strongest colour at small sizes; the same shape everywhere, like the health card’s mark today.'],
+    ['b', 'B · Outline', 'Circles and a triangle drawn with the same 1.8 px stroke as the rail’s icons, so every icon on the page is from one family. Lighter on the eye in a dense table; the triangle keeps the warning distinct even in greyscale.'],
+    ['c', 'C · Rounded squares', 'Filled rounded squares with white glyphs. Reads as a badge or tag; sits well beside text and in the object list’s narrow column.'],
+    ['d', 'D · Bare glyphs', 'The check, cross, and exclamation with no container, drawn heavy so they hold at 15 px. Closest to what is there now, but drawn rather than typed, so they finally match each other.'],
+    ['e', 'E · Shapes', 'A dot for pass, a square for fail, a triangle for warning, a ring for off. No glyph at all: the colour says it and the shape backs it up for anyone who cannot tell the colours apart.'],
+  ];
+  const row = (id) => `
+    <table><thead><tr><th>Node</th><th>Reachable</th><th>Document</th><th>Build</th><th>Devices</th><th>State</th></tr></thead><tbody>
+      <tr><td>devbox4</td><td><span class="cell g"><svg><use href="#${id}-ok"/></svg>ping ok</span></td><td><span class="cell g"><svg><use href="#${id}-ok"/></svg>version 15</span></td><td><span class="cell g"><svg><use href="#${id}-ok"/></svg>5ddd227</span></td><td><span class="cell g"><svg><use href="#${id}-ok"/></svg>3</span><span class="why">9.1 TiB free</span></td><td>3 active</td></tr>
+      <tr><td>devbox</td><td><span class="cell r"><svg><use href="#${id}-bad"/></svg>ping failed</span><span class="why">connection refused</span></td><td><span class="cell r"><svg><use href="#${id}-bad"/></svg>version 14</span><span class="why">current is 15</span></td><td><span class="cell y"><svg><use href="#${id}-warn"/></svg>older, unreported</span></td><td><span class="cell y"><svg><use href="#${id}-warn"/></svg>2</span><span class="why">1.8 TiB free</span></td><td><span class="cell y"><svg><use href="#${id}-warn"/></svg>1 active, 1 draining</span></td></tr>
+    </tbody></table>
+    <div class="health"><svg class="r"><use href="#${id}-bad"/></svg><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; current is 15</div></div></div>
+    <div class="states"><span class="state g"><svg><use href="#${id}-ok"/></svg>active</span><span class="state y"><svg><use href="#${id}-warn"/></svg>draining</span><span class="state m"><svg><use href="#${id}-off"/></svg>removed</span><span class="state g"><svg><use href="#${id}-ok"/></svg>verified</span><span class="state r"><svg><use href="#${id}-bad"/></svg>damaged</span></div>`;
+  for (const [id, title, note] of SETS) {
+    document.write(`<h2>${title}</h2><p class="note">${note}</p><div class="pair"><div><p class="k">light</p><div class="mock light">${row(id)}</div></div><div><p class="k">dark</p><div class="mock dark">${row(id)}</div></div></div>`);
+  }
+</script>
+</body>
+</html>

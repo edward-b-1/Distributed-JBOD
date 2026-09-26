@@ -9,10 +9,10 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+use djbod_client::transport::Connector;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_node::transport::Connector;
 use djbod_ui::{router, router_for_hosts, Target};
 use tokio::net::TcpListener;
 
@@ -61,7 +61,7 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
 
 fn app(test: &TestNode) -> axum::Router {
     router(Target {
-        node: test.addr,
+        nodes: vec![test.addr],
         cluster: test.node.cluster_id(),
         connector: Connector::plain(),
     })
@@ -168,7 +168,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(json["devices"][0]["state"], "active");
     assert_eq!(json["transport"], "plain");
     assert_eq!(json["ui_to_node_tls"], false);
-    assert_eq!(json["ui_build"], djbod_node::BUILD);
+    assert_eq!(json["ui_build"], djbod_client::BUILD);
 
     let (status, json) = get_json(&test, "/api/cluster").await;
     assert_eq!(status, StatusCode::OK, "{json}");
@@ -178,7 +178,7 @@ async fn status_and_cluster_describe_the_node() {
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0]["version"], json["document"]["version"]);
     assert!(nodes[0]["error"].is_null());
-    assert_eq!(nodes[0]["build"], djbod_node::BUILD);
+    assert_eq!(nodes[0]["build"], djbod_client::BUILD);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -224,6 +224,8 @@ async fn object_round_trip_through_http() {
     assert_eq!(json["keys"].as_array().unwrap().len(), 1);
     assert_eq!(json["keys"][0]["key"], key);
     assert_eq!(json["truncated"], false);
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["unread"].as_array().unwrap().len(), 0);
     let (_, json) = get_json(&test, "/api/objects?prefix=other/").await;
     assert_eq!(json["keys"].as_array().unwrap().len(), 0);
 
@@ -283,9 +285,9 @@ async fn repair_rebuilds_a_shard_damaged_on_disk() {
     }
     assert!(damaged.is_some(), "no shard file written");
 
-    // The headers go out before the damage is met, so the response
-    // carries the full length but its body is cut short with an error
-    // rather than delivering wrong bytes.
+    // The damaged block is reconstructed from parity on the way (SPEC
+    // 11.4), so the download is complete and correct; the disk is not
+    // repaired until the repair below.
     let response = app(&test)
         .oneshot(
             Request::get("/api/download/a/b")
@@ -299,14 +301,8 @@ async fn repair_rebuilds_a_shard_damaged_on_disk() {
         response.headers()[header::CONTENT_LENGTH],
         body.len().to_string()
     );
-    let outcome = response.into_body().collect().await;
-    match outcome {
-        Err(e) => assert!(e.to_string().contains("BlockChecksumMismatch"), "{e}"),
-        Ok(collected) => assert!(
-            collected.to_bytes().len() < body.len(),
-            "a damaged read must not deliver the whole body"
-        ),
-    }
+    let collected = response.into_body().collect().await.expect("body");
+    assert_eq!(collected.to_bytes().as_ref(), body.as_slice());
 
     let (status, report) = post_json(&test, "/api/repair/a/b", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "{report}");
@@ -432,13 +428,13 @@ async fn drain_and_scrub_stream_events_as_json_lines() {
         .lines()
         .map(|l| serde_json::from_str(l).expect("json line"))
         .collect();
-    // The removed device is still open on the node until its path leaves
-    // the node's configuration, so the node still scrubs it.
+    // The removed device is retired (SPEC 18.2.1): still open on the node
+    // until its path leaves the configuration, but no longer scrubbed.
     let summaries = lines
         .iter()
         .filter(|l| l["event"] == "node_summary")
         .count();
-    assert_eq!(summaries, 5, "one per device the node has open: {lines:?}");
+    assert_eq!(summaries, 4, "one per device still in service: {lines:?}");
     assert!(
         lines
             .iter()
@@ -600,7 +596,10 @@ async fn bad_requests_are_reported_as_such() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_node_that_is_down_is_reported_not_crashed() {
     let target = Target {
-        node: "127.0.0.1:1".parse().unwrap(),
+        nodes: vec![
+            "127.0.0.1:1".parse().unwrap(),
+            "127.0.0.1:2".parse().unwrap(),
+        ],
         cluster: Uuid::new_v4(),
         connector: Connector::plain(),
     };
@@ -612,6 +611,84 @@ async fn a_node_that_is_down_is_reported_not_crashed() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"]["code"], "node_unreachable");
+    // The message names every address tried and says why in plain words;
+    // the operating system's own text is kept aside for debugging.
+    assert_eq!(
+        json["error"]["message"],
+        "no node is reachable: 127.0.0.1:1: connection refused; 127.0.0.1:2: connection refused",
+        "{json}"
+    );
+    assert_eq!(
+        json["error"]["addresses"],
+        serde_json::json!(["127.0.0.1:1", "127.0.0.1:2"])
+    );
+    let detail = json["error"]["detail"].as_str().unwrap();
+    assert!(detail.contains("refused"), "{detail}");
+    assert!(
+        !json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("os error"),
+        "{json}"
+    );
+}
+
+/// With one address configured the message is about that node alone, and
+/// the address stands on its own for the page.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_dead_node_is_named_alone() {
+    let target = Target {
+        nodes: vec!["127.0.0.1:1".parse().unwrap()],
+        cluster: Uuid::new_v4(),
+        connector: Connector::plain(),
+    };
+    let response = router(target)
+        .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        json["error"]["message"], "node 127.0.0.1:1 is not reachable: connection refused",
+        "{json}"
+    );
+    assert_eq!(json["error"]["address"], "127.0.0.1:1");
+    assert_eq!(
+        json["error"]["addresses"],
+        serde_json::json!(["127.0.0.1:1"])
+    );
+}
+
+/// A dead node first in the list is skipped for one that answers, and the
+/// status says which one that was (SPEC 20.3); the next call goes
+/// straight to the node that answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_later_node_is_used_when_the_first_is_down() {
+    let test = start_node(3, 2, 1).await;
+    let app = router(Target {
+        nodes: vec!["127.0.0.1:1".parse().unwrap(), test.addr],
+        cluster: test.node.cluster_id(),
+        connector: Connector::plain(),
+    });
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(Request::get("/api/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["via"], test.addr.to_string());
+    }
+    // Membership procedures find a live peer the same way.
+    let response = app
+        .clone()
+        .oneshot(Request::get("/api/cluster").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -765,20 +842,29 @@ async fn verify_names_the_damage_a_download_would_meet() {
     }
     assert!(damaged.is_some());
 
+    // The body verifies, by reconstruction (SPEC 11.4): the verdict says
+    // which block was bad, and the key is noted as damaged until repaired.
     let (status, lines) = verify_lines(&test, "v/file").await;
     assert_eq!(status, StatusCode::OK, "{lines:?}");
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done", "{lines:?}");
-    assert_eq!(done["verified"], false);
-    assert_eq!(done["error"]["code"], "block_checksum_mismatch");
-    assert_eq!(done["error"]["shard_index"], 0);
-    assert_eq!(done["error"]["stripe"], 0);
-    assert!(done["error"]["device"].is_string());
+    assert_eq!(done["verified"], true);
+    assert!(done["error"].is_null(), "{done}");
+    assert_eq!(done["reconstructed"][0]["shard_index"], 0, "{done}");
+    assert_eq!(done["reconstructed"][0]["first_stripe"], 0, "{done}");
+    assert_eq!(done["reconstructed"][0]["stripes"], 1, "{done}");
+    assert!(done["reconstructed"][0]["device"].is_string());
 
     let (status, report) = post_json(&test, "/api/repair/v/file", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK, "{report}");
     let (_, lines) = verify_lines(&test, "v/file").await;
-    assert_eq!(lines.last().unwrap()["verified"], true, "{lines:?}");
+    let done = lines.last().unwrap();
+    assert_eq!(done["verified"], true, "{lines:?}");
+    assert_eq!(
+        done["reconstructed"].as_array().map(Vec::len),
+        Some(0),
+        "{done}"
+    );
 
     let (status, lines) = verify_lines(&test, "v/missing").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{lines:?}");
@@ -961,9 +1047,11 @@ async fn a_read_the_node_stopped_is_remembered_until_something_succeeds() {
         }
     }
 
+    // The download is complete, by reconstruction (SPEC 11.4), and the
+    // damage it met is noted against the key.
     let (status, collected) = get("/api/download/f/one").await;
     assert_eq!(status, StatusCode::OK);
-    assert!(collected.is_err(), "the damaged download must be cut short");
+    assert!(collected.is_ok(), "the reconstructed download completes");
     let listed = failures().await;
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["key"], "f/one");
@@ -1134,7 +1222,7 @@ async fn requests_from_another_site_or_host_are_refused() {
     // A name the operator declared is fine.
     let named = router_for_hosts(
         Target {
-            node: test.addr,
+            nodes: vec![test.addr],
             cluster: test.node.cluster_id(),
             connector: Connector::plain(),
         },
@@ -1194,23 +1282,42 @@ async fn node_labels_are_set_shown_and_cleared() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_icon_is_served_for_the_tab_and_the_header() {
+async fn the_brand_assets_are_served_for_the_tab_and_the_header() {
     let test = start_node(4, 3, 1).await;
-    for path in ["/icon.png", "/icon-dark.png"] {
+    let build = djbod_client::BUILD;
+    for (name, kind, magic) in [
+        ("lockup.svg", "image/svg+xml", &b"<?xml"[..]),
+        ("lockup-dark.svg", "image/svg+xml", &b"<?xml"[..]),
+        ("favicon.svg", "image/svg+xml", &b"<"[..]),
+        ("favicon-32.png", "image/png", &b"\x89PNG"[..]),
+        ("appicon-256.png", "image/png", &b"\x89PNG"[..]),
+    ] {
+        let path = format!("/brand/{build}/{name}");
         let (status, headers, body) = call(
             &test,
-            Request::get(path).body(Body::empty()).expect("request"),
+            Request::get(&path).body(Body::empty()).expect("request"),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{path}");
-        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
-        assert!(body.starts_with(b"\x89PNG"), "{path} is not a PNG");
+        assert_eq!(headers[header::CONTENT_TYPE], kind, "{path}");
+        assert!(body.starts_with(magic), "{path} has the wrong content");
+        assert!(headers[header::CACHE_CONTROL]
+            .to_str()
+            .unwrap()
+            .contains("immutable"));
     }
+    // The page names the assets under this build's id, so a browser that
+    // cached an older build's logo fetches the new one.
     let (_, _, page) = call(
         &test,
         Request::get("/").body(Body::empty()).expect("request"),
     )
     .await;
     let text = String::from_utf8_lossy(&page);
-    assert!(text.contains(r#"<link rel="icon" type="image/png" sizes="256x256" href="/icon.png">"#));
+    assert!(
+        text.contains(&format!(r#"href="/brand/{build}/favicon.svg""#)),
+        "{build}"
+    );
+    assert!(text.contains(&format!(r#"src="/brand/{build}/lockup.svg""#)));
+    assert!(!text.contains(r#""/brand/lockup.svg""#));
 }

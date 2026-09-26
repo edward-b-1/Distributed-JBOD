@@ -13,7 +13,7 @@ use crate::coordinator;
 use crate::local_ops;
 use crate::node::Node;
 use crate::transport::{self, Accepted};
-use crate::wire::{read_message, write_message, WireError};
+use djbod_client::wire::{read_message, write_message, WireError};
 
 /// Why a connection was closed. Every connection ends with one of these;
 /// only `PeerClosed` is silent.
@@ -23,6 +23,8 @@ pub enum ConnectionEnd {
     Wire(WireError),
     ProtocolViolation(String),
     HelloRefused(String),
+    /// A client asked which cluster this is and was told (19.1.5.1).
+    ClusterIdGiven,
 }
 
 impl From<WireError> for ConnectionEnd {
@@ -67,6 +69,9 @@ pub async fn serve(node: Arc<Node>, listener: TcpListener) {
                         let end = handle_connection(node, stream).await;
                         match end {
                             ConnectionEnd::PeerClosed => tracing::debug!("connection closed"),
+                            ConnectionEnd::ClusterIdGiven => {
+                                tracing::debug!("told a client the cluster id")
+                            }
                             other => tracing::info!(?other, "connection ended"),
                         }
                     }
@@ -102,7 +107,7 @@ pub fn our_hello(node: &Node) -> Hello {
         node_id: Some(node.id()),
         cluster_id: node.cluster_id(),
         document_version: node.document_version(),
-        build: Some(crate::BUILD.to_string()),
+        build: djbod_client::BUILD.to_string(),
         cluster_name: node.document().name.clone(),
     }
 }
@@ -170,6 +175,11 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
     if let Err(e) = write_message(&mut writer, &Message::Hello(our_hello(&node))).await {
         return e.into();
     }
+    if hello.asks_cluster_id() {
+        // Our Hello carried the id, name, and build; nothing else is
+        // served to a client that did not name the cluster.
+        return ConnectionEnd::ClusterIdGiven;
+    }
     let span = tracing::Span::current();
     span.record("kind", tracing::field::debug(hello.kind));
     if let Some(node_id) = hello.node_id {
@@ -192,7 +202,7 @@ async fn handle_connection(node: Arc<Node>, stream: TcpStream) -> ConnectionEnd 
                 // since what the request expected next is unknown.
                 let message = format!(
                     "this node (build {}) cannot decode the request: {reason}. A field it does not know means the peer is newer; upgrade this node",
-                    crate::BUILD
+                    djbod_client::BUILD
                 );
                 let detail = ErrorDetail {
                     node: Some(node.id()),
@@ -245,6 +255,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
     use djbod_proto::message::Request::*;
     match request {
         Status => "Status",
+        DeviceContents { .. } => "DeviceContents",
         PutObject { .. } => "PutObject",
         GetObject { .. } => "GetObject",
         HeadObject { .. } => "HeadObject",

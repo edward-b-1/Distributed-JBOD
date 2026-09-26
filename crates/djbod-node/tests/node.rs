@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use djbod_client::connection::{Connection, ConnectionError, StreamItem};
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{ClusterDocument, DeviceState};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
@@ -16,7 +17,6 @@ use djbod_core::record::{
 };
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, ShardBlock};
 use djbod_core::version::VersionId;
-use djbod_node::client::{ClientError, Connection, StreamItem};
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
@@ -107,7 +107,7 @@ impl TestNode {
             node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
             cluster_id: self.node.cluster_id(),
             document_version: self.node.document_version(),
-            build: None,
+            build: djbod_client::BUILD.to_string(),
             cluster_name: None,
         };
         Connection::connect(self.addr, hello)
@@ -183,7 +183,7 @@ fn record_for(
 }
 
 /// Store a whole object on one node's devices through the protocol, one
-/// shard per device, then its record on every holder.
+/// shard per device, then its record on every one of them.
 async fn store_object(
     test: &TestNode,
     conn: &mut Connection,
@@ -264,7 +264,9 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
 
     let wrong = Connection::connect(test.addr, Connection::client_hello(Uuid::new_v4())).await;
     match wrong {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::ProtocolViolation),
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::ProtocolViolation)
+        }
         other => panic!("expected refusal, got {other:?}"),
     }
 
@@ -274,11 +276,11 @@ async fn hello_from_the_wrong_cluster_or_a_stale_node_is_refused() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: test.node.cluster_id(),
         document_version: 99,
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     match Connection::connect(test.addr, stale).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch);
             assert_eq!(detail.node, Some(test.node.id()));
         }
@@ -462,7 +464,7 @@ async fn shards_and_records_round_trip_through_the_protocol() {
         )
         .await;
     match gone {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::NotFound);
             assert_eq!(detail.device, Some(device0));
         }
@@ -571,7 +573,7 @@ async fn an_out_of_order_stripe_is_refused_and_leaves_no_file() {
     .await
     .expect("send data");
     match conn.read_response(id).await {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::ProtocolViolation);
             assert!(detail
                 .message
@@ -624,7 +626,7 @@ async fn a_shard_whose_blocks_do_not_match_the_object_size_is_refused() {
         )
         .await;
     match result {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::WriteFailed);
             assert_eq!(detail.device, Some(device));
             assert!(
@@ -730,7 +732,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         .request(Request::ApplyClusterConfig { document: same })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -745,7 +747,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         })
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::DocumentVersionMismatch)
         }
         other => panic!("expected refusal, got {other:?}"),
@@ -790,7 +792,7 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         )
         .await
     {
-        Err(ClientError::Remote(detail)) => {
+        Err(ConnectionError::Remote(detail)) => {
             assert_eq!(detail.code, ErrorCode::WriteFailed);
             assert!(detail.message.contains("not active"));
         }
@@ -805,12 +807,12 @@ async fn apply_cluster_config_requires_a_higher_version_and_persists() {
         node_id: Some(djbod_core::cluster::NodeId(Uuid::new_v4())),
         cluster_id: test.node.cluster_id(),
         document_version: 1,
-        build: None,
+        build: djbod_client::BUILD.to_string(),
         cluster_name: None,
     };
     assert!(matches!(
         Connection::connect(test.addr, stale).await,
-        Err(ClientError::Remote(_))
+        Err(ConnectionError::Remote(_))
     ));
 }
 
@@ -853,13 +855,13 @@ async fn a_sender_that_abandons_a_shard_leaves_nothing_and_abort_shard_is_idempo
         id,
         StreamEnd::failed(djbod_proto::message::ErrorDetail::new(
             ErrorCode::WriteFailed,
-            "another holder failed",
+            "another node failed",
         )),
     )
     .await
     .expect("send end");
     match conn.read_response(id).await {
-        Err(ClientError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::WriteFailed),
+        Err(ConnectionError::Remote(detail)) => assert_eq!(detail.code, ErrorCode::WriteFailed),
         other => panic!("expected WriteFailed, got {other:?}"),
     }
     let dir = test
@@ -927,5 +929,175 @@ async fn two_devices_on_one_filesystem_are_refused_unless_allowed() {
         Err(djbod_node::node::NodeError::SameFilesystem { .. }) => {}
         Ok(_) => panic!("two directories on one filesystem should be refused"),
         Err(other) => panic!("expected SameFilesystem, got {other:?}"),
+    }
+}
+
+/// SPEC 5.6: a device whose directory is destroyed while the node runs is
+/// reported unavailable, refuses a write rather than recreating the
+/// directory, and lists no records.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_destroyed_device_is_unavailable_and_not_recreated() {
+    let test = start_node(3, 2, 1).await;
+    let mut conn = test.connect_as_node().await;
+    let object = xorshift64_bytes(3 * BLOCK as usize + 17, 5);
+    let record = store_object(&test, &mut conn, "k", VersionId([5u8; 16]), &object).await;
+    let dead = test.devices()[1];
+    let root = test.device_root(dead);
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 3);
+            for status in &devices {
+                assert_eq!(status.available, status.device != dead, "{status:?}");
+                assert_eq!(status.total_bytes == 0, status.device == dead, "{status:?}");
+            }
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+
+    let refused = conn
+        .request(Request::PutMeta {
+            device: dead,
+            record: record.clone(),
+        })
+        .await;
+    match refused {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert_eq!(detail.device, Some(dead));
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(!root.exists(), "the write recreated {}", root.display());
+
+    let listed = conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await;
+    match listed {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}")
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// SPEC 5.6: a node starts without a device whose path is gone, reports
+/// that device unavailable rather than refusing to start, refuses a
+/// request naming it, and places a write around it, saying so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_node_starts_without_a_missing_device_and_reports_it_unavailable() {
+    // Built by hand rather than with start_node, so that no server is
+    // running under the cluster's address while the node is reopened.
+    let dirs: Vec<tempfile::TempDir> = (0..4)
+        .map(|_| tempfile::tempdir().expect("temp dir"))
+        .collect();
+    let state = tempfile::tempdir().expect("temp dir");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let config = NodeConfig {
+        node_id: Uuid::new_v4(),
+        listen: addr,
+        advertise: None,
+        state_dir: state.path().to_path_buf(),
+        devices: dirs.iter().map(|d| d.path().to_path_buf()).collect(),
+        bootstrap_peers: vec![],
+        temporary_max_age_secs: 3600,
+        stream_idle_timeout_secs: 120,
+        allow_shared_filesystem: true,
+        tls: None,
+    };
+    let parameters = ClusterParameters {
+        k: 2,
+        m: 1,
+        block_size: BLOCK,
+        headroom: 0.0,
+        ..ClusterParameters::default()
+    };
+    let created = Node::init_cluster(config.clone(), parameters).expect("init cluster");
+    let dead = created.devices()[3].id();
+    let dead_root = created.device(dead).expect("device").root().to_path_buf();
+    drop(created);
+    std::fs::remove_dir_all(&dead_root).expect("destroy the device directory");
+
+    let reopened = Arc::new(Node::open(config).expect("starts without it"));
+    assert_eq!(reopened.devices().len(), 3);
+    assert_eq!(reopened.unavailable_devices(), vec![dead]);
+    tokio::spawn(server::serve(reopened.clone(), listener));
+    let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
+        .await
+        .expect("connect");
+    match conn.request(Request::LocalStatus).await.expect("status") {
+        Response::LocalStatus { devices, .. } => {
+            assert_eq!(devices.len(), 4);
+            let missing = devices.iter().find(|d| d.device == dead).expect("listed");
+            assert!(!missing.available);
+            assert_eq!(missing.state, DeviceState::Active);
+            assert_eq!(missing.total_bytes, 0);
+            assert!(devices
+                .iter()
+                .filter(|d| d.device != dead)
+                .all(|d| d.available));
+        }
+        other => panic!("expected LocalStatus, got {other:?}"),
+    }
+    // A request naming it is refused as unavailable, not as unknown.
+    match conn
+        .request(Request::LocalRecords {
+            device: dead,
+            after: None,
+        })
+        .await
+    {
+        Err(ConnectionError::Remote(detail)) => {
+            assert_eq!(detail.code, ErrorCode::DeviceUnavailable, "{detail:?}");
+            assert!(detail.message.contains("unavailable"), "{detail:?}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // A write goes around the device and says so (5.6).
+    let write = conn
+        .put_object(
+            "k",
+            &xorshift64_bytes(3 * BLOCK as usize, 3),
+            64 * 1024,
+            None,
+        )
+        .await
+        .expect("put around the unavailable device");
+    assert_eq!(write.unavailable.len(), 1, "{:?}", write.unavailable);
+    assert_eq!(write.unavailable[0].device, dead);
+    assert_eq!(write.unavailable[0].node, reopened.id());
+    assert!(!dead_root.exists());
+
+    // Retired with --force (18.2.1.1), the never-opened device stays in
+    // the status as removed, like any other device in the document.
+    let (document, changed) = djbod_client::admin::remove_device_forced(
+        &djbod_node::transport::Connector::plain(),
+        addr,
+        reopened.cluster_id(),
+        dead,
+    )
+    .await
+    .expect("forced removal");
+    assert!(changed);
+    assert_eq!(
+        document.device(dead).map(|d| d.state),
+        Some(DeviceState::Removed)
+    );
+    let mut conn = Connection::connect(addr, Connection::client_hello(reopened.cluster_id()))
+        .await
+        .expect("connect");
+    match conn.request(Request::Status).await.expect("status") {
+        Response::Status { devices, .. } => {
+            assert_eq!(devices.len(), 4, "{devices:?}");
+            let retired = devices.iter().find(|d| d.device == dead).expect("listed");
+            assert_eq!(retired.state, DeviceState::Removed);
+            assert!(!retired.available);
+        }
+        other => panic!("expected Status, got {other:?}"),
     }
 }

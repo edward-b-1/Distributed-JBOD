@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui"]
+members = ["crates/djbod-core", "crates/djbod-proto", "crates/djbod-client", "crates/djbod-node", "crates/djbod-cli", "crates/djbod-recover", "crates/djbod-ui", "crates/djbod-python"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.17"
 edition = "2021"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 reed-solomon-erasure = "6.0"
@@ -20,6 +20,7 @@ rustix = { version = "1", features = ["fs"] }
 ciborium = "0.2"
 djbod-core = { path = "crates/djbod-core" }
 djbod-proto = { path = "crates/djbod-proto" }
+djbod-client = { path = "crates/djbod-client" }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "io-std", "sync", "macros", "time", "fs"] }
 djbod-node = { path = "crates/djbod-node" }
 toml = "1"
@@ -35,6 +36,8 @@ futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 djbod-ui = { path = "crates/djbod-ui" }
+comfy-table = { version = "8", default-features = false }
+unicode-width = { version = "0.2", default-features = false }
 
 # Project style: an explicit index loop is preferred over an iterator chain
 # when the index itself is meaningful (a shard index, a position in a

@@ -1,8 +1,11 @@
-<img src="crates/djbod-ui/icon/djbod-256.png" alt="" width="96" align="right">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/yellow/djbod-lockup-horizontal-onDark.svg">
+  <img src="docs/brand/yellow/djbod-lockup-horizontal.svg" alt="Distributed JBOD" width="300">
+</picture>
 
 # Distributed-JBOD
 
-A distributed, resilient, object store.
+A distributed, resilient, object store. Built with Rust.
 
 Distributed-JBOD solves the problem of a user who requires a large pool of
 network connected storage, but who does not have access to datacenter grade
@@ -46,12 +49,11 @@ target/release/djbod-node run --config /tmp/djbod/node.toml
 ```
 
 `--k 3 --m 1` splits every object into three data shards and one parity
-shard, so any one of the four devices may be lost. In another terminal,
-with the cluster id `init-cluster` printed:
+shard, so any one of the four devices may be lost. In another terminal:
 
 ```sh
 export DJBOD_NODE=127.0.0.1:5263
-export DJBOD_CLUSTER=<the cluster id>
+export DJBOD_CLUSTER=$(target/release/djbod get-cluster-id)   # or paste what init-cluster printed
 
 target/release/djbod put photos/cat.jpg cat.jpg --content-type image/jpeg
 target/release/djbod list --prefix photos/
@@ -62,15 +64,18 @@ target/release/djbod status
 For the web interface, `target/release/djbod-ui` with the same two
 variables set, then open http://127.0.0.1:5264/.
 
+[docs/guide/README.md](docs/guide/README.md) is the user guide: setup,
+deployments, every command, and what to do when a disk or a machine
+fails. [docs/getting-started.md](docs/getting-started.md) is an earlier
+walkthrough of a one-machine cluster.
+
 [docs/deployment.md](docs/deployment.md) covers running it for real:
 systemd units for a node per machine, a Docker image configured entirely
 by environment variables, and a Docker Compose stack of three nodes and
 the web UI for trying it on one computer.
 
-[docs/getting-started.md](docs/getting-started.md) continues from here:
-breaking things on purpose and repairing them, naming, draining, and
-removing disks, adding a second machine, changing the scheme, recovering
-objects with no cluster running, and turning on TLS.
+The [detailed user guide](docs/user-guide.md) covers deployment,
+configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
 
 ## What you get
 
@@ -112,15 +117,126 @@ objects with no cluster running, and turning on TLS.
   a certificate authority you create with `openssl`, or the included
   script. A running cluster switches from plain to TLS in two steps.
 
+## Alternatives?
+
+Distributed-JBOD is designed for a specific use case: non-uniform nodes
+with non-uniform storage devices. The typical deployment is a few small
+machines with whatever disks are available, with erasure coding enabled
+across all of them, every block checked on every read, and nothing else
+to run.
+
+- **MinIO** erasure-codes S3 storage, but lays it out in erasure sets of
+  uniform drives and grows by adding whole pools. A pile of odd-sized
+  disks either wastes the difference or cannot be laid out at all.
+  Distributed-JBOD places each object on the emptiest disks at the time
+  it is written, so any mix of sizes fills evenly and one new disk starts
+  taking writes at once. MinIO's community edition also changed terms
+  in 2025; check them before depending on it.
+- **Garage** is built for the same hardware, heterogeneous and
+  unreliable machines with no master, and is the closest relative. It
+  keeps three full copies of every object rather than erasure coding,
+  so it spends 3x raw space where `3+1` spends 1.33x, and it does not
+  verify each block against a checksum as it is read.
+- **SeaweedFS** is a fast volume-based blob store whose erasure coding is
+  a background tier for cold volumes, applied after the fact. It needs
+  master servers, and a filer for anything beyond flat blobs. Here
+  erasure coding is the write path, and there is no master to keep up.
+- **Ceph** does everything here and a great deal more, and is the right
+  answer at scale. It also needs monitors, managers, several
+  well-provisioned nodes to be sensible, and the operations knowledge to
+  run them, which is why small deployments avoid it.
+
+What none of them offer is the recovery story: each object here is a
+plain JSON record beside a shard file on each disk, in a layout you can
+read, and `djbod-recover` reads the objects back from bare disks with
+nothing running. Where they win, they win clearly: S3 compatibility,
+scale, years of production use, and self-management, which this
+project does not aim at, as the next section says. Distributed-JBOD is
+young, as the [Status](#status) section says.
+
+## When something fails
+
+Distributed-JBOD is built for one person's data on a few machines: a
+researcher who is also the administrator, a dataset of many terabytes,
+and consumer hardware that is probably aging. That sets the priorities.
+Durability first: erasure coding across every disk, and a checksum on
+every block, every record, and every object. Detection second: nothing
+wrong is ever read past, and nothing wrong is ever quiet. Then
+availability, of the kind the coding buys: the cluster keeps serving
+through the failures it was designed to survive, up to `m` disks, and
+does not pretend to more.
+
+Reads and writes both do what they can. A read that meets a bad block,
+a shard whose file is missing, or a shard on a disk or machine that
+cannot be reached rebuilds the data from parity and hands it back, and
+says on the way out what it had to rebuild and where. Expect such a
+read to be slower: from the first damaged stripe on, the node fetches
+the parity shards as well as the data and decodes every stripe, so a
+read that would have touched `k` disks touches `k + m` and spends CPU
+it otherwise would not, and it does so on every read of that object
+until a repair puts the disk right. The warning that comes back with
+the data is the cue to run one. Only damage beyond `m`, or record
+copies that disagree, fails the read. A write is
+placed on the emptiest disks the cluster can read, skipping ones it
+cannot, is attempted once, and fails with the node's own words if a
+disk refuses it; there is no second guess at another disk. When a write
+had to go around a dead disk, it says so. A listing goes around a dead
+disk or machine as well and names it; it is complete while fewer than
+`k + m` disks are out, and says so when that many are and an object
+could be hidden.
+
+There is no alerting subsystem, no notification hook, no health daemon,
+and none is planned. The alarm is the operation. The reconstruction, the
+skipped disk, or the failure arrives with the result, as a warning or an
+error, and your notebook or batch job sees it, which is how you find
+out, at the moment you would want to. `djbod status` and the web UI
+show the same facts on demand. `djbod scrub`, run by hand or from cron,
+checks every disk and every object and exits non-zero when it finds
+damage, so a scheduled scrub is one line of crontab and its exit code
+is the whole integration.
+
+Repair is a command, not a background process. `djbod repair <key>`
+rebuilds one object; `djbod scrub --repair` rebuilds everything the
+checks found; `djbod cluster remove-node --force` retires a machine
+that will never come back and rebuilds what it held elsewhere, and a
+device-level equivalent is planned. Each says what it will cost before
+it acts, and nothing moves data on its own.
+
+That last sentence is the line this project draws. The operations are
+forgiving; the cluster is not self-managing. A system that also heals
+itself with nobody watching needs a quorum service for its
+configuration, failure detectors, automatic rebalancing and rebuilding,
+and retries around every transient error, and those are the parts that
+make Ceph a job to run. Here one person can read the whole design,
+every piece of state is a file you can inspect, a degraded read or
+write tells you it was degraded, and putting things right is a decision
+you take with the cost in front of you. If you need a cluster that
+repairs and rebalances itself while nobody is looking, you need one of
+the systems above.
+
 ## The tools
 
 | Tool | What it is for |
 |------|----------------|
 | `djbod-node` | The node process. `init-cluster`, `join`, `add-device`, `run`, and an offline `scrub` of one machine's disks. |
-| `djbod` | The client and administration tool: `put`, `get`, `head`, `list`, `delete`, `status`, `repair`, `scrub`, `move-shard`, and `cluster` for membership and settings. `--json` everywhere. |
+| `djbod` | The client and administration tool: `put`, `get`, `head`, `list`, `delete`, `status`, `repair`, `scrub`, `move-shard`, and `cluster` for membership and settings. `identity` and `get-cluster-id` need only a node address. `--json` everywhere. |
 | `djbod-ui` | A web page for the same operations: status, devices, objects, upload and download, scrub, drain, repair. Binds to localhost. |
 | `djbod-recover` | `list` and `extract` objects from device directories with nothing running. |
 | `scripts/djbod-pki.sh` | Issues the certificate authority and node and client certificates. |
+
+From a program, the same operations are the `djbod-client` Rust crate
+and the `djbod` Python package, which wraps it:
+
+```python
+import djbod
+client = djbod.Client(["10.0.0.1:5263", "10.0.0.2:5263"])   # any node; the id is learned
+client.put("photos/cat.jpg", open("cat.jpg", "rb").read(), content_type="image/jpeg")
+print(client.head("photos/cat.jpg").size, [k.key for k in client.list_all("photos/")])
+```
+
+Both take a list of nodes and move to the next when one fails, and both
+report a node's refusal with the same detail the command-line tool
+prints. `crates/djbod-python/README.md` has the build steps.
 
 ## Security
 
@@ -135,6 +251,100 @@ localhost by default; put it behind something that does if you expose it.
 Nodes listen on TCP port **5263** by default, which spells JBOD on a
 telephone keypad.
 
+## A typical multi-node deployment
+
+The quick start runs one node with directories standing in for disks.
+The intended shape is one node per machine, each with its own disks.
+Three machines, `nas1` to `nas3` at `10.0.0.1` to `10.0.0.3`, with three
+disks each, look like this. Give every machine a fixed address, by a
+DHCP reservation if nothing else, because the cluster document records
+where each node is reached.
+
+**1. Mount the disks** on each machine, one filesystem per disk, and
+make a directory on each for djbod. Any size, any filesystem; they need
+not match each other or the other machines:
+
+```sh
+sudo mkdir -p /mnt/disk0/djbod /mnt/disk1/djbod /mnt/disk2/djbod /var/lib/djbod
+```
+
+**2. Write `/etc/djbod/node.toml`** on each machine. Only `node_id`,
+`listen`, and `bootstrap_peers` differ between them; `uuidgen` makes the
+id. On `nas1`:
+
+```toml
+node_id = "5f0c1d2e-8a9b-4c3d-9e1f-2a3b4c5d6e7f"     # this machine's, for life
+listen = "10.0.0.1:5263"                              # this machine's own address
+state_dir = "/var/lib/djbod"                          # its copy of the cluster document
+devices = ["/mnt/disk0/djbod", "/mnt/disk1/djbod", "/mnt/disk2/djbod"]
+bootstrap_peers = ["10.0.0.2:5263", "10.0.0.3:5263"]  # the others, asked at startup
+```
+
+If a machine listens on every interface, set `listen = "0.0.0.0:5263"`
+and `advertise = "10.0.0.1:5263"` so the others know which address to
+use.
+
+**3. Create the cluster on the first machine**, then start its node:
+
+```sh
+djbod-node init-cluster --config /etc/djbod/node.toml --name home-nas --k 4 --m 2
+djbod-node run --config /etc/djbod/node.toml
+```
+
+`init-cluster` prints the cluster id, and any running node repeats it to
+`djbod get-cluster-id --node <address>`. `4+2` puts six shards of
+every object on six different disks and survives any two of them
+failing, for 50% overhead; `3+1` costs 33% and survives one. Nine disks
+is comfortably more than the six a `4+2` write needs, and the choice can
+be changed later. Until enough disks have joined, writes are refused and
+say so; the first node alone cannot hold a `4+2` object.
+
+**4. Join the other machines**, each with its own configuration file,
+pointing at any node already running, then start them:
+
+```sh
+djbod-node join --config /etc/djbod/node.toml --peer 10.0.0.1:5263 --cluster <the cluster id>
+djbod-node run --config /etc/djbod/node.toml
+```
+
+`join` initialises the new disks and proposes a new version of the
+cluster document listing the machine and its disks, which every running
+node must accept. Run each node under `systemd` or whatever keeps
+services alive on that machine, so it restarts with it; at startup a
+node asks its bootstrap peers for a newer document, so a machine that
+was off while the cluster changed catches up on its own.
+
+**5. Use it from any machine** on the network. Every node answers every
+request, so point the client at whichever is nearest:
+
+```sh
+export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
+export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you
+djbod identity              # who is at DJBOD_NODE: cluster, node, build, document version
+djbod cluster show          # three nodes, one document version, each node's build
+djbod status                # nine disks, their labels, state, and free space
+djbod put backups/2026-09.tar backup.tar
+```
+
+Give the disks and machines names once, so `status` reads as your
+hardware does: `djbod cluster set-device-label <device-uuid> nas1-disk0` and
+`djbod cluster set-node-label <node-uuid> nas1`. For the web UI, run
+`djbod-ui` on one machine with the same two variables; it binds to
+localhost, so reach it over an SSH tunnel or put it behind something
+with a login.
+
+**What to expect.** Shards are placed one per disk on the emptiest disks,
+without regard to which machine a disk is in. A machine that is switched
+off takes its three disks with it, so under `4+2` an object with three
+shards on that machine is unreadable until the machine returns, and the
+request says so. Nothing is lost unless disks themselves fail, and at
+most two disks may fail before an object is gone. Adding a fourth
+machine later is step 4 again; adding a disk to a machine is
+`djbod-node add-device` and a restart; a machine whose address changes
+is moved with `djbod cluster set-address`, or simply restarted with the
+new address configured. Switch the cluster to TLS before it leaves a
+network you trust; the guide has the steps.
+
 ## For developers
 
 The design is in [SPEC.md](SPEC.md), written before the code and kept in
@@ -143,9 +353,15 @@ open, or deferred, and the reasoning behind rejected alternatives is kept.
 Appendix C has the crate layout and the milestone plan. Proposals under
 discussion live in [docs/proposals](docs/proposals). The crates are
 `djbod-core` (on-disk format, checksums, coding), `djbod-proto` (the
-native protocol), `djbod-node`, `djbod-cli`, `djbod-recover`, and
-`djbod-ui`; `cargo test --workspace` runs everything, starting nodes on
-localhost ports, and takes a few seconds.
+native protocol), `djbod-client` (the client library every program
+uses: node addresses with failover, one method per operation, async or
+blocking, and the administration procedures), `djbod-node`,
+`djbod-cli`, `djbod-recover`, and `djbod-ui`;
+`cargo test --workspace` runs everything, starting nodes on localhost
+ports, and takes a few seconds.
+
+`python3 -m unittest discover -s scripts/tests -v` checks the PKI helper's
+certificate listing using temporary certificates; it requires `openssl`.
 
 ## Status
 
@@ -155,6 +371,21 @@ scrub, administration (re-placement, drain, removal, recovery, re-encode,
 size limits), TLS, and the web UI. Milestone 7, damage marks that remember
 what the checks found, is designed and next to build.
 
-The system has been tested by many nodes running in one process on one
-machine and by hand against the built binaries. It has not yet run for
-long on several real machines; do that before relying on it.
+The system is tested by many nodes running in one process on one machine
+in the test suite, and it runs as a cluster of three machines with six
+disks between them. It is young: expect to find rough edges, and keep
+another copy of anything you cannot lose until it has earned your trust.
+
+## License
+
+Distributed-JBOD is free software under the GNU Affero General Public
+License, version 3 only (`AGPL-3.0-only`); the full text is in
+[LICENSE](LICENSE). Copyright (C) 2026 edward-b-1.
+
+You may run, study, change and share it. If you distribute it, or offer a
+modified version to others over a network, which a storage service and
+its web UI do, you must offer them the source of the version they use.
+The web UI links to this repository for that reason. The binaries also
+contain third-party packages under permissive licenses, whose notices are
+collected in [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES); ship that file
+beside any binary you distribute.

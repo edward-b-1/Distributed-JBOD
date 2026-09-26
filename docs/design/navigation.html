@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Tab Options</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --accent-track: #d6e6f9; --good: #0ca30c;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --accent: #3987e5; --accent-track: #1d3a5e; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --accent: #3987e5; --accent-track: #1d3a5e; }
+  /* The mocks paint each theme explicitly so both are visible side by side. */
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984; --accent: #2a78d6; --accent-track: #d6e6f9; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --muted: #8a8984; --accent: #3987e5; --accent-track: #1d3a5e; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding: 24px 16px 48px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .lede { color: var(--text-2); margin: 0 0 28px; max-width: 65ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 32px 0 6px; }
+  h2 small { color: var(--muted); font-weight: 500; margin-left: 8px; }
+  .note { color: var(--text-2); margin: 0 0 12px; max-width: 70ch; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 760px) { .pair { grid-template-columns: 1fr; } }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  .mock header { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .mock header b { font-size: 15px; font-weight: 600; }
+  .mock header .meta { color: var(--text-2); font-size: 12px; }
+  .mock header code { font-family: var(--mono); }
+  .mock .content { padding: 12px 14px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .mock .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .mock .tile .l { color: var(--text-2); font-size: 11px; }
+  .mock .tile .v { font-size: 18px; font-weight: 600; }
+  .mock button { font: inherit; cursor: default; }
+
+  /* A. current */
+  .a nav { display: flex; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .a .tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: 9px; background: var(--bg); border: 1px solid var(--line); }
+  .a button { background: none; border: 1px solid transparent; border-radius: 6px; padding: 5px 13px; font-weight: 500; color: var(--text-2); }
+  .a button.on { color: var(--text); background: var(--surface); border-color: var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.10); }
+
+  /* B. underline, refined */
+  .b nav { display: flex; gap: 22px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .b button { background: none; border: none; padding: 11px 2px 9px; color: var(--text-2); font-weight: 500; position: relative; }
+  .b button.on { color: var(--text); font-weight: 600; }
+  .b button.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); border-radius: 2px 2px 0 0; }
+
+  /* C. filled pill */
+  .c nav { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .c button { background: none; border: none; border-radius: 999px; padding: 5px 13px; color: var(--text-2); font-weight: 500; }
+  .c button.on { background: var(--accent); color: #fff; font-weight: 600; }
+
+  /* D. folder tabs joined to the content */
+  .d nav { display: flex; gap: 4px; padding: 10px 14px 0; background: var(--surface); border-bottom: 1px solid var(--line); position: relative; }
+  .d button { background: var(--bg); border: 1px solid var(--line); border-bottom: none; border-radius: 7px 7px 0 0; padding: 7px 14px; color: var(--text-2); font-weight: 500; margin-bottom: 0; }
+  .d button.on { background: var(--bg); color: var(--text); font-weight: 600; position: relative; top: 1px; }
+  .d nav.folder { background: var(--surface); }
+  .d .content { border-top: none; }
+
+  /* E. in the header line */
+  .e header { gap: 6px 22px; }
+  .e header .spacer { flex: 1; }
+  .e header button { background: none; border: none; padding: 4px 0; color: var(--text-2); font-weight: 600; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; position: relative; }
+  .e header button.on { color: var(--accent); }
+  .e header button.on::before { content: ""; position: absolute; left: -10px; top: 50%; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); transform: translateY(-50%); }
+  .e header .group { display: flex; gap: 20px; }
+
+  /* F. sidebar */
+  .f .frame { display: grid; grid-template-columns: 168px 1fr; min-height: 190px; }
+  .f aside { background: var(--surface); border-right: 1px solid var(--line); padding: 10px 8px; display: flex; flex-direction: column; gap: 2px; }
+  .f aside button { display: flex; align-items: center; gap: 9px; text-align: left; background: none; border: none; border-radius: 6px; padding: 7px 10px; color: var(--text-2); font-weight: 500; width: 100%; }
+  .f aside button.on { background: var(--accent-track); color: var(--text); font-weight: 600; }
+  .f aside svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .f aside .count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .f .content { grid-template-columns: repeat(2, 1fr); align-content: start; }
+
+  /* G. quiet text with counts */
+  .g nav { display: flex; gap: 4px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .g button { background: none; border: none; border-radius: 6px; padding: 6px 10px; color: var(--text-2); font-weight: 500; display: inline-flex; align-items: baseline; gap: 6px; }
+  .g button .n { color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .g button.on { color: var(--text); font-weight: 600; background: var(--bg); }
+  .g button:not(.on):hover { color: var(--text); }
+</style>
+</head>
+<body>
+<h1>Tab options for the djbod console</h1>
+<p class="lede">Seven treatments of the same four tabs, each drawn with the console's own colours in both themes. Everything below the tabs is the same mock Overview so only the tabs differ. Pick one, or name what to combine.</p>
+
+<h2>A · Segmented control <small>what PR #64 does</small></h2>
+<p class="note">One rounded track, the selected tab raised on the surface colour. Reads as a control rather than as navigation; a little heavy for four items.</p>
+<div class="pair">
+  <div class="mock light a"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><div class="tabs"><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></div></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark a"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><div class="tabs"><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></div></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+
+<h2>B · Underline, refined <small>the original idea, done properly</small></h2>
+<p class="note">Plain labels with generous spacing; the selected one is bolder with a 2px accent line that sits exactly on the bottom rule, no box around anything. The quietest option and the one most tools use.</p>
+<div class="pair">
+  <div class="mock light b"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark b"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+
+<h2>C · Filled pill</h2>
+<p class="note">The selected tab is a solid accent pill with white text; the rest are plain. Strongest signal of where you are, at the cost of a block of blue in the chrome on every page.</p>
+<div class="pair">
+  <div class="mock light c"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark c"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+
+<h2>D · Folder tabs</h2>
+<p class="note">Classic tabs whose selected one joins the content area below, the others sitting on the surface strip. Familiar from desktop software; the joined edge makes the relationship between tab and page literal.</p>
+<div class="pair">
+  <div class="mock light d"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark d"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+
+<h2>E · In the header line</h2>
+<p class="note">No separate row: the tabs sit at the right of the title bar as small uppercase labels, the selected one in the accent with a dot. Saves a full row of chrome, so the content starts higher; the cluster details move under the title.</p>
+<div class="pair">
+  <div class="mock light e"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code> · transport <code>tls</code></span><span class="spacer"></span><span class="group"><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></span></header><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark e"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code> · transport <code>tls</code></span><span class="spacer"></span><span class="group"><button class="on">Overview</button><button>Objects</button><button>Maintenance</button><button>Settings</button></span></header><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+
+<h2>F · Sidebar</h2>
+<p class="note">A left rail with an icon and a count beside each section, the selected one on a tinted background. The biggest change, and the one that scales if the console gains pages (a Damage page, a Nodes page); on a phone it would collapse to a top row.</p>
+<div class="pair">
+  <div class="mock light f"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><div class="frame"><aside>
+    <button class="on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</button>
+    <button><svg viewBox="0 0 24 24"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count">1</span></button>
+    <button><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 2.3"/><path d="M3 21l8.5-8.5"/></svg>Maintenance</button>
+    <button><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+  </aside><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div><div class="tile"><div class="l">Transport</div><div class="v">tls</div></div></div></div></div>
+  <div class="mock dark f"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><div class="frame"><aside>
+    <button class="on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview</button>
+    <button><svg viewBox="0 0 24 24"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count">1</span></button>
+    <button><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 2.3"/><path d="M3 21l8.5-8.5"/></svg>Maintenance</button>
+    <button><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
+  </aside><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div><div class="tile"><div class="l">Transport</div><div class="v">tls</div></div></div></div></div>
+</div>
+
+<h2>G · Quiet text with counts</h2>
+<p class="note">Plain labels, the selected one on a faint background block, each carrying a live count where one is meaningful: objects stored, devices and how many are draining, damaged objects. The tabs then say something about the cluster, not only where you are.</p>
+<div class="pair">
+  <div class="mock light g"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview<span class="n">3 devices</span></button><button>Objects<span class="n">1</span></button><button>Maintenance<span class="n">1 damaged</span></button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+  <div class="mock dark g"><header><b>Distributed-JBOD</b><span class="meta">cluster <code>2d47af38</code></span><span class="meta">transport <code>tls</code></span></header><nav><button class="on">Overview<span class="n">3 devices</span></button><button>Objects<span class="n">1</span></button><button>Maintenance<span class="n">1 damaged</span></button><button>Settings</button></nav><div class="content"><div class="tile"><div class="l">Nodes</div><div class="v">1</div></div><div class="tile"><div class="l">Devices</div><div class="v">3</div></div><div class="tile"><div class="l">Scheme</div><div class="v">2+1</div></div></div></div>
+</div>
+</body>
+</html>

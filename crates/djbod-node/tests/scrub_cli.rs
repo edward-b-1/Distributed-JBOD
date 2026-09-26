@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 
+use djbod_client::connection::Connection;
 use djbod_core::keyhash::hash_key;
 use djbod_core::layout::shard_file_name;
-use djbod_node::client::Connection;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
@@ -77,7 +77,14 @@ async fn start_node(device_count: usize, k: u8, m: u8) -> TestNode {
 }
 
 fn scrub(test: &TestNode, extra: &[&str]) -> (i32, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod-node"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_djbod-node"));
+    // The developer's own DJBOD_* settings must not leak in.
+    for (key, _) in std::env::vars() {
+        if key.starts_with("DJBOD_") {
+            command.env_remove(key);
+        }
+    }
+    let output = command
         .arg("scrub")
         .arg("--config")
         .arg(&test.config_path)
@@ -110,7 +117,7 @@ async fn scrub_finds_damage_and_exits_nonzero() {
         .await
         .expect("head")
     {
-        Response::HeadObject { record } => record,
+        Response::HeadObject { record, .. } => record,
         other => panic!("{other:?}"),
     };
 

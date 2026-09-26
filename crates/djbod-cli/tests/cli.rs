@@ -4,11 +4,12 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 
+use djbod_client::transport::TlsPaths;
 use djbod_node::config::NodeConfig;
 use djbod_node::node::{ClusterParameters, Node};
 use djbod_node::server;
-use djbod_node::transport::TlsPaths;
 use tokio::net::TcpListener;
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 fn xorshift64_bytes(len: usize, seed: u64) -> Vec<u8> {
@@ -72,8 +73,21 @@ async fn start_node_with_tls(device_count: usize, k: u8, m: u8, tls: Option<TlsP
 
 /// Run the `djbod` binary against the test node. Returns (status ok,
 /// raw stdout, stderr).
+/// The `djbod` binary with a clean slate: the developer's own `DJBOD_*`
+/// settings (a node list, a cluster id, TLS paths) must not leak into
+/// the tests, which each say exactly what they pass.
+fn djbod_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_djbod"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("DJBOD_") {
+            command.env_remove(key);
+        }
+    }
+    command
+}
+
 fn djbod_raw(test: &TestNode, args: &[&str]) -> (bool, Vec<u8>, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let output = djbod_command()
         .arg("--node")
         .arg(test.addr.to_string())
         .arg("--cluster")
@@ -106,6 +120,22 @@ async fn put_get_head_list_delete_from_the_command_line() {
     assert!(ok, "status failed: {err}");
     assert!(out.contains("DEVICE"), "{out}");
     assert_eq!(out.matches("active").count(), 4, "{out}");
+    // The node's build, which is this build, so the client is not named.
+    let build_line = format!("build     {}\n", djbod_client::BUILD);
+    assert!(out.contains(&build_line), "{out}");
+    // Every device row carries its node's build.
+    assert_eq!(out.matches(djbod_client::BUILD).count(), 5, "{out}");
+    assert!(!out.contains("this client"), "{out}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "status failed: {err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["build"].as_str(), Some(djbod_client::BUILD), "{out}");
+    assert_eq!(json["nodes"].as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(
+        json["nodes"][0]["build"].as_str(),
+        Some(djbod_client::BUILD),
+        "{out}"
+    );
 
     let (ok, out, err) = djbod(
         &test,
@@ -150,8 +180,12 @@ async fn put_get_head_list_delete_from_the_command_line() {
 
     let (ok, out, err) = djbod(&test, &["list", "--prefix", "docs/"]);
     assert!(ok, "list failed: {err}");
-    assert!(out.contains("docs/report.pdf"), "{out}");
-    assert!(out.contains(&format!("{:>14}", body.len())), "{out}");
+    // Size, version, key; the size column is as wide as its widest value.
+    let line = out
+        .lines()
+        .find(|l| l.ends_with("docs/report.pdf"))
+        .expect(&out);
+    assert!(line.starts_with(&format!("{}  ", body.len())), "{out}");
 
     let (ok, out, err) = djbod(&test, &["delete", "docs/report.pdf"]);
     assert!(ok, "delete failed: {err}");
@@ -165,7 +199,7 @@ async fn put_get_head_list_delete_from_the_command_line() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_get_removes_the_partial_output_file() {
+async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_its_output() {
     let test = start_node(2, 1, 1).await;
     let work = tempfile::tempdir().expect("temp dir");
     let body = xorshift64_bytes(4 * 64 * 1024, 2);
@@ -196,7 +230,42 @@ async fn a_failed_get_removes_the_partial_output_file() {
     bytes[4096 + 3 * 64 * 1024 + 5] ^= 0x01;
     std::fs::write(&shard, &bytes).expect("write shard");
 
+    // One bad block is reconstructed from the parity shard and served
+    // (SPEC 11.4): the file is complete and correct, standard error names
+    // the block, and the exit code is 2 so a pipeline notices.
     let output = work.path().join("output.bin");
+    let run = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "get",
+            "k",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run djbod");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{err}");
+    assert!(err.contains("1 block reconstructed from parity"), "{err}");
+    assert!(err.contains("stripe 3  shard 0"), "{err}");
+    assert_eq!(std::fs::read(&output).expect("output"), body);
+
+    // Damage the parity shard's copy of the same block too: beyond m,
+    // the read fails and the partial output is removed.
+    let other = test
+        .node
+        .devices()
+        .into_iter()
+        .find(|d| d.id().0.to_string() != device0)
+        .expect("the other device");
+    let parity = other
+        .object_directory(&djbod_core::keyhash::hash_key(b"k"))
+        .join(format!("{version}.1.shard"));
+    let mut bytes = std::fs::read(&parity).expect("read parity shard");
+    bytes[4096 + 3 * 64 * 1024 + 9] ^= 0x01;
+    std::fs::write(&parity, &bytes).expect("write parity shard");
     let (ok, _, err) = djbod(&test, &["get", "k", output.to_str().unwrap()]);
     assert!(!ok);
     assert!(err.contains("BlockChecksumMismatch"), "{err}");
@@ -207,12 +276,7 @@ async fn a_failed_get_removes_the_partial_output_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missing_connection_details_are_explained() {
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
-        .env_remove("DJBOD_NODE")
-        .env_remove("DJBOD_CLUSTER")
-        .arg("status")
-        .output()
-        .expect("run djbod");
+    let output = djbod_command().arg("status").output().expect("run djbod");
     assert!(!output.status.success());
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(err.contains("--node"), "{err}");
@@ -250,8 +314,15 @@ async fn set_state_and_drain_from_the_command_line() {
 
     let (ok, out, err) = djbod(&test, &["cluster", "drain", &device]);
     assert!(ok, "{out}{err}");
-    assert!(out.contains("1 version(s)"), "{out}");
-    assert!(out.contains("moved    k  shard 0 -> "), "{out}");
+    assert!(out.contains("1 version, "), "{out}");
+    assert!(
+        out.contains(&format!(
+            "moved    k  shard 0  node {} device {device} -> node {} device ",
+            test.node.id().0,
+            test.node.id().0
+        )),
+        "{out}"
+    );
     assert!(err.contains("1 moved, 0 skipped"), "{err}");
     let (ok, out, err) = djbod(&test, &["--json", "head", "k"]);
     assert!(ok, "{err}");
@@ -292,7 +363,7 @@ async fn remove_device_from_the_command_line() {
     let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &device]);
     assert!(!ok);
     assert!(
-        err.contains("still named by the current record of 1 version(s)"),
+        err.contains("still named by the current record of 1 version"),
         "{err}"
     );
     assert!(err.contains("\"k\""), "{err}");
@@ -350,7 +421,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let (ok, _, err) = djbod(&test, &["cluster", "set-scheme", "--k", "5", "--m", "2"]);
     assert!(!ok);
     assert!(
-        err.contains("6 active device(s) but scheme 5+2 needs 7"),
+        err.contains("6 active devices but scheme 5+2 needs 7"),
         "{err}"
     );
 
@@ -359,7 +430,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     assert!(ok, "{out}{err}");
     assert!(out.contains("scheme is now 4+2"), "{out}");
     assert!(
-        out.contains("3 object(s) are stored at another scheme"),
+        out.contains("3 objects are stored at another scheme"),
         "{out}"
     );
     let (ok, out, _) = djbod(&test, &["--json", "head", "big"]);
@@ -379,7 +450,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     assert_eq!(out.matches("re-encoded  ").count(), 3, "{out}");
     assert!(out.contains("re-encoded  big  3+1 -> 4+2"), "{out}");
     assert!(
-        err.contains("3 object(s) examined, 3 re-encoded, 0 failed"),
+        err.contains("3 objects examined, 3 re-encoded, 0 failed"),
         "{err}"
     );
 
@@ -426,7 +497,7 @@ async fn set_scheme_changes_the_document_and_reencode_rewrites_the_objects() {
     let (ok, _, err) = djbod(&test, &["cluster", "reencode"]);
     assert!(ok, "{err}");
     assert!(
-        err.contains("3 object(s) examined, 0 re-encoded, 0 failed"),
+        err.contains("3 objects examined, 0 re-encoded, 0 failed"),
         "{err}"
     );
 
@@ -616,7 +687,7 @@ async fn the_client_speaks_tls_with_flags_or_environment() {
     assert!(ok, "{err}");
     assert!(out.contains("transport tls"), "{out}");
     let copy = dir.path().join("copy.bin");
-    let output = Command::new(env!("CARGO_BIN_EXE_djbod"))
+    let output = djbod_command()
         .env("DJBOD_NODE", test.addr.to_string())
         .env("DJBOD_CLUSTER", test.node.cluster_id().to_string())
         .env("DJBOD_TLS_CA", &ca)
@@ -669,10 +740,16 @@ async fn devices_can_be_labelled_and_named_by_label() {
     let device = test.node.devices()[1].id().0.to_string();
     let other = test.node.devices()[2].id().0.to_string();
 
-    let (ok, out, err) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", &device, "nas1-bay1"],
+    );
     assert!(ok, "{err}");
     assert!(out.contains("is now labelled nas1-bay1"), "{out}");
-    let (ok, out, _) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    let (ok, out, _) = djbod(
+        &test,
+        &["cluster", "set-device-label", &device, "nas1-bay1"],
+    );
     assert!(ok);
     assert!(out.contains("nothing changed"), "{out}");
     let (ok, out, _) = djbod(&test, &["status"]);
@@ -682,13 +759,13 @@ async fn devices_can_be_labelled_and_named_by_label() {
 
     // A duplicate, a label with whitespace, and one that looks like a
     // UUID are refused by the document validator.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "nas1-bay1"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, "nas1-bay1"]);
     assert!(!ok);
     assert!(err.contains("used by more than one device"), "{err}");
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "bay 2"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, "bay 2"]);
     assert!(!ok);
     assert!(err.contains("whitespace"), "{err}");
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, &device]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, &device]);
     assert!(!ok);
     assert!(err.contains("looks like a UUID"), "{err}");
 
@@ -696,8 +773,14 @@ async fn devices_can_be_labelled_and_named_by_label() {
     let (ok, out, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "draining"]);
     assert!(ok, "{err}");
     assert!(out.contains(&device), "{out}");
-    let (ok, _, err) = djbod(&test, &["cluster", "drain", "nas1-bay1"]);
+    // Output names the device by its label where it has one (6.2.5.1):
+    // the full identity where it matters, the label alone per line.
+    let (ok, out, err) = djbod(&test, &["cluster", "drain", "nas1-bay1"]);
     assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!("draining nas1-bay1 ({device}) on node")),
+        "{out}"
+    );
     let (ok, _, err) = djbod(&test, &["cluster", "set-state", "nas1-bay1", "active"]);
     assert!(ok, "{err}");
     let (ok, _, err) = djbod(&test, &["cluster", "set-state", "no-such-label", "active"]);
@@ -708,9 +791,15 @@ async fn devices_can_be_labelled_and_named_by_label() {
     );
 
     // Relabel by the current label, then clear.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", "nas1-bay1", "nas1-bay9"]);
+    let (ok, _, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", "nas1-bay1", "nas1-bay9"],
+    );
     assert!(ok, "{err}");
-    let (ok, out, err) = djbod(&test, &["cluster", "set-label", "nas1-bay9", "--clear"]);
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", "nas1-bay9", "--clear"],
+    );
     assert!(ok, "{err}");
     assert!(out.contains("label cleared"), "{out}");
     let (ok, out, _) = djbod(&test, &["--json", "cluster-config"]);
@@ -739,13 +828,13 @@ async fn nodes_can_be_labelled_and_named_by_label() {
     assert!(out.contains("nas1"), "{out}");
     // Each node's build, for telling an older node apart (SPEC 6.2.6.4).
     assert!(out.contains("BUILD"), "{out}");
-    assert!(out.contains(djbod_node::BUILD), "{out}");
+    assert!(out.contains(djbod_client::BUILD), "{out}");
     let (ok, out, _) = djbod(&test, &["--version"]);
     assert!(ok);
-    assert!(out.contains(djbod_node::BUILD), "{out}");
+    assert!(out.contains(djbod_client::BUILD), "{out}");
 
     // A device may carry the same label as a node: separate namespaces.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "nas1"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &device, "nas1"]);
     assert!(ok, "{err}");
     // A second node could not, but there is only one; a bad label is
     // refused the same way as for devices.
@@ -829,6 +918,13 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     let (ok, out, _) = djbod(&test, &["--json", "status"]);
     assert!(ok);
     assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
+    // The name alone, for scripts.
+    let (ok, out, err) = djbod(&test, &["cluster", "get-name"]);
+    assert!(ok, "{err}");
+    assert_eq!(out, "Home NAS\n");
+    let (ok, out, _) = djbod(&test, &["--json", "cluster", "get-name"]);
+    assert!(ok);
+    assert!(out.contains("\"cluster_name\": \"Home NAS\""), "{out}");
 
     let (ok, out, _) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
     assert!(ok);
@@ -843,4 +939,675 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     let (ok, out, _) = djbod(&test, &["status"]);
     assert!(ok);
     assert!(out.contains(&format!("cluster   {cluster}\n")), "{out}");
+    // No name: nothing on standard output, and a non-zero exit.
+    let (ok, out, err) = djbod(&test, &["cluster", "get-name"]);
+    assert!(!ok);
+    assert_eq!(out, "");
+    assert!(err.contains("has no name"), "{err}");
+}
+
+/// `get-cluster-id` needs only `--node` (SPEC 19.1.5.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn get_cluster_id_needs_no_cluster_id() {
+    let test = start_node(2, 1, 1).await;
+    let cluster = test.node.cluster_id().to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-name", "Home NAS"]);
+    assert!(ok, "{err}");
+
+    let run = |args: &[&str]| {
+        let output = djbod_command()
+            .arg("--node")
+            .arg(test.addr.to_string())
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, out, err) = run(&["get-cluster-id"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), cluster, "the id alone, for $(...)");
+    let (ok, out, err) = run(&["--json", "get-cluster-id"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["cluster_id"], cluster);
+    assert_eq!(json["cluster_name"], "Home NAS");
+    assert_eq!(json["build"], djbod_client::BUILD);
+    // `identity` builds on it: who is at --node, in words.
+    let node_id = test.node.id().0.to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = run(&["identity"]);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(&format!("cluster   Home NAS ({cluster})")),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("node      nas1 ({node_id}) at {}", test.addr)),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("build     {}", djbod_client::BUILD)),
+        "{out}"
+    );
+    assert!(out.contains("transport plain"), "{out}");
+    let (ok, out, err) = run(&["--json", "identity"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["node_label"], "nas1");
+    assert_eq!(json["addresses"][0], test.addr.to_string());
+    assert_eq!(json["document_version"], test.node.document_version());
+    // Every other command still needs the id.
+    let (ok, _, err) = run(&["status"]);
+    assert!(!ok);
+    assert!(err.contains("no cluster id"), "{err}");
+}
+
+/// `--node` takes several addresses (SPEC 20.8): a dead one first is
+/// skipped, for ordinary commands and for `get-cluster-id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
+    let test = start_node(2, 1, 1).await;
+    let cluster = test.node.cluster_id().to_string();
+    let nodes = format!("127.0.0.1:1,{}", test.addr);
+    let run = |args: &[&str]| {
+        let output = djbod_command()
+            .arg("--node")
+            .arg(&nodes)
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (ok, out, err) = run(&["get-cluster-id"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim(), cluster);
+    let (ok, out, err) = run(&["--cluster", &cluster, "status"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("cluster   {cluster}")), "{out}");
+    let (ok, out, err) = run(&["--cluster", &cluster, "identity"]);
+    assert!(ok, "{err}");
+    assert!(out.contains(&format!("at {}", test.addr)), "{out}");
+    // Only dead addresses: every one is named.
+    let output = djbod_command()
+        .args([
+            "--node",
+            "127.0.0.1:1,127.0.0.1:2",
+            "--cluster",
+            &cluster,
+            "status",
+        ])
+        .output()
+        .expect("run djbod");
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("127.0.0.1:1") && err.contains("127.0.0.1:2"),
+        "{err}"
+    );
+}
+
+/// `contents` counts what each device holds (SPEC 18.2.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn contents_show_what_each_device_holds() {
+    let test = start_node(3, 2, 1).await;
+    let (ok, out, err) = djbod(&test, &["contents"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("VERSIONS"), "{out}");
+    assert!(err.contains("3 devices hold nothing"), "{err}");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(200_000, 7)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "contents"]);
+    assert!(ok, "{err}");
+    let rows: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(
+        rows.iter().all(|r| r["versions"] == 1 && r["keys"] == 1),
+        "{out}"
+    );
+
+    // By label, and by node.
+    let device = rows[0]["device"].as_str().unwrap().to_string();
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &device, "bay0"]);
+    assert!(ok, "{err}");
+    let (ok, out, err) = djbod(&test, &["contents", "bay0"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 2, "{out}");
+    assert!(out.contains("bay0"), "{out}");
+    let node_id = test.node.id().0.to_string();
+    let (ok, out, err) = djbod(&test, &["contents", "--node-id", &node_id]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 4, "{out}");
+}
+
+/// Cell text and its terminal column, keeping single spaces inside values
+/// such as NODE LABEL, human-readable byte counts, and address lists.
+fn table_cells(line: &str) -> Vec<(&str, usize)> {
+    let mut offset = 0;
+    line.split("  ")
+        .filter_map(|cell| {
+            let start = offset + cell.len() - cell.trim_start().len();
+            offset += cell.len() + 2;
+            let text = cell.trim();
+            (!text.is_empty()).then(|| (text, line[..start].width()))
+        })
+        .collect()
+}
+
+fn assert_table_columns(out: &str, columns: &[(&str, bool)], row_count: usize) {
+    let mut lines = out.lines().skip_while(|l| !l.starts_with(columns[0].0));
+    let header = table_cells(lines.next().expect("table header"));
+    assert_eq!(header.len(), columns.len(), "{out}");
+    for (i, (name, _)) in columns.iter().enumerate() {
+        assert_eq!(header[i].0, *name, "{out}");
+    }
+    let rows: Vec<_> = lines.collect();
+    assert_eq!(rows.len(), row_count, "{out}");
+    for line in rows {
+        let cells = table_cells(line);
+        assert_eq!(cells.len(), columns.len(), "{out}");
+        for i in 0..columns.len() {
+            let (name, right) = columns[i];
+            let edge = |cell: (&str, usize)| cell.1 + if right { cell.0.width() } else { 0 };
+            assert_eq!(
+                edge(cells[i]),
+                edge(header[i]),
+                "{name} is misaligned:\n{out}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_tables_align_long_unicode_and_missing_labels() {
+    let test = start_node(5, 3, 1).await;
+    let labels = [
+        Some("bay0".to_string()),
+        Some("d".repeat(128)),
+        Some("界".repeat(9)),
+        Some("e\u{301}".repeat(9)),
+        None,
+    ];
+    let mut document = test.node.document();
+    for i in 0..labels.len() {
+        document.devices[i].label = labels[i].clone();
+    }
+    document.nodes[0]
+        .addresses
+        .push("[2001:db8:abcd:1234:5678:abcd:1234:5678]:5263".to_string());
+    let addresses = document.nodes[0].addresses.join(", ");
+    for node_label in [
+        Some("n".repeat(128)),
+        Some("界".repeat(9)),
+        Some("e\u{301}".repeat(9)),
+        None,
+    ] {
+        document.nodes[0].label = node_label.clone();
+        document.version += 1;
+        test.node.apply_document(document.clone()).expect("labels");
+
+        let (ok, out, err) = djbod(&test, &["status"]);
+        assert!(ok, "{err}");
+        for label in labels.iter().flatten() {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("LABEL", false),
+                ("DEVICE", false),
+                ("NODE LABEL", false),
+                ("NODE", false),
+                ("NODE BUILD", false),
+                ("STATE", false),
+                ("TOTAL", true),
+                ("FREE", true),
+            ],
+            labels.len(),
+        );
+
+        let (ok, out, err) = djbod(&test, &["contents"]);
+        assert!(ok, "{err}");
+        for label in labels.iter().flatten() {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("LABEL", false),
+                ("DEVICE", false),
+                ("NODE LABEL", false),
+                ("NODE", false),
+                ("STATE", false),
+                ("VERSIONS", true),
+                ("KEYS", true),
+                ("BLOCKS", true),
+                ("SHARD BYTES", true),
+            ],
+            labels.len(),
+        );
+
+        let (ok, out, err) = djbod(&test, &["cluster", "show"]);
+        assert!(ok, "{err}");
+        assert!(out.contains(&addresses), "addresses were truncated: {out}");
+        if let Some(label) = &node_label {
+            assert!(out.contains(label), "label was truncated: {out}");
+        }
+        assert_table_columns(
+            &out,
+            &[
+                ("LABEL", false),
+                ("NODE", false),
+                ("ADDRESS", false),
+                ("BUILD", false),
+                ("VERSION", false),
+            ],
+            1,
+        );
+
+        let (ok, out, err) = djbod(&test, &["--json", "status"]);
+        assert!(ok, "{err}");
+        let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+        for (entry, label) in json["devices"].as_array().unwrap().iter().zip(&labels) {
+            assert_eq!(entry["label"].as_str(), label.as_deref());
+            assert_eq!(entry["node_label"].as_str(), node_label.as_deref());
+        }
+    }
+}
+
+/// SPEC 20.1.2.3: the exit code says what the scrub concluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scrub_exit_codes_say_what_was_concluded() {
+    let test = start_node(3, 2, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(300_000, 11)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+
+    let run = |args: &[&str]| {
+        let output = djbod_command()
+            .args([
+                "--node",
+                &test.addr.to_string(),
+                "--cluster",
+                &test.node.cluster_id().to_string(),
+            ])
+            .args(args)
+            .output()
+            .expect("run djbod");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    // Clean: 0.
+    let (code, _, err) = run(&["scrub"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("complete, no damage found"), "{err}");
+
+    // Damage a block of one shard: 2 without repair, and the same in JSON
+    // mode, where the events alone are printed and the code carries the
+    // verdict.
+    let shard = test
+        .node
+        .devices()
+        .iter()
+        .flat_map(|d| walk(d.root()))
+        .find(|p| p.to_string_lossy().ends_with(".0.shard"))
+        .expect("a shard file");
+    let mut bytes = std::fs::read(&shard).expect("read shard");
+    bytes[4096 + 10] ^= 0xff;
+    std::fs::write(&shard, &bytes).expect("write shard");
+    let (code, out, err) = run(&["scrub"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(err.contains("complete, damage found"), "{err}");
+    let (code, out, err) = run(&["--json", "scrub"]);
+    assert_eq!(code, 2, "{out}{err}");
+    assert!(out.contains("\"event\":\"node_finding\""), "{out}");
+    assert!(
+        !err.contains("complete"),
+        "json mode prints events alone: {err}"
+    );
+
+    // With repair the damage is fixed and the run is complete: 0.
+    let (code, out, err) = run(&["scrub", "--repair"]);
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(err.contains("everything found was repaired"), "{err}");
+    let (code, _, err) = run(&["scrub"]);
+    assert_eq!(code, 0, "{err}");
+}
+
+fn walk(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// SPEC 5.6: a device whose directory is gone shows as unavailable in
+/// `status` and is skipped by `contents`; the scrub reports it once and
+/// does not report every version that named it; a write goes elsewhere
+/// and nothing is recreated at the dead path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_destroyed_device_is_reported_unavailable() {
+    let test = start_node(4, 2, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    std::fs::write(&source, xorshift64_bytes(200_000, 3)).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    // A device that holds a copy of the object's record.
+    let dead = test
+        .node
+        .devices()
+        .iter()
+        .find(|d| {
+            walk(d.root())
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with(".meta.json"))
+        })
+        .expect("a device with the record")
+        .clone();
+    let root = dead.root().to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    let (ok, out, err) = djbod(&test, &["status"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
+    assert!(err.contains("1 device is unavailable"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    for entry in json["devices"].as_array().expect("devices") {
+        let is_dead = entry["device"].as_str() == Some(&dead.id().0.to_string());
+        assert_eq!(entry["available"].as_bool(), Some(!is_dead), "{entry}");
+    }
+
+    let (ok, out, err) = djbod(&test, &["contents"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.lines().count(), 4, "{out}");
+    assert!(err.contains(&format!("{} unavailable", dead.id())), "{err}");
+
+    // Reads go on without the dead device's record copy and shard (SPEC
+    // 9.4.4, 11.4): the data comes back, standard error names the copy
+    // and the device as unavailable, and the exit code is 2.
+    let output = dir.path().join("out.bin");
+    let run = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "get",
+            "k",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run djbod");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("1 of 3 record copies could not be read"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(err.contains("unavailable, perhaps for now"), "{err}");
+    assert_eq!(
+        std::fs::read(&output).expect("output"),
+        std::fs::read(&source).expect("input")
+    );
+    let run = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "head",
+            "k",
+        ])
+        .output()
+        .expect("run djbod");
+    let out = String::from_utf8_lossy(&run.stdout);
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(2), "{out}{err}");
+    assert!(out.contains("key           k"), "{out}");
+    assert!(
+        err.contains("1 of 3 record copies could not be read"),
+        "{err}"
+    );
+
+    // A listing goes around the dead device (SPEC 15.1): one of four out
+    // is fewer than k+m, so every key is listed, the note names the
+    // device, and the exit code stays 0.
+    let (ok, out, err) = djbod(&test, &["list"]);
+    assert!(ok, "{err}");
+    assert!(out.contains('k'), "{out}");
+    assert!(
+        err.contains("listed around 1 device the cluster cannot read"),
+        "{err}"
+    );
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(err.contains("every key is still listed"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "list"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(json["complete"], true);
+    assert_eq!(json["keys"].as_array().expect("keys").len(), 1);
+    assert_eq!(
+        json["unread"][0]["device"].as_str(),
+        Some(dead.id().0.to_string().as_str())
+    );
+
+    // The device's contents were not checked: not damage, an incomplete
+    // run, exit 3, and no per-key noise for the copies it held.
+    let scrub = djbod_command()
+        .args([
+            "--node",
+            &test.addr.to_string(),
+            "--cluster",
+            &test.node.cluster_id().to_string(),
+            "scrub",
+        ])
+        .output()
+        .expect("run djbod");
+    let out = String::from_utf8_lossy(&scrub.stdout);
+    let err = String::from_utf8_lossy(&scrub.stderr);
+    assert_eq!(scrub.status.code(), Some(3), "{out}{err}");
+    assert!(out.contains("device unavailable"), "{out}");
+    assert!(!out.contains("RecordsInconsistent"), "{out}");
+    assert!(!out.contains("ShardMissingOnDevice"), "{out}");
+    assert!(err.contains("0 findings; incomplete"), "{err}");
+    assert!(!err.contains("repaired"), "{err}");
+    assert!(err.contains("1 device unavailable, not checked"), "{err}");
+    // What the device costs, said last and loudly (SPEC 20.1.2.2): the one
+    // object has a shard on it, which is m = 1 out, so it is readable and
+    // one further loss from not being.
+    let last = err.trim_end().lines().last().unwrap_or("");
+    assert!(last.contains("remove-device --force"), "{err}");
+    assert!(
+        err.contains(
+            "WARNING: data at higher risk: versions with a shard on an unavailable device: 1 of 1"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("device {}: 1 version", dead.id().0)),
+        "{err}"
+    );
+    assert!(err.contains("1 version can lose no further shard"), "{err}");
+    assert!(err.contains("no version is unreadable now"), "{err}");
+    assert!(
+        err.contains("shards available: 1 object with 2 of 3 (readable, none to spare)"),
+        "{err}"
+    );
+
+    // A write goes around the device, says so, and exits 2 (SPEC 5.6);
+    // nothing is recreated at the dead path.
+    let (ok, out, err) = djbod(&test, &["put", "k2", source.to_str().unwrap()]);
+    assert!(!ok, "{out}{err}");
+    assert!(out.contains("stored k2 as version"), "{out}");
+    assert!(err.contains("placed around 1 unavailable device"), "{err}");
+    assert!(err.contains(&dead.id().0.to_string()), "{err}");
+    assert!(!root.exists(), "{} was recreated", root.display());
+}
+
+/// SPEC 18.2.1.1: a device whose directory is gone cannot be drained;
+/// `remove-device --force` marks it removed after a confirmation, and
+/// `scrub --repair` rebuilds what it held onto the remaining devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_device_is_force_removed_and_the_scrub_rebuilds_its_shards() {
+    let test = start_node(5, 3, 1).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let source = dir.path().join("in.bin");
+    let body = xorshift64_bytes(300_000, 17);
+    std::fs::write(&source, &body).expect("write");
+    let (ok, _, err) = djbod(&test, &["put", "k", source.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    let (ok, out, _) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let dead = record["shards"][1]["device"]
+        .as_str()
+        .expect("device")
+        .to_string();
+    let root = test
+        .node
+        .devices()
+        .into_iter()
+        .find(|d| d.id().0.to_string() == dead)
+        .expect("device")
+        .root()
+        .to_path_buf();
+    std::fs::remove_dir_all(&root).expect("destroy the device directory");
+
+    // Without --yes the command wants the id typed back; nothing on stdin
+    // means nothing changes.
+    let (ok, _, err) = djbod(&test, &["cluster", "remove-device", &dead, "--force"]);
+    assert!(!ok);
+    assert!(err.contains("confirmation did not match"), "{err}");
+    let (ok, out, _) = djbod(&test, &["cluster", "remove-device", &dead]);
+    assert!(!ok, "{out}");
+
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "remove-device", &dead, "--force", "--yes"],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("cannot read it"), "{out}");
+    assert!(out.contains("removed (document version 2)"), "{out}");
+    assert!(out.contains("scrub --repair"), "{out}");
+    let (ok, out, _) = djbod(&test, &["status"]);
+    assert!(ok);
+    assert!(out.contains("removed"), "{out}");
+
+    // The scrub finds the version that lost a copy and rebuilds its shard
+    // elsewhere; the run is complete and clean, and the read no longer
+    // reconstructs anything.
+    let (ok, _, err) = djbod(&test, &["scrub", "--repair"]);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains("1 finding in 1 object: 1 shard on a removed device; 1 repaired, 0 failed; complete, everything found was repaired"),
+        "{err}"
+    );
+    // Counted before and after: the lost shard was rebuilt.
+    assert!(
+        err.contains(
+            "shards available before repair: 1 object with 3 of 4 (readable, none to spare)"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("shards available after repair: 1 object with 4 of 4"),
+        "{err}"
+    );
+    assert!(!err.contains("scrub incomplete"), "{err}");
+    assert!(
+        err.contains("complete, everything found was repaired"),
+        "{err}"
+    );
+    let output = dir.path().join("out.bin");
+    let (ok, _, err) = djbod(&test, &["get", "k", output.to_str().unwrap()]);
+    assert!(ok, "{err}");
+    assert_eq!(std::fs::read(&output).expect("output"), body);
+    let (ok, out, _) = djbod(&test, &["--json", "head", "k"]);
+    assert!(ok);
+    let record: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert!(
+        record["shards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["device"] != dead),
+        "{record}"
+    );
+    assert_eq!(record["revision"], 1, "{record}");
+    assert!(!root.exists(), "the repair recreated the removed device");
+}
+
+/// SPEC 19.1.3, 5.6: `status` works while a node is down, names it, and
+/// shows its devices as unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_names_an_unreachable_node_and_still_succeeds() {
+    let test = start_node(3, 2, 1).await;
+    let ghost = djbod_core::cluster::NodeId(Uuid::from_u128(0xdead));
+    let mut next = test.node.document();
+    next.version += 1;
+    next.nodes.push(djbod_core::cluster::NodeEntry {
+        id: ghost,
+        addresses: vec!["127.0.0.1:1".to_string()],
+        label: Some("ghost".to_string()),
+        state: djbod_core::cluster::NodeState::Active,
+    });
+    next.devices.push(djbod_core::cluster::DeviceEntry {
+        id: djbod_core::record::DeviceId(Uuid::from_u128(0xbeef)),
+        node: ghost,
+        state: djbod_core::cluster::DeviceState::Active,
+        label: None,
+    });
+    test.node.apply_document(next).expect("apply");
+
+    let (ok, out, err) = djbod(&test, &["status"]);
+    assert!(ok, "{err}");
+    assert_eq!(out.matches("active, unavailable").count(), 1, "{out}");
+    // Named by its label with the UUID beside it (6.2.5.1).
+    assert!(
+        err.contains(&format!("node ghost ({}) unreachable", ghost.0)),
+        "{err}"
+    );
+    assert!(err.contains("127.0.0.1:1"), "{err}");
+    let (ok, out, err) = djbod(&test, &["--json", "status"]);
+    assert!(ok, "{err}");
+    let json: serde_json::Value = serde_json::from_str(&out).expect("json");
+    let nodes = json["nodes"].as_array().expect("nodes");
+    let gone = nodes
+        .iter()
+        .find(|n| n["node"] == ghost.0.to_string())
+        .expect("ghost listed");
+    assert_eq!(gone["reachable"], false, "{gone}");
+    assert!(gone["build"].is_null(), "{gone}");
+    assert!(gone["error"].is_string(), "{gone}");
 }

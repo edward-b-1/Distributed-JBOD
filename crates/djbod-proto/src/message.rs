@@ -14,7 +14,7 @@
 //! | PutObject   | client: body bytes        |                           |
 //! | GetObject   |                           | coordinator: body bytes   |
 //! | PutShard    | sender: blocks (on READY) |                           |
-//! | GetShard    |                           | holder: blocks            |
+//! | GetShard    |                           | node: blocks              |
 //!
 //! Body streams are chunked at the coordinator's discretion; each chunk is
 //! checksummed like a block so the transport is checked end to end.
@@ -26,10 +26,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use djbod_core::checksum::BlockChecksum;
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, Transport};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState, Transport};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::scrub::{Finding, ScrubSummary};
+use djbod_core::stripe::FaultKind;
 use djbod_core::version::VersionId;
 
 use crate::codec::{decode_cbor, encode_cbor, CodecError};
@@ -122,12 +123,21 @@ impl ErrorDetail {
 /// way by encoded size.
 pub const MAX_LIST_PAGE_BYTES: usize = 8 * 1024 * 1024;
 
-/// Where a paged record listing continues from: the last (key, version)
-/// of the previous page.
+/// Where a paged record listing continues from: the last (key hash,
+/// version) of the previous page, the order a device's directories are in
+/// (SPEC 15.2.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordCursor {
-    pub key: String,
+    pub key_hash: KeyHash,
     pub version: VersionId,
+}
+
+/// One record as a device streams it (`LocalRecords`): the copy it holds
+/// and whether it also holds the shard file the record lists for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub record: MetadataRecord,
+    pub shard_present: bool,
 }
 
 /// Where a paged lookup continues from: the last (version, device) of the
@@ -153,6 +163,11 @@ pub struct ListQuery {
 pub enum Request {
     // ---- client to coordinator
     Status,
+    /// What one device holds (SPEC 18.2.3): counted from the record
+    /// copies on it, without reading any data.
+    DeviceContents {
+        device: DeviceId,
+    },
     /// Followed by a body stream of exactly `size` bytes.
     PutObject {
         key: String,
@@ -217,16 +232,18 @@ pub enum Request {
         after: Option<LookupCursor>,
     },
     LocalList(ListQuery),
-    /// Every record on one local device, for the drain (18.2.1) and the
-    /// removal scan (18.5), in pages: records after `after`, sorted by
-    /// key then version, up to `MAX_LIST_PAGE_BYTES` of encoded records.
+    /// Every record on one local device, for the drain (18.2.1), the
+    /// removal scan (18.5), `contents` (18.2.3), and the cross-node scrub
+    /// (20.1.2.2), in pages: records after `after`, sorted by key hash
+    /// then version, up to `MAX_LIST_PAGE_BYTES` of encoded records, each
+    /// with whether the device has the shard file.
     LocalRecords {
         device: DeviceId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<RecordCursor>,
     },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
-    /// the holder answers `PutShardDone`.
+    /// the node answers `PutShardDone`.
     PutShard {
         device: DeviceId,
         key_hash: KeyHash,
@@ -257,6 +274,9 @@ pub enum Request {
         device: DeviceId,
         record: MetadataRecord,
     },
+    /// Kept in the protocol with no current caller: the scrub's probe,
+    /// its only user, was replaced by the flag `LocalRecords` carries
+    /// (SPEC 20.1.2.2).
     GetMeta {
         device: DeviceId,
         key_hash: KeyHash,
@@ -283,11 +303,51 @@ pub enum Request {
 
 // ------------------------------------------------------------- responses
 
+/// What a device holds (SPEC 18.2.3): every version with a shard on it
+/// leaves a record copy there, so the count is of records, with the
+/// shard bytes and blocks computed from them. A device with zero
+/// versions holds no data and may be removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceContents {
+    pub device: DeviceId,
+    pub node: NodeId,
+    pub state: DeviceState,
+    /// Versions with a shard on the device; one shard file each.
+    pub versions: u64,
+    /// Distinct keys among those versions.
+    pub keys: u64,
+    /// Blocks in those shard files, one per stripe.
+    pub blocks: u64,
+    /// Bytes of shard files, from the records' sizes and schemes.
+    pub shard_bytes: u64,
+}
+
+/// One node as `Status` reports it (SPEC 19.1.3). A node that answered
+/// carries the build it gave in its `LocalStatus` (6.2.6.4); one the
+/// coordinator could not reach carries the reason instead, has no build,
+/// since there was no Hello, and its devices are listed as unavailable
+/// (5.6). Exactly one of `build` and `error` is present.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeStatus {
+    pub node: NodeId,
+    /// A removed node (6.2.2) is listed for the record, not asked.
+    pub state: NodeState,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceStatus {
     pub device: DeviceId,
     pub node: NodeId,
     pub state: DeviceState,
+    /// False when the node cannot read the device (SPEC 5.6): the disk
+    /// failed, is not mounted, or was destroyed. Total and free are then 0
+    /// and nothing is placed on it.
+    pub available: bool,
     /// The device's label from the cluster document, if it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -369,24 +429,39 @@ pub enum Response {
         cluster_name: Option<String>,
         document_version: u64,
         coordinator: NodeId,
-        #[serde(default)]
+        /// Every node asked, with its build.
+        nodes: Vec<NodeStatus>,
         transport: Transport,
         devices: Vec<DeviceStatus>,
     },
+    DeviceContents(DeviceContents),
+    /// The version written, and the devices the write went around
+    /// because their node could not read them (5.6).
     PutObject {
         version: VersionId,
+        unavailable: Vec<UnavailableDevice>,
     },
     /// Followed by a body stream.
     GetObject {
         record: MetadataRecord,
     },
+    /// The record, and the record copies the lookup went without
+    /// (9.4.4), empty when every listed device had one.
     HeadObject {
         record: MetadataRecord,
+        missing_records: Vec<MissingRecordCopy>,
     },
     DeleteObject,
+    /// A page of keys (15.1). `unread` names the devices whose records
+    /// did not contribute, on a node that could not be reached or
+    /// unreadable by their node (5.6); `complete` says whether every key
+    /// can nonetheless appear, which holds while fewer than k+m devices
+    /// are unread, every version having a record copy on k+m devices.
     ListKeys {
         keys: Vec<KeyEntry>,
         truncated: bool,
+        unread: Vec<UnavailableDevice>,
+        complete: bool,
     },
     RepairObject(RepairReport),
     MoveShard {
@@ -411,31 +486,37 @@ pub enum Response {
         node: NodeId,
         document_version: u64,
         /// Whether this node has TLS material loaded (19.1.6.4).
-        #[serde(default)]
         tls_ready: bool,
+        /// This node's build (SPEC 6.2.6.4).
+        build: String,
         devices: Vec<DeviceStatus>,
     },
     /// A page of record copies; `truncated` says whether more follow
-    /// after the last one.
+    /// after the last one. `unread` names the node's devices whose
+    /// copies could not be looked for because the node cannot read them
+    /// (5.6); the same on every page.
     LocalLookup {
         records: Vec<LocatedRecord>,
         truncated: bool,
+        unread: Vec<DeviceId>,
     },
     /// A page of at most `MAX_LIST_PAGE_BYTES` of keys; `truncated` says
-    /// whether more follow after the last entry.
+    /// whether more follow after the last entry. `unread` names the
+    /// node's devices it could not read (5.6), the same on every page.
     LocalList {
         entries: Vec<KeyEntry>,
         truncated: bool,
+        unread: Vec<DeviceId>,
     },
     /// A page of records; `truncated` says whether more follow after the
     /// last one.
     LocalRecords {
-        records: Vec<MetadataRecord>,
+        records: Vec<DeviceRecord>,
         truncated: bool,
     },
-    /// The holder has created and reserved the file; send blocks.
+    /// The node has created and reserved the file; send blocks.
     PutShardReady,
-    /// The holder has fsynced and renamed the file.
+    /// The node has fsynced and renamed the file.
     PutShardDone,
     /// Followed by a block stream.
     GetShard {
@@ -478,15 +559,25 @@ pub enum ScrubItem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ClusterFinding {
-    /// Fewer record copies than the record itself says there are holders,
+    /// Fewer record copies than the record lists devices,
     /// or copies that disagree, or a copy on an unlisted device.
     RecordsInconsistent {
         key: String,
         version: Option<VersionId>,
         detail: String,
     },
-    /// A holder listed in the record does not have the shard file.
-    ShardMissingOnHolder {
+    /// A device listed in the record does not have the shard file.
+    ShardMissingOnDevice {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        shard_index: u8,
+    },
+    /// The record places a shard on a device that is `removed` or no
+    /// longer in the cluster document (18.2.1): the shard is lost (18.3),
+    /// and repair rebuilds it onto another device. Not a fault of the
+    /// device that was consulted; the device is gone by decision.
+    ShardLost {
         key: String,
         version: VersionId,
         device: DeviceId,
@@ -501,13 +592,6 @@ pub enum ClusterFinding {
         device: DeviceId,
         revision: u64,
         current_revision: u64,
-    },
-    /// A holder listed in the record could not be asked.
-    HolderUnavailable {
-        key: String,
-        version: VersionId,
-        device: DeviceId,
-        detail: String,
     },
 }
 
@@ -534,6 +618,57 @@ pub enum ScrubEvent {
         detail: ErrorDetail,
     },
     ClusterFinding(ClusterFinding),
+    /// The cross-node checks stopped because `node` could not be reached,
+    /// or its record stream ended in an error (SPEC 20.1.2): the versions
+    /// before this point were checked, the rest were not. Not damage, and
+    /// the unchecked versions are never repaired; the run ends as
+    /// incomplete.
+    CrossCheckStopped {
+        node: NodeId,
+        detail: ErrorDetail,
+        versions_checked: u64,
+        /// `None` when the remainder cannot be counted without a second
+        /// pass, which is the case for a merge that stops part way.
+        versions_unchecked: Option<u64>,
+    },
+    /// Where the cross-node checks have got to (20.1.2.2): sent every
+    /// 10,000 versions.
+    CrossCheckProgress {
+        versions_checked: u64,
+        key_hash: KeyHash,
+    },
+    /// Every version checked, counted by how many of its shards are
+    /// available against how many it has (20.1.2.2): a shard is not
+    /// available when its device is unread or removed, its file is
+    /// missing, or the node's own scrub found it damaged. Sent once at
+    /// the end of the run, whatever it found, and after the repairs of a
+    /// `--repair` run, counting each repaired version as whole: the
+    /// answer to "what state is my data in" in one line.
+    CrossCheckAvailability {
+        versions_checked: u64,
+        versions: Vec<ShardAvailability>,
+        /// Whether the count follows the run's repairs.
+        after_repair: bool,
+    },
+    /// What the devices the merge could not read cost (20.1.2.2, 5.6),
+    /// sent once when the cross-node phase ends with any device unread.
+    /// Not damage: nothing is known to be wrong with a shard on such a
+    /// device, and no repair can reach it. Exposure: these versions are
+    /// readable only by going around the device, or not at all.
+    CrossCheckExposure {
+        /// The devices whose record streams could not be read, each with
+        /// how many checked versions have a shard on it.
+        unread: Vec<DeviceExposure>,
+        versions_checked: u64,
+        /// Versions with at least one shard on an unread device.
+        versions_with_shards_out: u64,
+        /// Of those, versions with exactly m shards out: readable, and
+        /// one further loss makes them unreadable.
+        versions_at_the_limit: u64,
+        /// Versions with more than m shards out: unreadable until a
+        /// device returns.
+        versions_unreadable: u64,
+    },
     Repaired {
         key: String,
         report: RepairReport,
@@ -542,6 +677,25 @@ pub enum ScrubEvent {
         key: String,
         detail: ErrorDetail,
     },
+}
+
+/// Versions with `shards_available` of `shards_total` shards available,
+/// at scheme `k`: whole when equal, readable while at least k are, with
+/// `shards_available - k` to spare, and unreadable below k.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardAvailability {
+    pub shards_total: u8,
+    pub shards_available: u8,
+    pub k: u8,
+    pub versions: u64,
+}
+
+/// One device the cross-node checks could not read (5.6), and how many
+/// of the versions checked have a shard on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceExposure {
+    pub device: DeviceId,
+    pub versions: u64,
 }
 
 /// One event of a drain (SPEC 18.2.1, 18.2.2): the estimate, then one
@@ -571,6 +725,9 @@ pub enum DrainEvent {
         /// Rebuilt from the other shards rather than copied from the
         /// draining device.
         rebuilt: bool,
+        /// The shard file's size, so a client can show how much of the
+        /// estimate's bytes have moved.
+        shard_bytes: u64,
     },
     /// The version stays where it is; the detail says why.
     Skipped {
@@ -623,11 +780,85 @@ impl DataFrame {
     }
 }
 
+/// Blocks a read reconstructed from parity (SPEC 11.4): the data served
+/// was correct, and this is what was wrong, for the client to report
+/// and `repair` to fix. Nothing was written. One entry is one shard and
+/// one fault over `stripes` consecutive stripes from `first_stripe`: a
+/// single bad block is one stripe; a shard that could not be opened at
+/// all is every stripe of the object in one entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reconstruction {
+    pub shard_index: u8,
+    pub device: DeviceId,
+    pub fault: FaultKind,
+    pub first_stripe: u64,
+    pub stripes: u64,
+}
+
+/// A record copy a read went without (SPEC 9.4.4, 18.4.2): the version
+/// was trusted on the copies that agreed, and this is where one was
+/// expected and not found, for the client to report and `repair` to
+/// rewrite. Nothing was written, and the body served is correct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingRecordCopy {
+    pub device: DeviceId,
+    pub fault: RecordCopyFault,
+}
+
+/// Why a listed device's record copy did not arrive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecordCopyFault {
+    /// The device was consulted and has no copy: deleted, or a write
+    /// interrupted before it (9.4.3). Repair rewrites it.
+    Missing,
+    /// The device holds a copy at an older placement revision than the
+    /// one trusted: a re-placement was interrupted before reaching it
+    /// (18.8.1). Repair finishes the re-placement forwards.
+    Stale { revision: u64 },
+    /// The device could not be consulted (5.6): its node is unreachable,
+    /// its node cannot read it, or it has been removed from the cluster
+    /// (18.2.1). Nothing is known to be wrong with the copy itself.
+    Unavailable { reason: String },
+}
+
+/// A device an operation went around because its node could not read it
+/// or could not be reached (SPEC 5.6): left out of a write's placement,
+/// reported with the version so the client knows; or absent from a
+/// listing, reported with the page. Nothing is wrong with the object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableDevice {
+    pub device: DeviceId,
+    pub node: NodeId,
+}
+
+/// What a write returns: the version, and the devices it went around
+/// (5.6), empty when none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectWrite {
+    pub version: VersionId,
+    pub unavailable: Vec<UnavailableDevice>,
+}
+
+/// What a read returns beside the body: the record, every block that
+/// had to be reconstructed on the way (11.4), and every record copy the
+/// lookup went without (9.4.4); both empty when the object was whole.
+/// A `head` returns the same with nothing reconstructed, having read
+/// no block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectRead {
+    pub record: MetadataRecord,
+    pub reconstructed: Vec<Reconstruction>,
+    pub missing_records: Vec<MissingRecordCopy>,
+}
+
 /// Terminates a stream. `error` is `None` on success. For `PutShard` the
-/// sender supplies the object size and checksum here so the holder can
+/// sender supplies the object size and checksum here so the node can
 /// check geometry and write the footer (SPEC 19.1.3). For `GetObject` the
 /// coordinator reports the whole-object verification here (11.7), which
-/// is why a client must read this frame before trusting the body.
+/// is why a client must read this frame before trusting the body, and
+/// lists the blocks it reconstructed from parity on the way (11.4) and
+/// the record copies it went without (9.4.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamEnd {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -636,6 +867,8 @@ pub struct StreamEnd {
     pub object_size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub object_checksum: Option<BlockChecksum>,
+    pub reconstructed: Vec<Reconstruction>,
+    pub missing_records: Vec<MissingRecordCopy>,
 }
 
 impl StreamEnd {
@@ -644,6 +877,8 @@ impl StreamEnd {
             error: None,
             object_size: None,
             object_checksum: None,
+            reconstructed: Vec::new(),
+            missing_records: Vec::new(),
         }
     }
 
@@ -652,6 +887,8 @@ impl StreamEnd {
             error: Some(error),
             object_size: None,
             object_checksum: None,
+            reconstructed: Vec::new(),
+            missing_records: Vec::new(),
         }
     }
 }

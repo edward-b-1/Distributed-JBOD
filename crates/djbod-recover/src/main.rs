@@ -1,6 +1,6 @@
 //! `djbod-recover` (SPEC 20.2): given device directories and no running
 //! cluster, list the versions present and reassemble any version for
-//! which k intact shards can be found. Built on `djbod-core` alone. It
+//! which k intact shards can be found. Disk access uses `djbod-core`. It
 //! reads the objects tree directly, so a device whose identity file is
 //! lost is as good as any other, and it never writes to a device.
 
@@ -14,6 +14,7 @@ use anyhow::{bail, Context};
 use clap::{Parser, Subcommand};
 use xxhash_rust::xxh3::Xxh3;
 
+use comfy_table::{presets::NOTHING, CellAlignment, Table};
 use djbod_core::checksum::BlockChecksum;
 use djbod_core::erasure::{ReedSolomonCode, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
@@ -23,6 +24,7 @@ use djbod_core::layout::{
 use djbod_core::record::MetadataRecord;
 use djbod_core::shardfile::{shard_geometry, ShardFileReader};
 use djbod_core::stripe::{decode_stripe, DecodedStripe};
+use djbod_core::text::counted;
 use djbod_core::version::VersionId;
 
 #[derive(Parser)]
@@ -217,13 +219,32 @@ fn sorted_entries(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(entries)
 }
 
+/// Columns two spaces apart with no border, each as wide as its widest
+/// cell, measured in terminal columns so wide characters line up.
+/// `right_aligned` names the numeric columns, which align on their right
+/// edge. Lines carry no trailing spaces.
+fn render(mut table: Table, right_aligned: &[usize]) -> String {
+    table.load_style(NOTHING);
+    let last = table.column_count().saturating_sub(1);
+    for (i, column) in table.column_iter_mut().enumerate() {
+        column.set_padding((0, if i == last { 0 } else { 2 }));
+        if right_aligned.contains(&i) {
+            column.set_cell_alignment(CellAlignment::Right);
+        }
+    }
+    let mut out = String::new();
+    for line in table.lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+    out
+}
+
 fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
     let found = scan(device_paths)?;
     let mut unrecoverable = 0usize;
-    println!(
-        "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  STATUS",
-        "KEY", "VERSION", "REV", "SIZE", "SHARDS"
-    );
+    let mut table = Table::new();
+    table.set_header(["KEY", "VERSION", "REV", "SIZE", "SHARDS", "STATUS"]);
     for ((key, version), record) in &found.records {
         let present = found
             .shards
@@ -237,14 +258,14 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             unrecoverable += 1;
             "NOT recoverable"
         };
-        println!(
-            "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  {status}",
-            key,
+        table.add_row([
+            key.clone(),
             version.to_text(),
-            record.revision,
-            record.size,
-            format!("{present}/{total}")
-        );
+            record.revision.to_string(),
+            record.size.to_string(),
+            format!("{present}/{total}"),
+            status.to_string(),
+        ]);
     }
     // Shards whose record was not found at all.
     for ((hash, version), shards) in &found.shards {
@@ -253,24 +274,25 @@ fn list(device_paths: &[PathBuf]) -> anyhow::Result<ExitCode> {
             .values()
             .any(|r| r.key_hash == *hash && r.version == *version)
         {
-            println!(
-                "{:<40}  {:<26}  {:>3}  {:>12}  {:<7}  no record found; key unknown",
+            table.add_row([
                 format!("(key hash {})", &hash.to_hex()[..16]),
                 version.to_text(),
-                "-",
-                "-",
-                format!("{}/?", shards.len())
-            );
+                "-".to_string(),
+                "-".to_string(),
+                format!("{}/?", shards.len()),
+                "no record found; key unknown".to_string(),
+            ]);
             unrecoverable += 1;
         }
     }
+    print!("{}", render(table, &[2, 3]));
     for problem in &found.problems {
         eprintln!("problem: {problem}");
     }
     eprintln!(
-        "{} version(s), {unrecoverable} not recoverable, {} problem(s)",
-        found.records.len(),
-        found.problems.len()
+        "{}, {unrecoverable} not recoverable, {}",
+        counted(found.records.len(), "version", "versions"),
+        counted(found.problems.len(), "problem", "problems")
     );
     Ok(if unrecoverable > 0 || !found.problems.is_empty() {
         ExitCode::from(2)
@@ -392,8 +414,8 @@ fn write_object(
     }
     if readers.len() < scheme.data_shards() {
         bail!(
-            "only {} intact shard(s) of {}+{} found; need at least {}",
-            readers.len(),
+            "only {} of {}+{} found; need at least {}",
+            counted(readers.len(), "intact shard", "intact shards"),
             record.k,
             record.m,
             record.k
@@ -428,7 +450,8 @@ fn write_object(
             DecodedStripe::Repaired { data, faults } => {
                 repaired_stripes += 1;
                 eprintln!(
-                    "stripe {stripe}: reconstructed around shard(s) {:?}",
+                    "stripe {stripe}: reconstructed around {} {:?}",
+                    counted(faults.len(), "shard", "shards"),
                     faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
                 );
                 data
@@ -438,7 +461,9 @@ fn write_object(
                 usable,
                 needed,
             } => bail!(
-                "stripe {stripe}: only {usable} usable block(s) of {needed} needed; damaged shard(s) {:?}",
+                "stripe {stripe}: only {} of {needed} needed; {} {:?}",
+                counted(usable, "usable block", "usable blocks"),
+                counted(faults.len(), "damaged shard", "damaged shards"),
                 faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
             ),
         };
@@ -454,7 +479,10 @@ fn write_object(
         );
     }
     if repaired_stripes > 0 {
-        eprintln!("{repaired_stripes} stripe(s) needed reconstruction");
+        eprintln!(
+            "{} needed reconstruction",
+            counted(repaired_stripes as usize, "stripe", "stripes")
+        );
     }
     Ok(())
 }

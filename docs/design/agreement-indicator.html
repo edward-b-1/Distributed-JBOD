@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>djbod Agreement Indicator</title>
+<!-- A design comparison for the djbod web UI; see README.md beside it.
+     Self-contained: open it in a browser. The mocks use the console's own
+     colour tokens and render in the light and dark theme side by side. -->
+<style>
+  :root {
+    --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984;
+    --accent: #2a78d6; --accent-track: #d6e6f9; --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; } }
+  :root[data-theme="dark"] { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  .light { --bg: #f5f5f3; --surface: #fcfcfb; --line: #e2e1dc; --text: #0b0b0b; --text-2: #52514e; --accent: #2a78d6; --accent-track: #d6e6f9; --good-soft: #e1f4e1; --warning-soft: #fff3df; --critical-soft: #fbe3e3; }
+  .dark  { --bg: #121211; --surface: #1a1a19; --line: #2e2e2c; --text: #fff; --text-2: #c3c2b7; --accent: #3987e5; --accent-track: #1d3a5e; --good-soft: #17301a; --warning-soft: #3a2f16; --critical-soft: #3d1c1c; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); padding: 24px 16px 48px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .lede { color: var(--text-2); margin: 0 0 28px; max-width: 65ch; }
+  h2 { font-size: 15px; font-weight: 600; margin: 32px 0 6px; }
+  h2 small { color: var(--muted); font-weight: 500; margin-left: 8px; }
+  .note { color: var(--text-2); margin: 0 0 12px; max-width: 70ch; }
+  .states { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .state-label { font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+  .mock { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; font-size: 13px; }
+  .mock header { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--surface); position: relative; }
+  .mock header b { font-size: 14px; font-weight: 600; }
+  .mock .meta { color: var(--text-2); font-size: 12px; }
+  .mock code { font-family: var(--mono); }
+  .mock .body { padding: 10px 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .mock .tile { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .mock .tile .l { color: var(--text-2); font-size: 11px; }
+  .mock .tile .v { font-size: 16px; font-weight: 600; }
+
+  /* A: current pill */
+  .pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; }
+  .pill.ok { background: var(--good-soft); } .pill.ok::before { content: "\2713 "; color: var(--good); }
+  .pill.bad { background: var(--critical-soft); } .pill.bad::before { content: "\2717 "; color: var(--critical); }
+  .pill.warn { background: var(--warning-soft); } .pill.warn::before { content: "\26A0 "; }
+
+  /* B: dot and plain text */
+  .dot { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-2); }
+  .dot::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); }
+  .dot.bad::before { background: var(--critical); box-shadow: 0 0 0 3px color-mix(in srgb, var(--critical) 22%, transparent); }
+  .dot.warn::before { background: var(--warning); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 28%, transparent); }
+  .dot b { color: var(--text); font-weight: 600; }
+
+  /* C: status strip on the header's top edge */
+  .strip header { border-top: 3px solid var(--good); }
+  .strip.bad header { border-top-color: var(--critical); }
+  .strip.warn header { border-top-color: var(--warning); }
+  .strip .word { font-size: 12px; font-weight: 600; margin-left: auto; }
+  .strip .word.ok { color: var(--good); } .strip .word.bad { color: var(--critical); } .strip .word.warn { color: #8a5a00; }
+  .dark .strip .word.warn { color: var(--warning); }
+
+  /* D: one chip per node */
+  .chips { display: inline-flex; gap: 4px; margin-left: auto; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 12px; background: var(--surface); }
+  .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .chip.bad { border-color: var(--critical); background: var(--critical-soft); } .chip.bad::before { background: var(--critical); }
+  .chip.warn { border-color: var(--warning); background: var(--warning-soft); } .chip.warn::before { background: var(--warning); }
+  .chip code { font-size: 11px; color: var(--text-2); }
+
+  /* E: health tile on the Overview */
+  .health { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); grid-column: 1 / -1; }
+  .health .mark { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-size: 18px; font-weight: 700; color: #fff; background: var(--good); flex: none; }
+  .health.bad .mark { background: var(--critical); } .health.warn .mark { background: var(--warning); color: #3a2f16; }
+  .health .t { font-weight: 600; } .health .s { color: var(--text-2); font-size: 12px; }
+  .health .go { margin-left: auto; font-size: 12px; color: var(--accent); white-space: nowrap; }
+
+  /* F: fraction badge with a ring */
+  .ring { display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-2); }
+  .ring svg { width: 26px; height: 26px; }
+  .ring b { color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Agreement indicator for the djbod console</h1>
+<p class="lede">Six treatments of one question in the header: do all nodes hold the same cluster document? Each is shown in its three states, consistent, one node at another version, and builds differing, on the two-node demo. Dark theme samples at the end.</p>
+
+<h2>A · Text pill <small>what PR #83 does</small></h2>
+<p class="note">A soft-coloured pill with a check, cross, or warning sign and a short sentence. Reads as a status, carries the count; the longest of the six.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="pill ok">document consistent across 2 nodes</span></header></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="pill bad">1 of 2 nodes at another version</span></header></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="pill warn">consistent, builds differ</span></header></div></div>
+</div>
+
+<h2>B · Dot and a word</h2>
+<p class="note">A small glowing dot, as many consoles use for "online", followed by one bold word and the count in quiet text. The lightest touch; the colour does most of the work, the word the rest.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="dot"><b>In sync</b> 2 of 2 nodes</span></header></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="dot bad"><b>Out of sync</b> devbox at version 14</span></header></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="dot warn"><b>In sync</b> builds differ</span></header></div></div>
+</div>
+
+<h2>C · Status strip</h2>
+<p class="note">The header's top edge carries a 3 px line in the status colour, with a single coloured word at the right. Visible from across the room without taking any room in the header; the word gives the reason on hover.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light strip"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="word ok">Consistent</span></header></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light strip bad"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="word bad">Inconsistent · devbox at 14</span></header></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light strip warn"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="word warn">Consistent · builds differ</span></header></div></div>
+</div>
+
+<h2>D · One chip per node</h2>
+<p class="note">Every node gets a chip with its label, version, and a dot; the odd one out is the one that is coloured. No summary sentence, since the picture is the summary. Scales to perhaps eight nodes before it needs to fold into a count.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="chips"><span class="chip">devbox4 <code>v15</code></span><span class="chip">devbox <code>v15</code></span></span></header></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="chips"><span class="chip">devbox4 <code>v15</code></span><span class="chip bad">devbox <code>v14</code></span></span></header></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="chips"><span class="chip">devbox4 <code>v15</code></span><span class="chip warn">devbox <code>v15 · older build</code></span></span></header></div></div>
+</div>
+
+<h2>E · Health card on the Overview</h2>
+<p class="note">Not in the header at all: a full-width card at the top of the Overview, the way a Kafka dashboard leads with cluster health. A big mark, a sentence, a link to the fix. Most explicit; only seen on that tab.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span></header><div class="body"><div class="health"><div class="mark">&#10003;</div><div><div class="t">Cluster consistent</div><div class="s">2 nodes hold document version 15</div></div></div><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div></div></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span></header><div class="body"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; devbox4 holds 15</div></div><span class="go">Sync documents →</span></div><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div></div></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span></header><div class="body"><div class="health warn"><div class="mark">&#8801;</div><div><div class="t">Consistent, builds differ</div><div class="s">devbox runs an older build; upgrade before the next change</div></div></div><div class="tile"><div class="l">Nodes</div><div class="v">2</div></div><div class="tile"><div class="l">Devices</div><div class="v">5</div></div></div></div></div>
+</div>
+
+<h2>F · Fraction with a ring</h2>
+<p class="note">A small ring filled by the share of nodes in agreement, the fraction beside it. Says how much of the cluster agrees rather than only whether; on two nodes the ring is either full or half, on twenty it becomes informative.</p>
+<div class="states">
+  <div><p class="state-label">consistent</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="ring"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="none" stroke="var(--good-soft)" stroke-width="5"/><circle cx="16" cy="16" r="12" fill="none" stroke="var(--good)" stroke-width="5" stroke-dasharray="75.4 75.4" transform="rotate(-90 16 16)"/></svg><b>2/2</b> nodes agree</span></header></div></div>
+  <div><p class="state-label">one node behind</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="ring"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="none" stroke="var(--critical-soft)" stroke-width="5"/><circle cx="16" cy="16" r="12" fill="none" stroke="var(--critical)" stroke-width="5" stroke-dasharray="37.7 75.4" transform="rotate(-90 16 16)"/></svg><b>1/2</b> nodes agree</span></header></div></div>
+  <div><p class="state-label">builds differ</p><div class="mock light"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="ring"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="none" stroke="var(--warning-soft)" stroke-width="5"/><circle cx="16" cy="16" r="12" fill="none" stroke="var(--warning)" stroke-width="5" stroke-dasharray="75.4 75.4" transform="rotate(-90 16 16)"/></svg><b>2/2</b> agree, builds differ</span></header></div></div>
+</div>
+
+<h2>Dark theme <small>the "one node behind" state of each</small></h2>
+<div class="states">
+  <div><p class="state-label">A</p><div class="mock dark"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="pill bad">1 of 2 nodes at another version</span></header></div></div>
+  <div><p class="state-label">B</p><div class="mock dark"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="dot bad"><b>Out of sync</b> devbox at version 14</span></header></div></div>
+  <div><p class="state-label">C</p><div class="mock dark strip bad"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="word bad">Inconsistent · devbox at 14</span></header></div></div>
+  <div><p class="state-label">D</p><div class="mock dark"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="chips"><span class="chip">devbox4 <code>v15</code></span><span class="chip bad">devbox <code>v14</code></span></span></header></div></div>
+  <div><p class="state-label">E</p><div class="mock dark"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span></header><div class="body"><div class="health bad"><div class="mark">!</div><div><div class="t">Cluster inconsistent</div><div class="s">devbox holds version 14; devbox4 holds 15</div></div><span class="go">Sync documents →</span></div></div></div></div>
+  <div><p class="state-label">F</p><div class="mock dark"><header><b>Distributed-JBOD</b><span class="meta">version <code>15</code></span><span class="ring"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="12" fill="none" stroke="var(--critical-soft)" stroke-width="5"/><circle cx="16" cy="16" r="12" fill="none" stroke="var(--critical)" stroke-width="5" stroke-dasharray="37.7 75.4" transform="rotate(-90 16 16)"/></svg><b>1/2</b> nodes agree</span></header></div></div>
+</div>
+</body>
+</html>

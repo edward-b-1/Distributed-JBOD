@@ -4,7 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Distributed-JBOD</title>
-<link rel="icon" type="image/png" sizes="256x256" href="/icon.png">
+<script>try { const t = localStorage.getItem('theme'); if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t; } catch (_) {}</script>
+<link rel="icon" type="image/svg+xml" href="/brand/favicon.svg">
+<link rel="alternate icon" type="image/png" sizes="32x32" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" sizes="256x256" href="/brand/appicon-256.png">
 <style>
   :root {
     --bg: #f5f5f3;
@@ -21,11 +24,18 @@
     --critical: #d03b3b;
     --warning-soft: #fff3df;
     --critical-soft: #fbe3e3;
+    --good-soft: #e1f4e1;
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
+  /* Three theme states: the system's preference by default, or a choice
+     stamped on the root as data-theme="light" or "dark" by the switch in
+     the header, remembered per browser. The dark tokens are listed twice
+     because CSS cannot share a block between a media query and a selector. */
+  :root { color-scheme: light; }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
+      color-scheme: dark;
       --bg: #121211;
       --surface: #1a1a19;
       --line: #2e2e2c;
@@ -36,31 +46,74 @@
       --accent-track: #1d3a5e;
       --warning-soft: #3a2f16;
       --critical-soft: #3d1c1c;
+      --good-soft: #17301a;
     }
   }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+      --bg: #121211;
+      --surface: #1a1a19;
+      --line: #2e2e2c;
+      --text: #ffffff;
+      --text-2: #c3c2b7;
+      --muted: #8a8984;
+      --accent: #3987e5;
+      --accent-track: #1d3a5e;
+      --warning-soft: #3a2f16;
+      --critical-soft: #3d1c1c;
+      --good-soft: #17301a;
+  }
+  #theme-toggle { display: inline-flex; align-items: center; gap: 6px; }
+  #theme-toggle svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   * { box-sizing: border-box; }
   html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
   /* The page is a column that fills the window; the frame takes what the
      header (and any banners) leave, so the rail reaches the bottom on a
      short page without the page ever being taller than the window. */
-  body { min-height: 100vh; display: flex; flex-direction: column; }
+  /* The page is exactly the window's height and never scrolls itself:
+     the frame takes what the header and banners leave, and inside it the
+     content column scrolls when a tab is taller than the window. That is
+     what lets the Objects page size its key table by the space left. */
+  html, body { height: 100%; }
+  body { height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
   body > * { flex: none; }
   a { color: var(--accent); }
   header {
-    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline;
-    padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--surface);
   }
-  header h1 { font-size: 17px; margin: 0; font-weight: 600; display: flex; align-items: center; gap: 9px; }
-  header h1 img { width: 26px; height: 26px; display: block; }
+  header h1 { margin: 0; display: flex; align-items: center; }
+  /* The one-line lockup, 60 px high (254 px wide); the header's items centre on it. */
+  header h1 img { height: 60px; width: auto; display: block; }
   header .meta { color: var(--text-2); font-size: 13px; }
   header .meta code { font-family: var(--mono); }
   /* Navigation is a left rail: one button per section with an icon and,
      where it means something, a live count; the selected one sits on a
      tinted background. On a narrow screen the rail becomes a row above
      the content. */
-  .frame { display: grid; grid-template-columns: 184px minmax(0, 1fr); flex: 1 1 auto; }
-  aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 8px; }
-  aside.rail nav { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 2px; }
+  .frame { display: grid; grid-template-columns: 232px minmax(0, 1fr); flex: 1 1 auto; min-height: 0; transition: grid-template-columns .15s; }
+  .frame.collapsed { grid-template-columns: 60px minmax(0, 1fr); }
+  aside.rail { background: var(--surface); border-right: 1px solid var(--line); padding: 12px 10px; display: flex; flex-direction: column; }
+  aside.rail nav { position: sticky; top: 48px; display: flex; flex-direction: column; gap: 2px; }
+  /* Collapsed: icons only, the label as a tooltip, the count hidden. */
+  .collapsed .rail .label, .collapsed .rail .count { display: none; }
+  .collapsed .rail button { justify-content: center; padding: 8px 0; }
+  /* The rail's head: a small title at the left, the collapse toggle at
+     the right; collapsed, only the toggle, centred. */
+  /* The head keeps the rail's side padding, so the toggle sits the same
+     distance from the rail's right border as the section buttons do. */
+  .rail-head { display: flex; align-items: center; margin: 0 0 6px; padding-left: 10px; }
+  #rail-toggle { margin-left: auto; }
+  .rail-title { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+  .collapsed .rail-head { justify-content: center; padding-left: 0; }
+  .collapsed #rail-toggle { margin-left: 0; }
+  /* Not a section button: it keeps its own width rather than the rail
+     buttons' full width, or its icon would sit at the row's left. */
+  #rail-toggle { width: auto; flex: none; background: none; border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; color: var(--muted); cursor: pointer; font: inherit; }
+  #rail-toggle:hover { color: var(--text); background: var(--bg); }
+  #rail-toggle svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; display: block; transition: transform .15s; }
+  .collapsed #rail-toggle svg { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .frame, #rail-toggle svg { transition: none; } }
   .rail button {
     display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
     background: none; border: 1px solid transparent; border-radius: 7px; padding: 8px 10px;
@@ -73,13 +126,24 @@
   .rail .count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
   .rail button[aria-selected="true"] .count { color: var(--text-2); }
   @media (max-width: 760px) {
-    .frame { grid-template-columns: 1fr; }
-    aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; }
+    .frame, .frame.collapsed { grid-template-columns: 1fr; }
+    aside.rail { border-right: none; border-bottom: 1px solid var(--line); padding: 8px 12px; overflow-x: auto; flex-direction: row; }
     aside.rail nav { position: static; flex-direction: row; }
     .rail button { width: auto; }
+    .collapsed .rail .label, .collapsed .rail .count { display: initial; }
+    .collapsed .rail button { justify-content: flex-start; padding: 8px 10px; }
+    .rail-head { display: none; }
     .rail .count { margin-left: 4px; }
   }
-  main { padding: 16px 20px 32px; min-width: 0; max-width: 1640px; }
+  main { padding: 16px 20px 20px; min-width: 0; max-width: 1640px; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  aside.rail { overflow-y: auto; min-height: 0; }
+  main > section { flex: 1 1 auto; min-height: 0; }
+  /* The Objects section is a column that fills the window's height, so
+     its key table can scroll inside a box sized by what is left rather
+     than by a guess, and the paging row stays in view above it. */
+  #tab-objects { display: flex; flex-direction: column; }
+  #tab-objects .split { flex: 1 1 auto; min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
+  #tab-objects .list-column { display: flex; flex-direction: column; min-height: 0; }
   /* Author display rules (flex on .row, grid on sections) would otherwise
      beat the browser's own `[hidden] { display: none }`. */
   [hidden] { display: none !important; }
@@ -90,6 +154,9 @@
   .tile .label { color: var(--text-2); font-size: 12px; }
   .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
   .tile .sub { color: var(--muted); font-size: 12px; }
+  .tile.link { cursor: pointer; }
+  .tile.link:hover { border-color: var(--accent); }
+  .tile.link .label::after { content: " \2192"; color: var(--accent); }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
   table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
@@ -112,11 +179,40 @@
   @media (prefers-reduced-motion: reduce) { .meter .fill.working { animation: none; } }
   .meter .pct { font-variant-numeric: tabular-nums; color: var(--text-2); font-size: 12px; width: 3.5em; text-align: right; }
   .state { white-space: nowrap; }
-  .state.active::before { content: "\25CF  "; color: var(--good); }
-  .state.draining::before { content: "\25D0  "; color: var(--warning); }
-  .state.removed::before { content: "\25CB  "; color: var(--muted); }
-  .ok::before { content: "\2713 "; color: var(--good); }
-  .bad::before { content: "\2717 "; color: var(--critical); }
+  /* Status marks are shapes, not glyphs: a dot for pass or active, a
+     square for fail, a triangle for warning or draining, a ring for off
+     or removed. The colour says it and the shape backs it up for anyone
+     who cannot tell the colours apart; drawn in CSS so they match
+     everywhere and scale with the text. */
+  .ok::before, .bad::before, .warn::before, .state::before, .health .mark::before {
+    content: ""; display: inline-block; width: .7em; height: .7em; margin-right: .45em; vertical-align: -.02em;
+    background: var(--good); border-radius: 50%; flex: none;
+  }
+  .bad::before { background: var(--critical); border-radius: .12em; }
+  .warn::before, .state.draining::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .state.removed::before { background: none; border: .15em solid var(--muted); box-sizing: border-box; }
+  .state.active::before { background: var(--good); }
+  /* A device its node cannot read, or whose node cannot be reached
+     (SPEC 5.6): the failure square, whatever the document says its state
+     is, since nothing can be read from or written to it. */
+  .state.unavailable::before { background: var(--critical); border-radius: .12em; clip-path: none; width: .7em; height: .7em; }
+  .cell-check { white-space: nowrap; }
+  .cell-check .why { display: block; color: var(--muted); font-size: 12px; white-space: normal; }
+  /* The health card at the top of the Overview: a mark, a sentence, and
+     the way to the fix, in the status colour; green when every node
+     answers and holds the current document, red when one does not, amber
+     when only the builds differ. */
+  .health { display: flex; align-items: center; gap: 14px; padding: 12px 14px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  /* The card's mark is the same shape, large, on a soft disc of its colour. */
+  .health .mark { width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center; background: var(--good-soft); flex: none; font-size: 30px; }
+  .health .mark::before { margin: 0; }
+  .health.bad .mark { background: var(--critical-soft); } .health.bad .mark::before { background: var(--critical); border-radius: .12em; }
+  .health.warn .mark { background: var(--warning-soft); } .health.warn .mark::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .health .title { font-weight: 600; font-size: 15px; }
+  .health .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
+  .health .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .health .actions a { color: var(--accent); font-size: 13px; white-space: nowrap; cursor: pointer; text-decoration: none; }
+  .health .actions a:hover { text-decoration: underline; }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   button, input, select {
     font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line);
@@ -126,8 +222,9 @@
   a.btn { display: inline-block; padding: 5px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--text); text-decoration: none; background: var(--surface); }
   button:hover, a.btn:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.danger { color: var(--critical); }
-  button.danger:hover { border-color: var(--critical); }
+  /* Destructive actions are filled like the primary button, in red. */
+  button.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+  button.primary:hover, button.danger:hover { filter: brightness(.92); }
   button:disabled { opacity: .5; cursor: default; }
   input[type=number] { width: 9em; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
@@ -141,6 +238,15 @@
      detail column and squeeze the list. Let both columns shrink; wide
      content then scrolls inside its own box. */
   .split > * { min-width: 0; }
+  /* The key table scrolls in its own box rather than with the window,
+     its header staying put; the box takes the height left under the
+     controls, and at least enough for a few rows. */
+  .scroll { flex: 1 1 auto; min-height: 8em; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .scroll table { border: none; border-radius: 0; }
+  .scroll thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; box-shadow: 0 1px 0 var(--line); }
+  .paging { margin: 0 0 8px; flex: none; }
+  .paging #list-page { font-variant-numeric: tabular-nums; }
+  .paging .cursor { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
   .filter-spacer { display: none; }
   @media (min-width: 900px) { .filter-spacer { display: block; } }
   #object-detail { align-self: start; position: sticky; top: 12px; max-height: calc(100vh - 24px); overflow: auto; }
@@ -171,26 +277,40 @@
   pre { font-family: var(--mono); font-size: 12px; overflow: auto; }
   .empty { color: var(--muted); padding: 12px; }
   .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0; }
+  /* A table's heading with a viewing toggle beside it and, at the right,
+     how many rows the toggle is hiding, so nothing is concealed. */
+  .section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
+  .section-head h2 { margin: 0; }
+  .section-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .section-head label input { margin: 0; }
+  .section-head .hidden-note { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+  tr.removed td { color: var(--muted); }
   tr.selected td { background: var(--accent-track); }
   tr.clickable { cursor: pointer; }
 </style>
 </head>
 <body>
 <header>
-  <h1><picture><source srcset="/icon-dark.png" media="(prefers-color-scheme: dark)"><img src="/icon.png" alt="" width="26" height="26"></picture>Distributed-JBOD</h1>
+  <h1><img id="lockup" src="/brand/lockup.svg" alt="Distributed JBOD" width="254" height="60"></h1>
   <span class="meta">cluster <code id="h-cluster">…</code></span>
-  <span class="meta">document version <code id="h-version">…</code></span>
   <span class="meta">via node <code id="h-node">…</code><span id="h-link"></span></span>
   <span class="meta">transport <code id="h-transport">…</code></span>
   <span class="meta">ui build <code id="h-build">…</code></span>
   <span class="meta" id="h-refreshed"></span>
-  <button id="refresh" style="margin-left:auto">Refresh</button>
+  <span class="meta"><a href="https://github.com/edward-b-1/Distributed-JBOD" target="_blank" rel="noopener" title="AGPL-3.0: the source of the program you are using">source</a></span>
+  <button id="theme-toggle" style="margin-left:auto" aria-label="Switch to the dark theme" title="Switch to the dark theme"><svg viewBox="0 0 24 24" aria-hidden="true"><path id="theme-icon" d=""/></svg><span id="theme-label"></span></button>
+  <button id="refresh">Refresh</button>
 </header>
 <div id="banners"></div>
 <div class="frame">
 <aside class="rail">
+  <div class="rail-head">
+    <span class="label rail-title">Sections</span>
+    <button id="rail-toggle" aria-label="Collapse the sidebar" title="Collapse the sidebar"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg></button>
+  </div>
   <nav role="tablist" aria-label="Sections">
     <button role="tab" data-tab="overview" aria-selected="true"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Overview<span class="count" id="count-overview"></span></button>
+    <button role="tab" data-tab="nodes"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Nodes<span class="count" id="count-nodes"></span></button>
     <button role="tab" data-tab="objects"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7l8-4 8 4-8 4-8-4z"/><path d="M4 7v10l8 4 8-4V7"/><path d="M12 11v10"/></svg>Objects<span class="count" id="count-objects"></span></button>
     <button role="tab" data-tab="maintenance"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0 5 5L22 9l-3-3-2.3 2.3"/><path d="M3 21l8.5-8.5"/></svg>Maintenance<span class="count" id="count-maintenance"></span></button>
     <button role="tab" data-tab="settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</button>
@@ -199,8 +319,14 @@
 <main>
 
 <section id="tab-overview">
+  <div id="health" role="status"></div>
   <div class="tiles" id="tiles"></div>
-  <h2>Nodes</h2>
+</section>
+
+<section id="tab-nodes" hidden>
+  <div class="section-head"><h2>Nodes</h2>
+    <label title="a removed node stays in the cluster document as a tombstone, for the record; nothing is checked or done for it"><input type="checkbox" id="show-removed-nodes"> Show removed</label>
+    <span class="hidden-note" id="nodes-hidden"></span></div>
   <table>
     <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
@@ -209,7 +335,9 @@
     <button id="sync">Sync documents</button>
     <span class="hint">Brings every reachable node up to the highest document version any holds. Removing a dead node needs the command line: <code>djbod cluster remove-node &lt;id&gt; --force</code>.</span>
   </div>
-  <h2>Devices</h2>
+  <div class="section-head"><h2>Devices</h2>
+    <label title="a removed device stays in the cluster document as a tombstone, for the record; it holds nothing and takes nothing"><input type="checkbox" id="show-removed-devices"> Show removed</label>
+    <span class="hidden-note" id="devices-hidden"></span></div>
   <table>
     <thead><tr><th>Device</th><th>Node</th><th>State</th><th>Used</th><th class="num">Free</th><th class="num">Total</th><th></th></tr></thead>
     <tbody id="devices"></tbody>
@@ -238,12 +366,21 @@
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
     </div>
     <div class="filter-spacer"></div>
-    <div>
-      <table>
-        <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
-        <tbody id="objects"></tbody>
-      </table>
-      <div class="row"><button id="list-more" hidden>More</button><span class="hint" id="list-count"></span></div>
+    <div class="list-column">
+      <div class="row paging">
+        <button id="list-prev" title="the previous page">&#8249; Previous</button>
+        <span id="list-page" class="hint">Page 1</span>
+        <button id="list-next" title="the next page">Next &#8250;</button>
+        <span class="hint" id="list-count"></span>
+      </div>
+      <div class="hint" id="list-cursor" style="margin:0 0 8px"></div>
+      <div class="hint" id="list-note" style="margin:0 0 8px"></div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th title="a recent read the node stopped for damage" style="width:1.5em"></th><th>Key</th><th class="num">Size</th><th>Version</th></tr></thead>
+          <tbody id="objects"></tbody>
+        </table>
+      </div>
     </div>
     <div class="card" id="object-detail"><div class="empty">Select an object to see its record.</div></div>
   </div>
@@ -262,7 +399,7 @@
       <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill working" id="scrub-fill" style="width:0%"></div></div></div>
       <span class="hint" id="scrub-progress-text"></span>
     </div>
-    <p class="hint">Every node reads every record and block on its own devices against their checksums, then the coordinator checks that record copies agree and every holder has its shard.</p>
+    <p class="hint">Every node reads every record and block on its own devices against their checksums, then the coordinator checks that record copies agree and every listed device has its shard.</p>
     <div class="log" id="scrub-log" hidden></div>
   </div>
   <h2>Drain</h2>
@@ -274,6 +411,10 @@
       <span id="drain-summary" class="hint"></span>
     </div>
     <p class="hint">One pass over every version on a draining device, moving each shard to another device. Mark the device draining on the Overview tab first. Rerun after fixing whatever was skipped, then remove the device.</p>
+    <div class="row" id="drain-progress" hidden>
+      <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill working" id="drain-fill" style="width:0%"></div></div></div>
+      <span class="hint" id="drain-progress-text"></span>
+    </div>
     <div class="log" id="drain-log" hidden></div>
   </div>
 </section>
@@ -310,7 +451,11 @@
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
-const state = { status: null, cluster: null, listing: { prefix: '', keys: [], truncated: false }, selectedKey: null, failures: {} };
+const PAGE_SIZE = 100;
+// The listing is paged through the node's own cursor (SPEC 15.2.1): page
+// n starts after the last key of page n-1, and `after` remembers each
+// page's starting key so Previous can go back the same way.
+const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null] }, selectedKey: null, failures: {} };
 
 // ------------------------------------------------------------ helpers
 
@@ -414,16 +559,27 @@ function describeError(error) {
   return lines.join('\n');
 }
 function fail(context, e) {
+  // A node the UI server cannot reach fails every call until it is back,
+  // so that is one banner, not a toast per call; api() clears it on the
+  // next success.
+  if (e && e.error && e.error.code === 'node_unreachable' && (e.error.addresses || e.error.address)) {
+    state.unreachable = e.error;
+    renderBanners();
+    return;
+  }
   // The status says whose fault it is: a refusal by the store (409), a
   // name that does not exist (404), a bad request (400), or a node this
-  // server could not reach (502).
-  const kind = e && e.status === 409 ? 'refused' : e && e.status === 404 ? 'not found' : e && e.status === 400 ? 'bad request' : e && e.status >= 500 ? 'cannot reach the cluster' : null;
+  // server could not reach (502). A refusal because a node the object
+  // needs is down (SPEC 9.4.4, 11.4) is a 409 carrying node_unreachable.
+  const refused = e && e.error && e.error.code === 'node_unreachable' ? 'refused while a node is unreachable' : e && e.error && e.error.code === 'device_unavailable' ? 'refused while a device is unavailable' : 'refused';
+  const kind = e && e.status === 409 ? refused : e && e.status === 404 ? 'not found' : e && e.status === 400 ? 'bad request' : e && e.status >= 500 ? 'cannot reach the cluster' : null;
   if (e && e.error) toast(`${context}${kind ? ` ${kind}` : ''}: ${e.error.code}: ${e.error.message}`, describeError(e.error), true);
   else toast(`${context}: ${e?.message || e}`, '', true);
 }
 
 async function api(path, options = {}) {
   const response = await fetch('/api' + path, options);
+  if (response.ok && state.unreachable) { state.unreachable = null; renderBanners(); }
   if (response.status === 204) return null;
   const text = await response.text();
   let body = null;
@@ -461,6 +617,56 @@ function logLine(log, text, cls) {
 
 // ------------------------------------------------------------ tabs
 
+// The theme switch: dark or light, remembered per browser; with nothing
+// remembered the system's preference applies. The lockup is swapped here
+// too, since a media query cannot see the choice.
+const SUN = 'M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6L4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z';
+const MOON = 'M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z';
+function effectiveTheme() {
+  const chosen = document.documentElement.dataset.theme;
+  if (chosen === 'dark' || chosen === 'light') return chosen;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+function applyTheme() {
+  const dark = effectiveTheme() === 'dark';
+  const chosen = document.documentElement.dataset.theme;
+  $('lockup').src = dark ? "/brand/lockup-dark.svg" : "/brand/lockup.svg";
+  $('theme-icon').setAttribute('d', dark ? SUN : MOON);
+  $('theme-label').textContent = dark ? 'Light' : 'Dark';
+  const label = dark ? 'Switch to the light theme' : 'Switch to the dark theme';
+  $('theme-toggle').setAttribute('aria-label', label + (chosen ? '' : ' (following the system now)'));
+  $('theme-toggle').title = $('theme-toggle').getAttribute('aria-label');
+}
+$('theme-toggle').addEventListener('click', () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch (_) { /* per-browser convenience only */ }
+  applyTheme();
+});
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+applyTheme();
+
+// Wrap each rail label so the collapsed rail can hide it and show it as
+// a tooltip instead; the buttons' markup stays as it is.
+for (const button of document.querySelectorAll('.rail [role=tab]')) {
+  for (const node of [...button.childNodes]) {
+    if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) {
+      const span = el('span', { class: 'label', text: node.textContent.trim() });
+      button.replaceChild(span, node);
+      button.title = span.textContent;
+    }
+  }
+}
+const frame = document.querySelector('.frame');
+function setRail(collapsed) {
+  frame.classList.toggle('collapsed', collapsed);
+  const t = $('rail-toggle');
+  t.setAttribute('aria-label', collapsed ? 'Expand the sidebar' : 'Collapse the sidebar');
+  t.title = t.getAttribute('aria-label');
+  try { localStorage.setItem('rail-collapsed', collapsed ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+}
+$('rail-toggle').addEventListener('click', () => setRail(!frame.classList.contains('collapsed')));
+try { if (localStorage.getItem('rail-collapsed')) setRail(true); } catch (_) { /* fine */ }
 for (const button of document.querySelectorAll('nav [role=tab]')) {
   button.addEventListener('click', () => {
     for (const b of document.querySelectorAll('nav [role=tab]')) b.setAttribute('aria-selected', b === button);
@@ -483,18 +689,59 @@ async function refresh() {
     renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
+// The health card: do all nodes hold the same configuration? Consistent
+// means every node listed in the document answered and holds the
+// document's version (SPEC 6.2.6). An unreachable node or one at another
+// version breaks that, and the card names it and offers the fix. Builds
+// that differ (6.2.6.4) are a warning on their own, since the next
+// document change may be refused by the older node.
+function renderHealth() {
+  const { status, cluster } = state;
+  // Removed nodes (SPEC 6.2.2) are tombstones: listed, not asked, and no
+  // part of the cluster's health.
+  const nodes = cluster.nodes.filter((n) => n.state !== 'removed');
+  const unreachable = nodes.filter((n) => n.error);
+  const behind = nodes.filter((n) => !n.error && n.version !== status.document_version);
+  const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build));
+  const names = (list) => list.map((n) => nodeText(n.node)).join(', ');
+  let cls = 'ok', title, sub;
+  const actions = [];
+  if (unreachable.length) {
+    cls = 'bad';
+    title = `${unreachable.length} of ${plural(nodes.length, 'node')} unreachable`;
+    sub = unreachable.map((n) => `${nodeText(n.node)} at ${n.address}: ${n.error}`).join('; ');
+  } else if (behind.length) {
+    cls = 'bad';
+    title = 'Cluster inconsistent';
+    sub = `${names(behind)} ${behind.length === 1 ? 'holds' : 'hold'} document version ${behind.map((n) => n.version).join(', ')}; the current version is ${status.document_version}`;
+    actions.push(['Sync documents \u2192', () => $('sync').click()]);
+  } else if (builds.size > 1) {
+    cls = 'warn';
+    title = 'Consistent, builds differ';
+    sub = `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
+  } else {
+    title = 'Cluster consistent';
+    sub = `${plural(nodes.length, 'node holds', 'nodes hold')} document version ${status.document_version}`;
+  }
+  $('health').replaceChildren(el('div', { class: 'health ' + cls },
+    el('div', { class: 'mark', 'aria-hidden': 'true' }),
+    el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
+    el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+}
 function renderHeader() {
   const { status, cluster } = state;
   // The cluster's name first, its id in parentheses (SPEC 6.2.5.3).
   $('h-cluster').textContent = status.cluster_name ? `${status.cluster_name} (${short(status.cluster_id)})` : status.cluster_id;
   $('h-cluster').title = status.cluster_id;
-  $('h-version').textContent = status.document_version;
   $('h-node').textContent = nodeText(status.coordinator);
-  $('h-node').title = status.coordinator;
+  // The node that answered, and the address the UI server reached it at;
+  // the server moves to another node when one fails.
+  $('h-node').title = status.via ? `${status.coordinator}\nreached at ${status.via}` : status.coordinator;
   $('h-link').textContent = status.ui_to_node_tls ? ' over TLS' : ' in plain';
   $('h-transport').textContent = status.transport || 'plain';
   $('h-build').textContent = status.ui_build || '?';
   $('h-refreshed').textContent = 'refreshed ' + new Date().toLocaleTimeString();
+  renderHealth();
   document.title = `Distributed-JBOD ${status.cluster_name || short(status.cluster_id)}`;
 }
 // Warnings about unencrypted links, one line each, dismissable for the
@@ -504,9 +751,18 @@ function renderHeader() {
 // the node is shown in the header instead, since a tls cluster refuses a
 // plain one outright.
 function renderBanners() {
-  const { status, cluster } = state;
+  // Before the first successful refresh there is no status or document
+  // yet; the unreachable banner still has to show.
+  const status = state.status || {};
+  const cluster = state.cluster || { nodes: [] };
   const warnings = [];
-  const transport = status.transport || 'plain';
+  if (state.unreachable) {
+    warnings.push({ id: 'node-unreachable', level: 'critical', sticky: true,
+      text: `${state.unreachable.message}. Start a node, or start `,
+      code: 'djbod-ui', tail: ' with another address.', title: state.unreachable.detail || '' });
+  }
+  // The transport is unknown until the status has been fetched once.
+  const transport = state.status ? (status.transport || 'plain') : null;
   if (transport === 'plain') {
     warnings.push({ id: 'transport-plain', level: 'critical',
       text: 'The cluster transport is set to plain. Connections between nodes, and from clients, are unencrypted. Change it with ',
@@ -532,25 +788,51 @@ function renderBanners() {
   }
   let dismissed = [];
   try { dismissed = JSON.parse(sessionStorage.getItem('dismissed-banners') || '[]'); } catch (_) { dismissed = []; }
-  $('banners').replaceChildren(...warnings.filter((w) => !dismissed.includes(w.id)).map((w) =>
-    el('div', { class: 'banner ' + w.level, role: 'alert' },
+  $('banners').replaceChildren(...warnings.filter((w) => w.sticky || !dismissed.includes(w.id)).map((w) =>
+    el('div', { class: 'banner ' + w.level, role: 'alert', title: w.title || null },
       el('span', { class: 'what' }, w.text, el('code', { text: w.code }), w.tail || ''),
-      el('button', { text: '×', 'aria-label': 'dismiss for this session', onclick: () => {
+      // A sticky banner describes a condition that clears itself, so it
+      // has no dismiss button.
+      w.sticky ? null : el('button', { text: '×', 'aria-label': 'dismiss for this session', onclick: () => {
         try { sessionStorage.setItem('dismissed-banners', JSON.stringify([...dismissed, w.id])); } catch (_) { /* shown again next load */ }
         renderBanners();
       } }))));
 }
-// The build a node reported, or a name for a reachable node that did not,
-// which predates builds in Hello (SPEC 19.1.5).
+// The build a node reported (SPEC 19.1.5); '-' when it was not reached.
 function nodeBuild(n) {
-  return n.build || 'older, unreported';
+  return n.build || '-';
 }
 // The distinct builds among the reachable nodes.
 function nodeBuilds(cluster) {
-  return new Set(cluster.nodes.filter((n) => !n.error).map(nodeBuild));
+  return new Set(cluster.nodes.filter((n) => !n.error && n.state !== 'removed').map(nodeBuild));
 }
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
+}
+// Whether removed nodes and devices (tombstones, SPEC 6.2.2 and 18.2.1)
+// are listed. A viewing preference, remembered per browser; it changes
+// which rows are drawn and nothing the page computes.
+const view = { removedNodes: false, removedDevices: false };
+try {
+  view.removedNodes = localStorage.getItem('show-removed-nodes') === '1';
+  view.removedDevices = localStorage.getItem('show-removed-devices') === '1';
+} catch (_) { /* defaults */ }
+$('show-removed-nodes').checked = view.removedNodes;
+$('show-removed-devices').checked = view.removedDevices;
+$('show-removed-nodes').addEventListener('change', (e) => {
+  view.removedNodes = e.target.checked;
+  try { localStorage.setItem('show-removed-nodes', view.removedNodes ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+$('show-removed-devices').addEventListener('change', (e) => {
+  view.removedDevices = e.target.checked;
+  try { localStorage.setItem('show-removed-devices', view.removedDevices ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+// The note beside a table: how many removed entries exist and whether
+// they are hidden, so the toggle never conceals that there are any.
+function hiddenNote(id, removed, shown) {
+  $(id).textContent = removed === 0 ? '' : shown ? `${removed} removed shown` : `${removed} removed, hidden`;
 }
 function renderOverview() {
   const { status, cluster } = state;
@@ -558,12 +840,14 @@ function renderOverview() {
   const devices = status.devices;
   const counts = { active: 0, draining: 0, removed: 0 };
   let total = 0, free = 0;
-  for (const d of devices) { counts[d.state]++; if (d.state !== 'removed') { total += d.total_bytes; free += d.free_bytes; } }
-  const unreachable = cluster.nodes.filter((n) => n.error).length;
-  const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
+  let unavailable = 0;
+  for (const d of devices) { counts[d.state]++; if (d.available === false) unavailable++; if (d.state !== 'removed') { total += d.total_bytes; free += d.free_bytes; } }
+  const members = cluster.nodes.filter((n) => n.state !== 'removed');
+  const unreachable = members.filter((n) => n.error).length;
+  const behind = members.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
   const tiles = [
-    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering'],
-    ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed`],
+    ['Nodes', members.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
+    ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed${unavailable ? `, ${unavailable} unavailable` : ''}`, 'nodes'],
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
     ['Scheme', `${doc.k}+${doc.m}`, `${human(doc.block_size)} blocks, any ${doc.m} of ${doc.k + doc.m} may fail`],
@@ -573,28 +857,80 @@ function renderOverview() {
       tls: 'every connection uses TLS and a certificate',
     }[status.transport || 'plain'] || ''],
   ];
-  $('count-overview').textContent = `${counts.active + counts.draining} dev`;
+  $('count-overview').textContent = '';
+  const membersHere = cluster.nodes.filter((n) => n.state !== 'removed');
+  const off = membersHere.filter((n) => n.error || n.version !== doc.version).length;
+  $('count-nodes').textContent = off ? `${off} off` : `${membersHere.length}`;
+  $('count-nodes').classList.toggle('bad', off > 0);
   const damaged = Object.keys(state.failures || {}).length;
   $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
-  $('tiles').replaceChildren(...tiles.map(([label, value, sub]) =>
-    el('div', { class: 'tile' }, el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }))));
+  // A tile with a fourth element names the tab that holds its detail and
+  // opens it on click, when that tab exists.
+  $('tiles').replaceChildren(...tiles.map(([label, value, sub, tab]) => {
+    const target = tab && document.querySelector(`[data-tab="${tab}"]`);
+    return el('div', { class: 'tile' + (target ? ' link' : ''), role: target ? 'link' : null, tabindex: target ? '0' : null,
+      onclick: target ? () => target.click() : null,
+      onkeydown: target ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); target.click(); } } : null },
+      el('div', { class: 'label', text: label }), el('div', { class: 'value', text: value }), el('div', { class: 'sub', text: sub }));
+  }));
 
-  $('nodes').replaceChildren(...cluster.nodes.map((n) => {
-    const deviceCount = doc.devices.filter((d) => d.node === n.node && d.state !== 'removed').length;
-    const mixed = nodeBuilds(cluster).size > 1;
-    const version = n.error
-      ? el('span', { class: 'bad', text: `unreachable: ${n.error}` })
-      : el('span', {}, el('span', { class: n.version === doc.version ? 'ok' : 'bad', text: `version ${n.version}` }),
-          el('div', { class: 'hint' + (mixed ? ' bad' : ''), text: nodeBuild(n), title: 'the software build this node runs; djbod-node --version prints it' }));
-    return el('tr', {}, el('td', {}, nodeCell(n.node)), el('td', { class: 'id', text: n.address }), el('td', {}, version),
-      el('td', { class: 'num', text: deviceCount }),
+  // One row per node with every check the health card makes and the
+  // node's devices, each cell a pass, warning, or fail with the value it
+  // judged and, when not a pass, why. The header is drawn here too so the
+  // page's markup stays a plain table.
+  const check = (state, text, why) => el('span', { class: 'cell-check' }, el('span', { class: state, text }), why ? el('span', { class: 'why', text: why }) : null);
+  const mixed = nodeBuilds(cluster).size > 1;
+  $('nodes').parentElement.querySelector('thead').replaceChildren(el('tr', {},
+    ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
+  const removedNodes = cluster.nodes.filter((n) => n.state === 'removed').length;
+  hiddenNote('nodes-hidden', removedNodes, view.removedNodes);
+  $('nodes').replaceChildren(...cluster.nodes.filter((n) => view.removedNodes || n.state !== 'removed').map((n) => {
+    const entry = doc.nodes.find((d) => d.id === n.node) || {};
+    if (n.state === 'removed') {
+      // A tombstone (SPEC 6.2.2): for the record, with nothing to check
+      // and nothing to do.
+      const own = devices.filter((d) => d.node === n.node);
+      return el('tr', { class: 'removed' },
+        el('td', {}, nodeCell(n.node)),
+        el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '0' })),
+        el('td', {}, own.length ? el('span', { class: 'hint', text: `${own.length} removed` }) : el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })));
+    }
+    const reachable = !n.error;
+    const atVersion = reachable && n.version === doc.version;
+    const own = devices.filter((d) => d.node === n.node);
+    const inUse = own.filter((d) => d.state !== 'removed');
+    const byState = ['active', 'draining', 'removed'].map((st) => [st, own.filter((d) => d.state === st).length]).filter(([, k]) => k > 0);
+    const unavailableHere = own.filter((d) => d.available === false).length;
+    if (unavailableHere) byState.push(['unavailable', unavailableHere]);
+    const draining = own.some((d) => d.state === 'draining');
+    const freeHere = inUse.reduce((a, d) => a + d.free_bytes, 0);
+    const deviceCount = inUse.length;
+    const transport = status.transport || 'plain';
+    return el('tr', {},
+      el('td', {}, nodeCell(n.node)),
+      el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
+      el('td', {}, reachable ? check('ok', 'ping ok') : check('bad', 'ping failed', n.error)),
+      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : atVersion ? check('ok', `version ${n.version}`) : check('bad', `version ${n.version}`, `current is ${doc.version}; Sync brings it up`)),
+      el('td', {}, !reachable ? check('bad', 'unknown', 'not reachable') : check(mixed ? 'warn' : 'ok', n.build, mixed ? `nodes run ${nodeBuilds(cluster).size} different builds` : null)),
+      el('td', {}, check(transport === 'tls' ? 'ok' : 'warn', transport === 'tls' ? 'required' : transport === 'tls-optional' ? 'optional' : 'plain', transport === 'tls' ? null : 'clients may connect without TLS')),
+      el('td', {}, check(deviceCount === 0 ? 'bad' : draining ? 'warn' : 'ok', String(deviceCount), inUse.length ? `${human(freeHere)} free` : 'no devices in use')),
+      // The devices by state, one line; the note about a pending drain is
+      // a tooltip so the row keeps its height.
+      el('td', {}, byState.length ? el('span', { class: unavailableHere ? 'bad' : draining ? 'warn' : '', text: byState.map(([st, k]) => `${k} ${st}`).join(', '), title: unavailableHere ? 'nothing can be read from an unavailable device' : draining ? 'a drain is in progress or pending' : null }) : el('span', { class: 'hint', text: '\u2014' })),
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
-        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
+        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.filter((m) => m.state !== 'removed').length === 1 ? '' : null,
           title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
   }));
 
-  $('devices').replaceChildren(...devices.map((d) => {
+  hiddenNote('devices-hidden', counts.removed, view.removedDevices);
+  $('devices').replaceChildren(...devices.filter((d) => view.removedDevices || d.state !== 'removed').map((d) => {
     const used = d.total_bytes - d.free_bytes;
     const fraction = d.total_bytes ? used / d.total_bytes : 0;
     const freeFraction = d.total_bytes ? d.free_bytes / d.total_bytes : 0;
@@ -610,10 +946,10 @@ function renderOverview() {
       actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
     }
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
-    return el('tr', {}, el('td', {}, deviceCell(d.device)),
+    return el('tr', { class: d.state === 'removed' ? 'removed' : null }, el('td', {}, deviceCell(d.device)),
       el('td', {}, nodeCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
-      el('td', {}, el('span', { class: 'state ' + d.state, text: d.state })),
-      el('td', {}, d.state === 'removed' ? el('span', { class: 'hint', text: '—' }) : meter),
+      el('td', {}, stateCell(d)),
+      el('td', {}, d.state === 'removed' || d.available === false ? el('span', { class: 'hint', text: '—' }) : meter),
       el('td', { class: 'num', text: human(d.free_bytes) }), el('td', { class: 'num', text: human(d.total_bytes) }),
       el('td', {}, actions));
   }));
@@ -675,33 +1011,52 @@ $('refresh').addEventListener('click', refresh);
 
 // ------------------------------------------------------------ objects
 
-async function list(startAfter) {
+async function list(page = 1) {
   const prefix = $('prefix').value;
+  const listing = state.listing;
+  if (prefix !== listing.prefix || page === 1) { listing.prefix = prefix; listing.after = [null]; page = 1; }
+  const startAfter = listing.after[page - 1];
+  if (page > 1 && startAfter === undefined) return;
   try {
-    const params = new URLSearchParams({ limit: '200' });
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE) });
     if (prefix) params.set('prefix', prefix);
     if (startAfter) params.set('start_after', startAfter);
     const r = await api('/objects?' + params);
-    if (startAfter) state.listing.keys.push(...r.keys); else state.listing = { prefix, keys: r.keys, truncated: false };
-    state.listing.truncated = r.truncated;
+    listing.keys = r.keys; listing.truncated = r.truncated; listing.page = page;
+    listing.unread = r.unread || []; listing.complete = r.complete !== false;
+    if (r.truncated && r.keys.length) listing.after[page] = r.keys.at(-1).key;
     renderListing();
+    document.querySelector('.scroll').scrollTop = 0;
   } catch (e) { fail('list', e); }
 }
 function renderListing() {
   const { keys, truncated } = state.listing;
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object was stopped by the node; open it for details' }) : null),
+    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
     el('td', { class: 'key', text: k.key }),
     el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
   if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
-  $('count-objects').textContent = keys.length ? `${keys.length}${truncated ? '+' : ''}` : '';
-  $('list-more').hidden = !truncated;
-  $('list-count').textContent = `${keys.length} key(s)${truncated ? ', more follow' : ''}`;
+  const { page, after } = state.listing;
+  $('count-objects').textContent = keys.length ? `${keys.length}${truncated || page > 1 ? '+' : ''}` : '';
+  $('list-prev').disabled = page <= 1;
+  $('list-next').disabled = !truncated;
+  $('list-page').textContent = `Page ${page}`;
+  const cursor = after[page - 1];
+  $('list-count').textContent = `${plural(keys.length, 'key')} on this page`;
+  $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
+  // The listing went around devices the cluster cannot read (SPEC 15.1):
+  // complete while fewer than k+m are out, possibly short once that many are.
+  const { unread, complete } = state.listing;
+  const devices = unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
+  $('list-note').replaceChildren(unread.length === 0 ? '' : complete
+    ? el('span', {}, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
+    : el('span', { class: 'bad' }, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
 }
 $('list-go').addEventListener('click', () => list());
 $('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
-$('list-more').addEventListener('click', () => list(state.listing.keys.at(-1)?.key));
+$('list-prev').addEventListener('click', () => list(state.listing.page - 1));
+$('list-next').addEventListener('click', () => list(state.listing.page + 1));
 
 async function select(key) {
   state.selectedKey = key;
@@ -758,13 +1113,22 @@ function describeFailure(f) {
     el('br'),
     el('span', { class: 'hint', text: describeError(f.error).replace(/\n/g, '   ') }));
 }
+// The state cell for a device: the document's state, marked and worded as
+// unavailable when its node cannot read it or cannot be reached (5.6).
+function stateCell(d) {
+  const unavailable = d.available === false;
+  return el('span', {
+    class: 'state ' + d.state + (unavailable ? ' unavailable' : ''),
+    text: unavailable ? d.state + ', unavailable' : d.state,
+    title: unavailable ? 'nothing can be read from this device: its node is unreachable, or cannot read it (disk failed, not mounted, or destroyed)' : null });
+}
 function renderDetail(record) {
   const deviceNode = (id) => state.status?.devices.find((d) => d.device === id)?.node;
   const shardRows = record.shards.map((s) => {
     const info = state.status?.devices.find((d) => d.device === s.device);
     return el('tr', {}, el('td', { class: 'num', text: s.index }), el('td', {}, deviceCell(s.device)),
       el('td', {}, deviceNode(s.device) ? nodeCell(deviceNode(s.device)) : el('span', { class: 'bad', text: 'not in cluster' })),
-      el('td', {}, info ? el('span', { class: 'state ' + info.state, text: info.state }) : ''));
+      el('td', {}, info ? stateCell(info) : ''));
   });
   const shardSelect = el('select', { id: 'move-index' }, ...record.shards.map((s) => el('option', { value: s.index, text: `shard ${s.index}` })));
   const targetSelect = el('select', { id: 'move-to' }, el('option', { value: '', text: 'emptiest device' }),
@@ -844,7 +1208,7 @@ async function repair(key) {
       return `shard ${s.index} on ${deviceText(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${deviceText(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
     });
     const rewritten = r.shards.filter((s) => s.rewritten).length;
-    toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
+    toast(`repair of ${key}: ${plural(rewritten, 'shard')} rewritten`, lines.join('\n'));
     refreshFailures();
     select(key);
   } catch (e) { fail('repair', e); }
@@ -888,7 +1252,7 @@ $('upload-go').addEventListener('click', async () => {
     }
     if (!check.fits) {
       toast(`no room for ${file.name} (${human(file.size)})`,
-        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${check.active_devices} active device(s) have that much` +
+        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${plural(check.active_devices, 'active device')} have that much` +
         (check.active_devices >= check.required_devices ? `, and the ${check.required_devices}${ordinal(check.required_devices)} emptiest has ${human(check.room_bytes)}` : '') +
         '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
       return;
@@ -949,6 +1313,7 @@ $('upload-cancel').addEventListener('click', () => {
 
 // ------------------------------------------------------------ maintenance
 
+function plural(n, one, many = one + 's') { return `${n.toLocaleString()} ${n === 1 ? one : many}`; }
 function describeFinding(f) {
   const skip = new Set(['kind', 'event']);
   return `${f.kind}: ${Object.entries(f).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')}`;
@@ -966,7 +1331,7 @@ $('scrub-go').addEventListener('click', async () => {
   // node counts too, so the total is a floor). Then the cross-node checks
   // and any repairs run, which have no count in advance.
   const devicesToScrub = (state.status?.devices || []).filter((d) => d.state !== 'removed').length || 1;
-  let devicesDone = 0, bytesRead = 0, phase = 'local';
+  let devicesDone = 0, bytesRead = 0, phase = 'local', crossChecked = 0;
   const fill = $('scrub-fill'), text = $('scrub-progress-text'), started = performance.now();
   const showProgress = () => {
     const seconds = (performance.now() - started) / 1000;
@@ -976,7 +1341,7 @@ $('scrub-go').addEventListener('click', async () => {
       text.textContent = `checking devices: ${devicesDone} of ${devicesToScrub} done, ${human(bytesRead)} read` + (seconds > 2 && bytesRead ? `, ${human(bytesRead / seconds)}/s` : '');
     } else {
       fill.style.width = '100%';
-      text.textContent = `devices done (${human(bytesRead)} read); cross-node checks${repairing ? ' and repairs' : ''}…`;
+      text.textContent = `devices done (${human(bytesRead)} read); cross-node checks${crossChecked ? `: ${crossChecked.toLocaleString()} versions checked` : ''}${repairing ? ', then repairs' : ''}…`;
     }
   };
   $('scrub-progress').hidden = false; fill.classList.add('working'); showProgress();
@@ -984,23 +1349,38 @@ $('scrub-go').addEventListener('click', async () => {
     await streamLines('/scrub', { rate_mib: rate, repair: repairing }, (e) => {
       if (e.event === 'node_summary') { devicesDone++; bytesRead += e.summary.bytes_read || 0; }
       if (e.event === 'node_failed') devicesDone++;
-      if (e.event === 'cluster_finding' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
-      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${devicesDone} device(s), ${human(bytesRead)} read`; }
+      if (e.event === 'cluster_finding' || e.event === 'cross_check_stopped' || e.event === 'cross_check_progress' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${plural(devicesDone, 'device')}, ${human(bytesRead)} read`; }
       else showProgress();
       switch (e.event) {
         case 'node_finding': findings++; logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
-        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${plural(e.summary.findings.length, 'finding')}`, 'muted'); break;
         case 'node_failed': findings++; logLine(log, `node ${nodeText(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
-        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
+        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${plural(e.versions_checked, 'version')} checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
+        case 'cross_check_progress': crossChecked = e.versions_checked; break;
+        case 'cross_check_availability': {
+          const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
+          logLine(log, `${e.after_repair ? 'shards available after repair' : repairing ? 'shards available before repair' : 'shards available'}: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
+          break;
+        }
+        case 'cross_check_exposure': {
+          // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
+          const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${plural(u.versions, 'version')}`).join('; ');
+          const limit = e.versions_at_the_limit ? ` ${plural(e.versions_at_the_limit, 'version')} can lose no further shard.` : '';
+          const unreadable = e.versions_unreadable ? ` ${plural(e.versions_unreadable, 'version is', 'versions are')} unreadable now.` : '';
+          logLine(log, `WARNING: data at higher risk: versions with a shard on an unavailable device: ${e.versions_with_shards_out.toLocaleString()} of ${e.versions_checked.toLocaleString()} (${perDevice}).${limit}${unreadable} Restore the device, or force-remove it and run a repairing scrub.`, 'finding');
+          break;
+        }
+        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${plural(e.report.shards.filter((s) => s.rewritten).length, 'shard')} rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':
           if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
-          else logLine(log, `scrub finished: ${findings} finding(s), ${repairs} repair(s)`, findings && !repairing ? 'finding' : 'repaired');
+          else logLine(log, `scrub finished: ${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`, findings && !repairing ? 'finding' : 'repaired');
           break;
         default: logLine(log, JSON.stringify(e));
       }
-      $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
+      $('scrub-summary').textContent = `${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`;
     });
   } catch (e) { fail('scrub', e); fill.classList.remove('working'); $('scrub-progress').hidden = true; }
   finally { $('scrub-go').disabled = false; refresh(); }
@@ -1021,12 +1401,27 @@ $('drain-go').addEventListener('click', async () => {
   if (!device) return;
   const log = $('drain-log'); log.replaceChildren(); log.hidden = false;
   $('drain-go').disabled = true;
-  let moved = 0, skipped = 0, deleted = 0;
+  let moved = 0, skipped = 0, deleted = 0, movedBytes = 0, total = 0, totalBytes = 0;
+  const fill = $('drain-fill'), text = $('drain-progress-text'), started = performance.now();
+  // Progress against the estimate, from the events the drain sends
+  // anyway: one per version, so the bar advances by versions handled.
+  const showProgress = () => {
+    const done = moved + skipped + deleted;
+    const share = total ? done / total : 0;
+    fill.style.width = `${Math.round(share * 100)}%`;
+    const elapsed = (performance.now() - started) / 1000;
+    const left = done && done < total ? ` about ${humanTime(elapsed / done * (total - done))} left` : '';
+    text.textContent = total ? `${done.toLocaleString()} of ${total.toLocaleString()} versions (${Math.round(share * 100)}%), ${human(movedBytes)} of ${human(totalBytes)} moved, ${humanTime(elapsed)} elapsed${left}` : 'estimating…';
+  };
+  $('drain-progress').hidden = false; fill.classList.add('working'); showProgress();
   $('drain-summary').textContent = 'running…';
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
+      if (e.event === 'estimate') { total = e.versions; totalBytes = e.shard_bytes; }
+      if (e.event === 'moved') movedBytes += e.shard_bytes || 0;
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${moved} moved, ${human(movedBytes)}`; }
       switch (e.event) {
-        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${plural(e.versions, 'version')}, ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${plural(e.active_devices, 'active device')}, ${e.required_devices} needed per version`, 'muted'); break;
         case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
         case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;
@@ -1036,6 +1431,7 @@ $('drain-go').addEventListener('click', async () => {
           break;
         default: logLine(log, JSON.stringify(e));
       }
+      if (e.event !== 'end') showProgress();
       $('drain-summary').textContent = `${moved} moved, ${skipped} skipped`;
     });
   } catch (e) { fail('drain', e); }

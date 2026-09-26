@@ -27,7 +27,7 @@
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
-//! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
+//! | `POST /devices/{id}/label`           | `djbod cluster set-device-label`           |
 //! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
@@ -69,21 +69,36 @@ use serde_json::{json, Value};
 use tokio_util::io::StreamReader;
 use uuid::Uuid;
 
+use djbod_client::admin::{self, AdminError};
+use djbod_client::connection::{Connection, ConnectionError, StreamItem, DEFAULT_BODY_CHUNK};
+use djbod_client::transport::Connector;
+use djbod_client::wire::WireError;
 use djbod_core::checksum::checksum_block;
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
-use djbod_node::client::{ClientError, Connection, StreamItem, DEFAULT_BODY_CHUNK};
-use djbod_node::membership::{self, MembershipError};
-use djbod_node::transport::Connector;
-use djbod_proto::message::{ErrorCode, ErrorDetail, ListQuery, Request, Response as Reply};
+use djbod_proto::message::{
+    ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction, RecordCopyFault, Request,
+    Response as Reply,
+};
 
 /// The page, embedded so the binary is self-contained.
 pub const PAGE: &str = include_str!("../ui.html");
-/// The icon, for the browser tab and the header: dark ink on transparent,
-/// and a variant with the ink inverted for a dark surface.
-pub const ICON: &[u8] = include_bytes!("../icon/djbod-256.png");
-pub const ICON_DARK: &[u8] = include_bytes!("../icon/djbod-256-dark.png");
+/// The brand assets the page uses, from docs/brand (see its README). The
+/// parity slabs are yellow throughout: the header's lockup is the
+/// status-light kit, whose slabs glow like lit indicators, and the tab
+/// and app icons are the plain yellow kit, which reads better small.
+/// The one-line unhyphenated lockup for the header in its light and dark forms,
+/// the 2x2 favicon reduction for the tab with a PNG fallback, and the
+/// app icon for home screens.
+pub const LOCKUP: &[u8] =
+    include_bytes!("../../../docs/brand/status-light/djbod-lockup-inline-nohyphen.svg");
+pub const LOCKUP_DARK: &[u8] =
+    include_bytes!("../../../docs/brand/status-light/djbod-lockup-inline-nohyphen-onDark.svg");
+pub const FAVICON_SVG: &[u8] = include_bytes!("../../../docs/brand/yellow/djbod-favicon.svg");
+pub const FAVICON_PNG: &[u8] =
+    include_bytes!("../../../docs/brand/yellow/png/djbod-favicon-32.png");
+pub const APP_ICON: &[u8] = include_bytes!("../../../docs/brand/yellow/png/djbod-appicon-256.png");
 
 /// A read of an object that the node stopped because of damage, kept so
 /// the page can say why a download failed after the browser has reported
@@ -112,6 +127,9 @@ pub struct ReadFailure {
 /// failures, and the host names this server answers to.
 pub struct App {
     pub target: Target,
+    /// Which node answered last, and the addresses learnt from the
+    /// cluster document, so a node leaving does not take the page down.
+    peers: std::sync::Mutex<Peers>,
     failures: std::sync::Mutex<std::collections::HashMap<String, ReadFailure>>,
     /// Host names, without port, accepted in `Host` besides IP literals
     /// and `localhost`.
@@ -121,7 +139,85 @@ pub struct App {
 /// At most this many keys are remembered; the oldest go first.
 const MAX_FAILURES: usize = 1000;
 
+/// What the server knows about where the cluster's nodes are, beyond
+/// the addresses it was started with.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Peers {
+    /// The address that answered last; tried first next time, so a
+    /// working node is not abandoned for a dead one earlier in the list.
+    preferred: Option<SocketAddr>,
+    /// Every node's addresses as the cluster document last listed them.
+    learned: Vec<SocketAddr>,
+}
+
+/// The order in which to try addresses: the one that answered last, the
+/// configured ones in their order, then the ones learnt from the cluster
+/// document; each address once.
+fn candidates(
+    preferred: Option<SocketAddr>,
+    configured: &[SocketAddr],
+    learned: &[SocketAddr],
+) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::with_capacity(1 + configured.len() + learned.len());
+    for address in preferred.iter().chain(configured).chain(learned) {
+        if !out.contains(address) {
+            out.push(*address);
+        }
+    }
+    out
+}
+
 impl App {
+    /// Open a connection to the first node that answers, in the order of
+    /// `candidates`, and remember it as preferred. Fails with every
+    /// address tried and why when none answers.
+    async fn connect_any(&self) -> ApiResult<(SocketAddr, Connection)> {
+        let (preferred, learned) = {
+            let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
+            (peers.preferred, peers.learned.clone())
+        };
+        let mut attempts = Vec::new();
+        for address in candidates(preferred, &self.target.nodes, &learned) {
+            match Connection::connect_with(
+                &self.target.connector,
+                address,
+                Connection::client_hello(self.target.cluster),
+            )
+            .await
+            {
+                Ok(connection) => {
+                    self.peers
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .preferred = Some(address);
+                    return Ok((address, connection));
+                }
+                Err(e) => attempts.push(Attempt::new(address, e)),
+            }
+        }
+        Err(ApiError::Unreachable { attempts })
+    }
+
+    /// The address of a node that answers, for the membership procedures,
+    /// which take one peer and open their own connections to it.
+    async fn peer(&self) -> ApiResult<SocketAddr> {
+        Ok(self.connect_any().await?.0)
+    }
+
+    /// Remember every address the cluster document lists, so that the
+    /// nodes this server was started with are not the only ones it can
+    /// reach. Strings that are not `ip:port` are skipped; a node with such
+    /// an address is reported by the cluster view anyway.
+    fn learn(&self, document: &djbod_core::cluster::ClusterDocument) {
+        let learned: Vec<SocketAddr> = document
+            .nodes
+            .iter()
+            .flat_map(|node| node.addresses.iter())
+            .filter_map(|text| text.parse().ok())
+            .collect();
+        self.peers.lock().unwrap_or_else(|e| e.into_inner()).learned = learned;
+    }
+
     fn record_failure(&self, key: &str, operation: &'static str, bytes: u64, error: ErrorDetail) {
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -149,6 +245,48 @@ impl App {
         );
     }
 
+    /// The note a degraded read leaves (SPEC 11.4, 9.4.4): blocks it
+    /// reconstructed from parity, record copies it went without, or
+    /// both. The bytes were right, the cluster is not whole, and repair
+    /// fixes what is damage; a device that is out mends nothing.
+    fn degraded_detail(
+        reconstructed: &[Reconstruction],
+        missing_records: &[MissingRecordCopy],
+    ) -> ErrorDetail {
+        let mut notes = Vec::new();
+        if !reconstructed.is_empty() {
+            notes.push(format!(
+                "{} reconstructed from parity; the data was correct, the damage on disk is not repaired",
+                djbod_core::text::counted(reconstructed.len(), "block", "blocks")
+            ));
+        }
+        for copy in missing_records {
+            notes.push(match &copy.fault {
+                RecordCopyFault::Missing => format!("record copy missing on device {}", copy.device),
+                RecordCopyFault::Stale { revision } => format!(
+                    "record copy on device {} is at revision {revision}, an interrupted re-placement",
+                    copy.device
+                ),
+                RecordCopyFault::Unavailable { reason } => format!(
+                    "record copy on device {} could not be read: {reason}",
+                    copy.device
+                ),
+            });
+        }
+        match reconstructed.first() {
+            Some(first) => ErrorDetail {
+                device: Some(first.device),
+                shard_index: Some(first.shard_index),
+                stripe: Some(first.first_stripe),
+                ..ErrorDetail::new(ErrorCode::BlockChecksumMismatch, notes.join("; "))
+            },
+            None => ErrorDetail {
+                device: missing_records.first().map(|m| m.device),
+                ..ErrorDetail::new(ErrorCode::RecordsInconsistent, notes.join("; "))
+            },
+        }
+    }
+
     fn clear_failure(&self, key: &str) {
         self.failures
             .lock()
@@ -169,7 +307,11 @@ impl App {
 /// values the command-line client needs.
 #[derive(Clone)]
 pub struct Target {
-    pub node: SocketAddr,
+    /// The nodes to connect through, tried in order; the addresses of
+    /// the other nodes in the cluster document are tried after them once
+    /// the document has been fetched (`App::learn`). The same list, and
+    /// the same meaning, as `djbod --bootstrap-node`.
+    pub nodes: Vec<SocketAddr>,
     pub cluster: Uuid,
     pub connector: Connector,
 }
@@ -214,13 +356,32 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
         .layer(DefaultBodyLimit::disable());
     let app = Arc::new(App {
         target,
+        peers: std::sync::Mutex::new(Peers::default()),
         failures: std::sync::Mutex::new(std::collections::HashMap::new()),
         hosts: hosts.into_iter().map(|h| h.to_ascii_lowercase()).collect(),
     });
     Router::new()
         .route("/", get(page))
-        .route("/icon.png", get(|| async { icon(ICON) }))
-        .route("/icon-dark.png", get(|| async { icon(ICON_DARK) }))
+        .route(
+            "/brand/{version}/lockup.svg",
+            get(|| async { asset(LOCKUP, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/{version}/lockup-dark.svg",
+            get(|| async { asset(LOCKUP_DARK, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/{version}/favicon.svg",
+            get(|| async { asset(FAVICON_SVG, "image/svg+xml") }),
+        )
+        .route(
+            "/brand/{version}/favicon-32.png",
+            get(|| async { asset(FAVICON_PNG, "image/png") }),
+        )
+        .route(
+            "/brand/{version}/appicon-256.png",
+            get(|| async { asset(APP_ICON, "image/png") }),
+        )
         .nest("/api", api)
         .layer(middleware::from_fn_with_state(
             app.clone(),
@@ -326,17 +487,26 @@ fn refuse(code: &str, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// The page, with every brand asset path given this build's id as a
+/// segment, so a browser may cache the assets indefinitely and still
+/// see a new logo the moment a new build serves the page.
+static PAGE_FOR_THIS_BUILD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    PAGE.replace("\"/brand/", &format!("\"/brand/{}/", djbod_client::BUILD))
+});
+
 async fn page() -> Html<&'static str> {
-    Html(PAGE)
+    Html(PAGE_FOR_THIS_BUILD.as_str())
 }
 
-fn icon(bytes: &'static [u8]) -> Response {
+fn asset(bytes: &'static [u8], content_type: &'static str) -> Response {
     (
         [
-            (header::CONTENT_TYPE, HeaderValue::from_static("image/png")),
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
             (
                 header::CACHE_CONTROL,
-                HeaderValue::from_static("public, max-age=86400"),
+                // The path carries the build id, so the content at a given
+                // path never changes and may be cached for good.
+                HeaderValue::from_static("public, max-age=31536000, immutable"),
             ),
         ],
         bytes,
@@ -352,17 +522,20 @@ pub enum ApiError {
     /// The node answered with an error; reported with every field.
     Remote(ErrorDetail),
     /// The node could not be reached or talked to.
-    Client(Box<ClientError>),
+    Client(Box<ConnectionError>),
+    /// No node answered: every address tried and why, in plain words,
+    /// with the raw error kept for debugging.
+    Unreachable { attempts: Vec<Attempt> },
     /// A document change failed.
-    Membership(Box<MembershipError>),
+    Membership(Box<AdminError>),
     /// The request itself was wrong.
     BadRequest(String),
 }
 
-impl From<ClientError> for ApiError {
-    fn from(e: ClientError) -> ApiError {
+impl From<ConnectionError> for ApiError {
+    fn from(e: ConnectionError) -> ApiError {
         match e {
-            ClientError::Remote(detail) | ClientError::StreamFailed(detail) => {
+            ConnectionError::Remote(detail) | ConnectionError::StreamFailed(detail) => {
                 ApiError::Remote(detail)
             }
             other => ApiError::Client(Box::new(other)),
@@ -370,15 +543,15 @@ impl From<ClientError> for ApiError {
     }
 }
 
-impl From<MembershipError> for ApiError {
-    fn from(e: MembershipError) -> ApiError {
+impl From<AdminError> for ApiError {
+    fn from(e: AdminError) -> ApiError {
         ApiError::Membership(Box::new(e))
     }
 }
 
 impl ApiError {
     fn unexpected(reply: Reply) -> ApiError {
-        ApiError::Client(Box::new(ClientError::UnexpectedMessage {
+        ApiError::Client(Box::new(ConnectionError::UnexpectedMessage {
             expected: "the operation's response",
             got: format!("{reply:?}"),
         }))
@@ -395,6 +568,15 @@ impl IntoResponse for ApiError {
                     | ErrorCode::ObjectTooLarge
                     | ErrorCode::MetadataTooLarge
                     | ErrorCode::ProtocolViolation => StatusCode::BAD_REQUEST,
+                    // The cluster answered and refused one object because a
+                    // node or device it needs is out (9.4.4, 11.4): a
+                    // refusal by the store, not a gateway failure, which is
+                    // what a 502 means to the page.
+                    ErrorCode::NodeUnreachable | ErrorCode::DeviceUnavailable
+                        if detail.key.is_some() =>
+                    {
+                        StatusCode::CONFLICT
+                    }
                     _ => StatusCode::BAD_GATEWAY,
                 };
                 (status, json!({ "error": detail }))
@@ -403,6 +585,36 @@ impl IntoResponse for ApiError {
                 StatusCode::BAD_GATEWAY,
                 json!({ "error": { "code": "node_unreachable", "message": e.to_string() } }),
             ),
+            ApiError::Unreachable { attempts } => {
+                // What the page shows: the address tried and why it
+                // failed, in words an operator can act on; with several
+                // addresses, each in turn.
+                let message = match attempts.as_slice() {
+                    [one] => format!("node {} is not reachable: {}", one.address, one.reason),
+                    many => format!(
+                        "no node is reachable: {}",
+                        many.iter()
+                            .map(|a| format!("{}: {}", a.address, a.reason))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                };
+                let mut error = json!({
+                    "code": "node_unreachable",
+                    "message": message,
+                    "addresses": attempts.iter().map(|a| a.address.to_string()).collect::<Vec<_>>(),
+                    // The operating system's own text, for debugging.
+                    "detail": attempts
+                        .iter()
+                        .map(|a| if attempts.len() == 1 { a.detail.clone() } else { format!("{}: {}", a.address, a.detail) })
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                });
+                if let [one] = attempts.as_slice() {
+                    error["address"] = json!(one.address.to_string());
+                }
+                (StatusCode::BAD_GATEWAY, json!({ "error": error }))
+            }
             ApiError::Membership(e) => {
                 let (status, code) = membership_status(&e);
                 (
@@ -419,6 +631,68 @@ impl IntoResponse for ApiError {
     }
 }
 
+/// One address that was tried and did not answer.
+#[derive(Debug, Clone)]
+pub struct Attempt {
+    pub address: SocketAddr,
+    /// Why, in plain words: "connection refused", "timed out".
+    pub reason: String,
+    /// The error's own text, for debugging.
+    pub detail: String,
+}
+
+impl Attempt {
+    /// A failed connection attempt to `address`. An I/O error is worded
+    /// for the page; a peer that answered and refused keeps its own
+    /// description.
+    fn new(address: SocketAddr, e: ConnectionError) -> Attempt {
+        let (reason, detail) = match &e {
+            ConnectionError::Wire(WireError::Io(io)) => (plain_words(io), io.to_string()),
+            ConnectionError::Wire(WireError::Closed) => (
+                "the connection was closed before the node answered".to_string(),
+                e.to_string(),
+            ),
+            other => (other.to_string(), other.to_string()),
+        };
+        Attempt {
+            address,
+            reason,
+            detail,
+        }
+    }
+}
+
+/// An I/O error in the words an operator uses, without the operating
+/// system's error number: "connection refused" rather than
+/// "Connection refused (os error 111)".
+fn plain_words(e: &io::Error) -> String {
+    use io::ErrorKind as K;
+    match e.kind() {
+        K::ConnectionRefused => "connection refused".to_string(),
+        K::ConnectionReset => "connection reset".to_string(),
+        K::ConnectionAborted => "connection aborted".to_string(),
+        K::TimedOut => "timed out".to_string(),
+        K::HostUnreachable => "host unreachable".to_string(),
+        K::NetworkUnreachable => "network unreachable".to_string(),
+        K::NetworkDown => "network down".to_string(),
+        K::AddrNotAvailable => "address not available".to_string(),
+        K::PermissionDenied => "permission denied".to_string(),
+        _ => {
+            // Whatever the system said, minus its trailing "(os error N)".
+            let text = e.to_string();
+            let text = match text.rfind(" (os error ") {
+                Some(cut) if text.ends_with(')') => &text[..cut],
+                _ => &text,
+            };
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => "unknown error".to_string(),
+            }
+        }
+    }
+}
+
 /// Whose fault a failed document change is, so the page can tell a
 /// refusal from an outage: 502 when a node could not be reached or the
 /// change only got part way round; 404 when the request named something
@@ -426,8 +700,8 @@ impl IntoResponse for ApiError {
 /// because of its current state, or another change won the race, which
 /// a retry settles; 500 for a fault in this server's own configuration.
 /// The code is the error's name, for scripts.
-fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
-    use MembershipError as M;
+fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
+    use AdminError as M;
     match e {
         M::BadAddress { .. } => (StatusCode::BAD_GATEWAY, "bad_address"),
         M::Unreachable { .. } => (StatusCode::BAD_GATEWAY, "unreachable"),
@@ -440,12 +714,11 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
         M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
         M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::NodeRemoved(_) => (StatusCode::CONFLICT, "node_removed"),
         M::UnknownNodeName(_) => (StatusCode::NOT_FOUND, "unknown_node_name"),
         M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
         M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
         M::Superseded { .. } => (StatusCode::CONFLICT, "superseded"),
-        M::AlreadyMember { .. } => (StatusCode::CONFLICT, "already_member"),
-        M::RemovedDevice { .. } => (StatusCode::CONFLICT, "removed_device"),
         M::StillReferenced { .. } => (StatusCode::CONFLICT, "still_referenced"),
         M::DeviceActive(_) => (StatusCode::CONFLICT, "device_active"),
         M::NodeHasActiveDevices { .. } => (StatusCode::CONFLICT, "node_has_active_devices"),
@@ -453,29 +726,17 @@ fn membership_status(e: &MembershipError) -> (StatusCode, &'static str) {
         M::LastNode => (StatusCode::CONFLICT, "last_node"),
         M::NodeNotTlsReady { .. } => (StatusCode::CONFLICT, "node_not_tls_ready"),
         M::TlsRequired { .. } => (StatusCode::CONFLICT, "tls_required"),
-        // Only `djbod-node run` proposes its own address; not reachable here.
-        M::AddressChangeFailed { .. } => (StatusCode::BAD_GATEWAY, "address_change_failed"),
         M::TooFewActiveDevices { .. } => (StatusCode::CONFLICT, "too_few_active_devices"),
         // A document that fails validation: a bad or duplicate label, a
         // scheme the devices cannot carry, and the like.
-        M::Node(djbod_node::node::NodeError::InvalidDocument(_)) => {
-            (StatusCode::CONFLICT, "invalid_document")
-        }
-        M::Node(_) => (StatusCode::INTERNAL_SERVER_ERROR, "node"),
-        M::Device(_) => (StatusCode::INTERNAL_SERVER_ERROR, "device"),
-        M::Tls(_) => (StatusCode::INTERNAL_SERVER_ERROR, "tls"),
+        M::Document(_) => (StatusCode::CONFLICT, "invalid_document"),
     }
 }
 
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
-async fn connect(target: &Target) -> ApiResult<Connection> {
-    Ok(Connection::connect_with(
-        &target.connector,
-        target.node,
-        Connection::client_hello(target.cluster),
-    )
-    .await?)
+async fn connect(app: &App) -> ApiResult<Connection> {
+    Ok(app.connect_any().await?.1)
 }
 
 /// The device a path parameter names: a UUID, or a label looked up in
@@ -484,9 +745,9 @@ async fn connect(target: &Target) -> ApiResult<Connection> {
 async fn device_param(app: &App, name: &str) -> ApiResult<DeviceId> {
     match Uuid::parse_str(name) {
         Ok(uuid) => Ok(DeviceId(uuid)),
-        Err(_) => Ok(membership::resolve_device(
+        Err(_) => Ok(admin::resolve_device(
             &app.target.connector,
-            app.target.node,
+            app.peer().await?,
             app.target.cluster,
             name,
         )
@@ -501,14 +762,14 @@ fn parse_id(id: &str, what: &str) -> ApiResult<Uuid> {
 // ---------------------------------------------------------------- status
 
 async fn status(State(app): State<Arc<App>>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let (via, mut conn) = app.connect_any().await?;
     match conn.request(Request::Status).await? {
         Reply::Status {
             cluster_id,
             cluster_name,
             document_version,
             coordinator,
+            nodes,
             transport,
             devices,
         } => Ok(Json(json!({
@@ -522,8 +783,13 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
             // is TLS, which follows from how it was started.
             "transport": transport,
             "ui_to_node_tls": conn.is_tls(),
+            // The address this server reached the cluster through for
+            // this answer; it moves to another node when one fails.
+            "via": via.to_string(),
             // This server's own build, shown in the page header.
-            "ui_build": djbod_node::BUILD,
+            "ui_build": djbod_client::BUILD,
+            // Every node asked and its build (SPEC 6.2.6.4).
+            "nodes": nodes,
             "devices": devices,
         }))),
         other => Err(ApiError::unexpected(other)),
@@ -535,28 +801,46 @@ async fn status(State(app): State<Arc<App>>) -> ApiResult {
 async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
     let document =
-        membership::fetch_document(&target.connector, target.node, target.cluster).await?;
-    let reports = membership::fetch_all(&target.connector, &document).await;
-    let nodes: Vec<Value> = reports
+        admin::fetch_document(&target.connector, app.peer().await?, target.cluster).await?;
+    app.learn(&document);
+    let reports = admin::fetch_all(&target.connector, &document).await;
+    let mut nodes: Vec<Value> = reports
         .iter()
         .map(|r| {
             json!({
                 "node": r.node,
+                "state": "active",
                 "address": r.address,
-                // From the node's Hello; null for a node that was unreachable
-                // or runs a build from before builds were sent (SPEC 6.2.6.4).
+                // From the node's Hello (SPEC 6.2.6.4); null for a node
+                // that was unreachable.
                 "build": r.build,
                 "version": r.result.as_ref().ok().map(|d| d.version),
                 "error": r.result.as_ref().err(),
             })
         })
         .collect();
+    // Removed nodes (SPEC 6.2.2) are tombstones: listed from the document
+    // for the record, asked nothing, so the page can show or hide them.
+    for n in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+    {
+        nodes.push(json!({
+            "node": n.id,
+            "state": "removed",
+            "address": n.addresses.first(),
+            "build": null,
+            "version": null,
+            "error": null,
+        }));
+    }
     Ok(Json(json!({ "document": document, "nodes": nodes })))
 }
 
 async fn cluster_sync(State(app): State<Arc<App>>) -> ApiResult {
     let target = &app.target;
-    let report = membership::sync(&target.connector, target.node, target.cluster).await?;
+    let report = admin::sync(&target.connector, app.peer().await?, target.cluster).await?;
     Ok(Json(json!({
         "highest_version": report.highest_version,
         "updated": report.updated,
@@ -574,9 +858,9 @@ struct SchemeBody {
 
 async fn cluster_scheme(State(app): State<Arc<App>>, Json(body): Json<SchemeBody>) -> ApiResult {
     let target = &app.target;
-    let (document, changed) = membership::set_scheme(
+    let (document, changed) = admin::set_scheme(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         body.k,
         body.m,
@@ -607,9 +891,9 @@ async fn cluster_limits(State(app): State<Arc<App>>, Json(body): Json<LimitsBody
     {
         return Err(ApiError::BadRequest("no limit given".to_string()));
     }
-    let (document, changed) = membership::set_limits(
+    let (document, changed) = admin::set_limits(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         body.max_key_bytes,
         body.max_object_bytes,
@@ -635,17 +919,21 @@ struct ListParams {
 }
 
 async fn list_objects(State(app): State<Arc<App>>, Query(params): Query<ListParams>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let query = ListQuery {
         prefix: params.prefix.filter(|p| !p.is_empty()),
         start_after: params.start_after.filter(|s| !s.is_empty()),
         limit: params.limit,
     };
     match conn.request(Request::ListKeys(query)).await? {
-        Reply::ListKeys { keys, truncated } => {
-            Ok(Json(json!({ "keys": keys, "truncated": truncated })))
-        }
+        Reply::ListKeys {
+            keys,
+            truncated,
+            unread,
+            complete,
+        } => Ok(Json(
+            json!({ "keys": keys, "truncated": truncated, "unread": unread, "complete": complete }),
+        )),
         other => Err(ApiError::unexpected(other)),
     }
 }
@@ -656,10 +944,26 @@ async fn read_failures(State(app): State<Arc<App>>) -> ApiResult {
 }
 
 async fn head_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn.request(Request::HeadObject { key }).await? {
-        Reply::HeadObject { record } => Ok(Json(json!(record))),
+        Reply::HeadObject {
+            record,
+            missing_records,
+        } => {
+            // A copy the lookup went without (SPEC 9.4.4) is noted like a
+            // reconstruction, so the page shows it until a repair.
+            if !missing_records.is_empty() {
+                app.record_failure(
+                    &record.key,
+                    "head",
+                    0,
+                    App::degraded_detail(&[], &missing_records),
+                );
+            }
+            let mut value = json!(record);
+            value["missing_records"] = json!(missing_records);
+            Ok(Json(value))
+        }
         other => Err(ApiError::unexpected(other)),
     }
 }
@@ -673,7 +977,6 @@ async fn put_object(
     headers: HeaderMap,
     body: Body,
 ) -> ApiResult {
-    let target = &app.target;
     let size: u64 = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
@@ -684,13 +987,13 @@ async fn put_object(
         .and_then(|v| v.to_str().ok())
         .filter(|v| !v.is_empty())
         .map(str::to_string);
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let mut source = StreamReader::new(body.into_data_stream().map_err(io::Error::other));
     let result = conn
         .put_object_from_reader(&key, size, &mut source, DEFAULT_BODY_CHUNK, content_type)
         .await;
-    let version = match result {
-        Ok(version) => version,
+    let write = match result {
+        Ok(write) => write,
         Err(e) => {
             // The node has refused, but the browser may still be sending
             // the body. A response on a connection whose request body was
@@ -701,7 +1004,13 @@ async fn put_object(
             return Err(e.into());
         }
     };
-    Ok(Json(json!({ "key": key, "version": version.to_text() })))
+    Ok(Json(json!({
+        "key": key,
+        "version": write.version.to_text(),
+        // Devices the write went around because their node cannot read
+        // them (SPEC 5.6).
+        "unavailable": write.unavailable,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -721,8 +1030,7 @@ async fn upload_check(
     State(app): State<Arc<App>>,
     Query(params): Query<UploadCheckParams>,
 ) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let document = match conn.request(Request::GetClusterConfig).await? {
         Reply::GetClusterConfig { document } => document,
         other => return Err(ApiError::unexpected(other)),
@@ -768,8 +1076,7 @@ async fn upload_check(
 }
 
 async fn delete_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn
         .request(Request::DeleteObject { key: key.clone() })
         .await?
@@ -793,8 +1100,7 @@ async fn download_object(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -817,7 +1123,7 @@ async fn download_object(
                     Ok(item) => item,
                     Err(e) => {
                         let detail = match e {
-                            ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                            ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                             other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                         };
                         app.record_failure(&key, "download", delivered, detail.clone());
@@ -855,8 +1161,19 @@ async fn download_object(
                     // It also proves every shard read intact, so any note
                     // of an earlier failure on this key is dropped.
                     StreamItem::End(end) => match end.error {
-                        None => {
+                        None if end.reconstructed.is_empty() && end.missing_records.is_empty() => {
                             app.clear_failure(&key);
+                            None
+                        }
+                        // Correct bytes, a cluster not whole (SPEC 11.4,
+                        // 9.4.4): noted so the page shows it until a repair.
+                        None => {
+                            app.record_failure(
+                                &key,
+                                "download",
+                                delivered,
+                                App::degraded_detail(&end.reconstructed, &end.missing_records),
+                            );
                             None
                         }
                         Some(detail) => {
@@ -922,9 +1239,8 @@ async fn verify_object(
     State(app): State<Arc<App>>,
     Path(key): Path<String>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
     const REPORT_EVERY: u64 = 8 * 1024 * 1024;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .send_request(Request::GetObject { key: key.clone() })
         .await?;
@@ -957,14 +1273,33 @@ async fn verify_object(
         app: app.clone(),
         key: key.clone(),
     };
-    /// The last line: the verdict, remembered or cleared for the key.
-    fn done(app: &App, key: &str, verified: bool, error: Option<ErrorDetail>, bytes: u64) -> Value {
+    /// The last line: the verdict, remembered or cleared for the key. A
+    /// verified body that needed reconstruction (SPEC 11.4) or went
+    /// without a record copy (9.4.4) is a cluster not whole, remembered
+    /// as such.
+    fn done(
+        app: &App,
+        key: &str,
+        verified: bool,
+        error: Option<ErrorDetail>,
+        reconstructed: Vec<Reconstruction>,
+        missing_records: Vec<MissingRecordCopy>,
+        bytes: u64,
+    ) -> Value {
         match &error {
-            None if verified => app.clear_failure(key),
+            None if verified && reconstructed.is_empty() && missing_records.is_empty() => {
+                app.clear_failure(key)
+            }
+            None if verified => app.record_failure(
+                key,
+                "verify",
+                bytes,
+                App::degraded_detail(&reconstructed, &missing_records),
+            ),
             Some(detail) => app.record_failure(key, "verify", bytes, detail.clone()),
             None => {}
         }
-        json!({ "event": "done", "verified": verified, "error": error, "bytes": bytes })
+        json!({ "event": "done", "verified": verified, "error": error, "reconstructed": reconstructed, "missing_records": missing_records, "bytes": bytes })
     }
     let lines = futures_util::stream::unfold(state, move |mut st| async move {
         if st.finished {
@@ -984,7 +1319,15 @@ async fn verify_object(
                                 data.sequence
                             ),
                         );
-                        break done(&st.app, &st.key, false, Some(detail), st.bytes);
+                        break done(
+                            &st.app,
+                            &st.key,
+                            false,
+                            Some(detail),
+                            Vec::new(),
+                            Vec::new(),
+                            st.bytes,
+                        );
                     }
                     st.expected_sequence += 1;
                     st.bytes += data.bytes.len() as u64;
@@ -997,15 +1340,31 @@ async fn verify_object(
                 }
                 Ok(StreamItem::End(end)) => {
                     st.finished = true;
-                    break done(&st.app, &st.key, end.error.is_none(), end.error, st.bytes);
+                    break done(
+                        &st.app,
+                        &st.key,
+                        end.error.is_none(),
+                        end.error,
+                        end.reconstructed,
+                        end.missing_records,
+                        st.bytes,
+                    );
                 }
                 Err(e) => {
                     st.finished = true;
                     let detail = match e {
-                        ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                        ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
-                    break done(&st.app, &st.key, false, Some(detail), st.bytes);
+                    break done(
+                        &st.app,
+                        &st.key,
+                        false,
+                        Some(detail),
+                        Vec::new(),
+                        Vec::new(),
+                        st.bytes,
+                    );
                 }
             }
         };
@@ -1030,8 +1389,7 @@ async fn verify_object(
 }
 
 async fn repair_object(State(app): State<Arc<App>>, Path(key): Path<String>) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     match conn
         .request(Request::RepairObject { key: key.clone() })
         .await?
@@ -1055,8 +1413,7 @@ async fn move_shard(
     Path(key): Path<String>,
     Json(body): Json<MoveShardBody>,
 ) -> ApiResult {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let request = Request::MoveShard {
         key,
         shard_index: body.shard_index,
@@ -1090,7 +1447,7 @@ where
     Fut: std::future::Future<
             Output = (
                 Connection,
-                Result<Result<E, djbod_proto::message::StreamEnd>, ClientError>,
+                Result<Result<E, djbod_proto::message::StreamEnd>, ConnectionError>,
             ),
         > + Send
         + 'static,
@@ -1107,7 +1464,7 @@ where
                 Ok(Err(end)) => (json!({ "event": "end", "error": end.error }), true),
                 Err(e) => {
                     let detail = match e {
-                        ClientError::Remote(d) | ClientError::StreamFailed(d) => d,
+                        ConnectionError::Remote(d) | ConnectionError::StreamFailed(d) => d,
                         other => ErrorDetail::new(ErrorCode::Internal, other.to_string()),
                     };
                     (json!({ "event": "end", "error": detail }), true)
@@ -1137,8 +1494,7 @@ struct ScrubBody {
 }
 
 async fn scrub(State(app): State<Arc<App>>, Json(body): Json<ScrubBody>) -> ApiResult<Response> {
-    let target = &app.target;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn
         .start_scrub(body.rate_mib.map(|m| m * 1024 * 1024), body.repair)
         .await?;
@@ -1159,9 +1515,8 @@ async fn drain(
     Path(id): Path<String>,
     Json(body): Json<DrainBody>,
 ) -> ApiResult<Response> {
-    let target = &app.target;
     let device = device_param(&app, &id).await?;
-    let mut conn = connect(target).await?;
+    let mut conn = connect(&app).await?;
     let id = conn.start_drain(device, body.partial).await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
         let item = conn.next_drain_event(id).await;
@@ -1188,9 +1543,9 @@ async fn set_device_state(
             "a device is removed with the remove action, after draining".to_string(),
         ));
     }
-    let (document, changed) = membership::set_device_state(
+    let (document, changed) = admin::set_device_state(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         device,
         body.state,
@@ -1224,9 +1579,9 @@ async fn set_device_label(
         .label
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
-    let (document, changed) = membership::set_device_label(
+    let (document, changed) = admin::set_device_label(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         device,
         label.clone(),
@@ -1244,7 +1599,7 @@ async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> A
     let target = &app.target;
     let device = device_param(&app, &id).await?;
     let (document, changed) =
-        membership::remove_device(&target.connector, target.node, target.cluster, device).await?;
+        admin::remove_device(&target.connector, app.peer().await?, target.cluster, device).await?;
     Ok(Json(json!({
         "device": device,
         "document_version": document.version,
@@ -1265,9 +1620,9 @@ async fn set_node_label(
         .label
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty());
-    let (document, changed) = membership::set_node_label(
+    let (document, changed) = admin::set_node_label(
         &target.connector,
-        target.node,
+        app.peer().await?,
         target.cluster,
         node,
         label.clone(),
@@ -1285,9 +1640,33 @@ async fn remove_node(State(app): State<Arc<App>>, Path(id): Path<String>) -> Api
     let target = &app.target;
     let node = NodeId(parse_id(&id, "node")?);
     let document =
-        membership::remove_node(&target.connector, target.node, target.cluster, node).await?;
+        admin::remove_node(&target.connector, app.peer().await?, target.cluster, node).await?;
     Ok(Json(json!({
         "node": node,
         "document_version": document.version,
     })))
+}
+
+#[cfg(test)]
+mod peers {
+    use super::candidates;
+    use std::net::SocketAddr;
+
+    fn a(text: &str) -> SocketAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn preferred_then_configured_then_learned_each_once() {
+        let configured = [a("10.0.0.1:5263"), a("10.0.0.2:5263")];
+        let learned = [a("10.0.0.2:5263"), a("10.0.0.3:5263"), a("10.0.0.1:5263")];
+        assert_eq!(
+            candidates(Some(a("10.0.0.2:5263")), &configured, &learned),
+            vec![a("10.0.0.2:5263"), a("10.0.0.1:5263"), a("10.0.0.3:5263")]
+        );
+        assert_eq!(
+            candidates(None, &configured, &[]),
+            vec![a("10.0.0.1:5263"), a("10.0.0.2:5263")]
+        );
+    }
 }
