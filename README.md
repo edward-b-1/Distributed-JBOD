@@ -69,6 +69,9 @@ deployments, every command, and what to do when a disk or a machine
 fails. [docs/getting-started.md](docs/getting-started.md) is an earlier
 walkthrough of a one-machine cluster.
 
+The [detailed user guide](docs/user-guide.md) covers deployment,
+configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
+
 ## What you get
 
 - **Any disks, any machines.** Devices are plain directories on ordinary
