@@ -566,7 +566,8 @@ path>`, and restart the node.
 
 On real machines, `listen` is that machine's own address, or `0.0.0.0`
 with `advertise` set to the address the others should use, and
-`allow_shared_filesystem` is omitted.
+`allow_shared_filesystem` is omitted. [deployment.md](deployment.md) has
+systemd units, a Docker image, and a Compose stack for that.
 
 ## TLS
 

@@ -1,0 +1,117 @@
+# Three djbod nodes and the web UI on one machine, for trying the system
+# out. Not a real layout: the six "devices" are Docker volumes on one
+# disk, which is why DJBOD_ALLOW_SHARED_FILESYSTEM is set and why there is
+# no redundancy here. For a node on a real machine with real disks, see
+# docker-compose.node.yml, which uses bind mounts.
+#
+#   DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) \
+#     docker compose -f deploy/docker-compose.yml up -d --build
+#   open http://127.0.0.1:5264/            (DJBOD_UI_PORT=... to publish elsewhere)
+#   docker compose -f deploy/docker-compose.yml exec node1 sh -c \
+#     'djbod --node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --node 172.28.0.11:5263) status'
+#   docker compose -f deploy/docker-compose.yml down -v      # and delete the data
+#
+# Nodes are addressed by IP and port in the cluster document, so each
+# service has a fixed address on a private network. No ids appear here:
+# each node generates its own on first start and keeps it in its state
+# volume, node 1 creates the cluster, and nodes 2 and 3 and the UI ask
+# node 1 for the cluster id. See docs/deployment.md.
+
+x-node: &node
+  build:
+    context: ..
+    args:
+      # The build id the nodes report; "unknown" unless set in the
+      # environment when building (see the top of this file).
+      DJBOD_GIT_COMMIT: ${DJBOD_GIT_COMMIT:-unknown}
+  image: djbod:local
+  restart: unless-stopped
+  environment: &node-env
+    DJBOD_ALLOW_SHARED_FILESYSTEM: "true"
+
+services:
+  node1:
+    <<: *node
+    environment:
+      <<: *node-env
+      DJBOD_ADVERTISE: 172.28.0.11:5263
+      DJBOD_BOOTSTRAP_PEERS: 172.28.0.12:5263,172.28.0.13:5263
+      DJBOD_CLUSTER_NAME: compose trial
+      DJBOD_K: "2"
+      DJBOD_M: "1"
+    networks:
+      djbod:
+        ipv4_address: 172.28.0.11
+    volumes:
+      - node1-state:/var/lib/djbod
+      - node1-d0:/data/d0
+      - node1-d1:/data/d1
+
+  node2:
+    <<: *node
+    depends_on: [node1]
+    environment:
+      <<: *node-env
+      DJBOD_ADVERTISE: 172.28.0.12:5263
+      DJBOD_JOIN_PEER: 172.28.0.11:5263
+      DJBOD_BOOTSTRAP_PEERS: 172.28.0.11:5263,172.28.0.13:5263
+    networks:
+      djbod:
+        ipv4_address: 172.28.0.12
+    volumes:
+      - node2-state:/var/lib/djbod
+      - node2-d0:/data/d0
+      - node2-d1:/data/d1
+
+  node3:
+    <<: *node
+    depends_on: [node1]
+    environment:
+      <<: *node-env
+      DJBOD_ADVERTISE: 172.28.0.13:5263
+      DJBOD_JOIN_PEER: 172.28.0.11:5263
+      DJBOD_BOOTSTRAP_PEERS: 172.28.0.11:5263,172.28.0.12:5263
+    networks:
+      djbod:
+        ipv4_address: 172.28.0.13
+    volumes:
+      - node3-state:/var/lib/djbod
+      - node3-d0:/data/d0
+      - node3-d1:/data/d1
+
+  ui:
+    image: djbod:local
+    depends_on: [node1]
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    # Asks the first bootstrap node for the cluster id, then runs djbod-ui.
+    entrypoint: ["djbod-ui-entrypoint"]
+    command: ["--listen", "0.0.0.0:5264"]
+    environment:
+      # The UI tries these in order, then every node the document lists.
+      DJBOD_BOOTSTRAP_NODE: 172.28.0.11:5263,172.28.0.12:5263,172.28.0.13:5263
+    ports:
+      # Published on localhost only. Set DJBOD_UI_PORT if 5264 is taken on
+      # the host, for example by a djbod-ui already running there.
+      - "127.0.0.1:${DJBOD_UI_PORT:-5264}:5264"
+    networks:
+      djbod:
+        ipv4_address: 172.28.0.20
+
+networks:
+  djbod:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+volumes:
+  node1-state:
+  node1-d0:
+  node1-d1:
+  node2-state:
+  node2-d0:
+  node2-d1:
+  node3-state:
+  node3-d0:
+  node3-d1:
