@@ -1374,8 +1374,21 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = admin::remove_node(&Connector::plain(), a.addr, cluster, d_id)
         .await
         .expect("remove node");
-    assert!(document.node(d_id).is_none());
-    assert!(document.device(device).is_none());
+    // Tombstones (18.2.1): the node and its device stay, marked removed,
+    // and a second removal says so.
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert_eq!(
+        document.device(device).map(|d| d.state),
+        Some(DeviceState::Removed)
+    );
+    assert_eq!(document.active_nodes().count(), 3);
+    match admin::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
+        Err(admin::AdminError::NodeRemoved(node)) => assert_eq!(node, d_id),
+        other => panic!("expected NodeRemoved, got {other:?}"),
+    }
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }
@@ -1397,7 +1410,14 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
         Err(other) => panic!("expected NotAMember, got {other:?}"),
         Ok(_) => panic!("expected NotAMember, but the node opened"),
     }
-    // Nor can its device rejoin unwiped; wiped, it joins as a new device.
+    // Nor can it rejoin under its old id, which is a tombstone; with a
+    // new id, its device is refused unwiped and, wiped, joins as a new
+    // device.
+    match membership::join(&d.config, a.addr, cluster, true).await {
+        Err(membership::MembershipError::RemovedNode { node }) => assert_eq!(node, d_id),
+        other => panic!("expected RemovedNode, got {other:?}"),
+    }
+    d.config.node_id = Uuid::new_v4();
     match membership::join(&d.config, a.addr, cluster, false).await {
         Err(membership::MembershipError::RemovedDevice {
             path,
@@ -1411,6 +1431,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = membership::join(&d.config, a.addr, cluster, true)
         .await
         .expect("join wiped");
+    let d_id = djbod_core::cluster::NodeId(d.config.node_id);
     let new_device = document
         .devices
         .iter()
@@ -1471,7 +1492,15 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
     let document = admin::execute_forced_removal(&Connector::plain(), &plan)
         .await
         .expect("execute");
-    assert!(document.node(d_id).is_none());
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert!(document
+        .devices
+        .iter()
+        .filter(|d| d.node == d_id)
+        .all(|d| d.state == DeviceState::Removed));
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }

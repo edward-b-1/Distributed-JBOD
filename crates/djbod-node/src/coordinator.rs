@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use xxhash_rust::xxh3::Xxh3;
 
 use djbod_core::checksum::{checksum_block, BlockChecksum};
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
 use djbod_core::record::{
@@ -234,7 +234,7 @@ async fn broadcast_each(
 ) -> Result<Vec<(NodeId, Result<Response, Failure>)>, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         let request = request.clone();
@@ -289,7 +289,7 @@ struct Lookup {
 async fn lookup_reachable(node: &Arc<Node>, key_hash: KeyHash) -> Result<Lookup, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         tasks.spawn(async move { (target, lookup_on(&node, target, key_hash).await) });
@@ -777,6 +777,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
                 if let Response::LocalStatus { build, .. } = &response {
                     nodes.push(NodeStatus {
                         node: target,
+                        state: NodeState::Active,
                         reachable: true,
                         build: Some(build.clone()),
                         error: None,
@@ -794,6 +795,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
                 let unreachable = Unreachable::from_failure(target, failure);
                 nodes.push(NodeStatus {
                     node: target,
+                    state: NodeState::Active,
                     reachable: false,
                     build: None,
                     error: Some(unreachable.detail.message),
@@ -818,6 +820,34 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
         }
     }
     devices.extend(device_statuses(node, answered)?);
+    // A removed node (6.2.2) is listed for the record, not asked, with
+    // its devices from the document; the reader decides whether to show
+    // them.
+    for entry in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == NodeState::Removed)
+    {
+        nodes.push(NodeStatus {
+            node: entry.id,
+            state: NodeState::Removed,
+            reachable: false,
+            build: None,
+            error: None,
+        });
+        for device in document.devices.iter().filter(|d| d.node == entry.id) {
+            devices.push(DeviceStatus {
+                device: device.id,
+                node: entry.id,
+                state: device.state,
+                available: false,
+                label: device.label.clone(),
+                node_label: entry.label.clone(),
+                total_bytes: 0,
+                free_bytes: 0,
+            });
+        }
+    }
     // Document order, whichever node answered first.
     let position = |id: DeviceId| document.devices.iter().position(|d| d.id == id);
     devices.sort_by_key(|d| position(d.device));
@@ -3696,7 +3726,7 @@ async fn scrub(
     let document = node.document();
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         let sender = sender.clone();

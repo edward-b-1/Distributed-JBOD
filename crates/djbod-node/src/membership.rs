@@ -14,7 +14,7 @@ use djbod_client::admin::{
     fetch_all_except, fetch_document, propose, propose_skipping, with_node_addresses, AdminError,
     MAX_PROPOSAL_ATTEMPTS,
 };
-use djbod_core::cluster::{ClusterDocument, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState};
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::record::DeviceId;
 
@@ -37,6 +37,8 @@ pub enum MembershipError {
     Tls(#[from] TlsError),
     #[error("device {path} is already initialised and in the document")]
     AlreadyMember { path: PathBuf },
+    #[error("node {node} was removed from this cluster and a removed node is never revived (SPEC 18.2.1); give this machine a new node id and join again")]
+    RemovedNode { node: NodeId },
     #[error(
         "device {path} was initialised for this cluster but is not in its document: it was removed; pass --wipe-removed-device to erase it and add it as a new device"
     )]
@@ -70,6 +72,14 @@ pub async fn join(
             transport: current.transport,
         }
         .into());
+    }
+    // A removed node's id is a tombstone, never revived (18.2.1).
+    let node_id = NodeId(config.node_id);
+    if current
+        .node(node_id)
+        .is_some_and(|n| n.state == NodeState::Removed)
+    {
+        return Err(MembershipError::RemovedNode { node: node_id });
     }
     Node::save_document_for(config, &current)?;
     let mut device_ids = Vec::with_capacity(config.devices.len());
@@ -135,7 +145,15 @@ fn open_or_initialise(
     wipe_removed: bool,
 ) -> Result<Device, MembershipError> {
     match Device::open(path, Some(document.cluster_id)) {
-        Ok(existing) if document.device(existing.id()).is_some() => Ok(existing),
+        // Listed and not removed: a retry after a partial failure. A
+        // tombstone (18.2.1) is a removed device, below.
+        Ok(existing)
+            if document
+                .device(existing.id())
+                .is_some_and(|d| d.state != DeviceState::Removed) =>
+        {
+            Ok(existing)
+        }
         Ok(existing) if wipe_removed => {
             tracing::warn!(
                 path = %path.display(),
@@ -171,7 +189,10 @@ pub async fn add_devices(
     let mut device_ids: Vec<DeviceId> = Vec::new();
     for path in paths {
         if let Ok(existing) = Device::open(path, Some(cluster_id)) {
-            if current.device(existing.id()).is_some() {
+            if current
+                .device(existing.id())
+                .is_some_and(|d| d.state != DeviceState::Removed)
+            {
                 return Err(MembershipError::AlreadyMember { path: path.clone() });
             }
         }

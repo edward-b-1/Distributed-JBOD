@@ -15,7 +15,7 @@ use std::time::Duration;
 use thiserror::Error;
 use uuid::Uuid;
 
-use djbod_core::cluster::{ClusterDocument, ClusterDocumentError, DeviceState, NodeId};
+use djbod_core::cluster::{ClusterDocument, ClusterDocumentError, DeviceState, NodeId, NodeState};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::version::VersionId;
 use djbod_proto::handshake::Hello;
@@ -98,6 +98,8 @@ pub enum AdminError {
     UnknownNodeName(String),
     #[error("{0} is not in the cluster document")]
     UnknownNode(NodeId),
+    #[error("{0} was already removed; a removed node stays in the document as a tombstone and is never revived (SPEC 18.2.1)")]
+    NodeRemoved(NodeId),
     #[error(
         "{what} is still named by the current record of {}, for example {examples:?}; drain it first (`djbod cluster set-state`, `djbod cluster drain`)",
         djbod_core::text::counted(*.versions, "version", "versions")
@@ -225,8 +227,10 @@ pub async fn fetch_all_except(
     document: &ClusterDocument,
     skip: Option<NodeId>,
 ) -> Vec<NodeDocument> {
+    // Active nodes only: a removed node is a tombstone, asked nothing
+    // (18.2.1); `cluster show` lists it from the document itself.
     let mut reports = Vec::with_capacity(document.nodes.len());
-    for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
+    for entry in document.active_nodes().filter(|n| Some(n.id) != skip) {
         let address_text = entry.addresses.first().cloned().unwrap_or_default();
         let (build, result) = match first_address(document, entry.id) {
             Ok(address) => {
@@ -303,8 +307,7 @@ pub async fn propose_skipping(
     // Step 2: apply in document order.
     let mut applied = Vec::new();
     for (position, entry) in current
-        .nodes
-        .iter()
+        .active_nodes()
         .filter(|n| Some(n.id) != skip)
         .enumerate()
     {
@@ -727,7 +730,7 @@ pub async fn set_transport(
             return Ok((current, false));
         }
         if transport != djbod_core::cluster::Transport::Plain {
-            for entry in &current.nodes {
+            for entry in current.active_nodes() {
                 let address = first_address(&current, entry.id)?;
                 let unreachable = |reason: String| AdminError::Unreachable {
                     node: entry.id,
@@ -800,7 +803,7 @@ pub async fn scan_references(
     skip: Option<NodeId>,
 ) -> Result<Vec<VersionReference>, AdminError> {
     let mut current: BTreeMap<(String, VersionId), MetadataRecord> = BTreeMap::new();
-    for entry in document.nodes.iter().filter(|n| Some(n.id) != skip) {
+    for entry in document.active_nodes().filter(|n| Some(n.id) != skip) {
         let address = first_address(document, entry.id)?;
         let unreachable = |reason: String| AdminError::Unreachable {
             node: entry.id,
@@ -977,12 +980,7 @@ pub async fn remove_node(
 ) -> Result<ClusterDocument, AdminError> {
     for _ in 0..MAX_PROPOSAL_ATTEMPTS {
         let current = fetch_document(connector, peer, cluster_id).await?;
-        if current.node(node).is_none() {
-            return Err(AdminError::UnknownNode(node));
-        }
-        if current.nodes.len() == 1 {
-            return Err(AdminError::LastNode);
-        }
+        check_removable(&current, node)?;
         let devices: Vec<DeviceId> = current
             .devices
             .iter()
@@ -1007,7 +1005,7 @@ pub async fn remove_node(
         if !references.is_empty() {
             return Err(still_referenced(format!("{node}"), &references));
         }
-        let next = document_without_node(&current, node);
+        let next = document_with_node_removed(&current, node);
         match propose(connector, &current, &next).await {
             Ok(()) => return Ok(next),
             Err(AdminError::Superseded { .. }) | Err(AdminError::StaleProposal { .. }) => continue,
@@ -1017,11 +1015,34 @@ pub async fn remove_node(
     Err(AdminError::TooManyRetries(MAX_PROPOSAL_ATTEMPTS))
 }
 
-fn document_without_node(current: &ClusterDocument, node: NodeId) -> ClusterDocument {
+/// Whether `node` may be removed: it must be listed, not already a
+/// tombstone, and not the last active node.
+fn check_removable(current: &ClusterDocument, node: NodeId) -> Result<(), AdminError> {
+    match current.node(node) {
+        None => return Err(AdminError::UnknownNode(node)),
+        Some(entry) if entry.state == NodeState::Removed => {
+            return Err(AdminError::NodeRemoved(node))
+        }
+        Some(_) => {}
+    }
+    if current.active_nodes().count() == 1 {
+        return Err(AdminError::LastNode);
+    }
+    Ok(())
+}
+
+/// The document with `node` and every one of its devices marked removed
+/// (18.2.1): tombstones, kept for the record, never revived. Nothing is
+/// deleted from the document.
+fn document_with_node_removed(current: &ClusterDocument, node: NodeId) -> ClusterDocument {
     let mut next = current.clone();
     next.version += 1;
-    next.nodes.retain(|n| n.id != node);
-    next.devices.retain(|d| d.node != node);
+    for entry in next.nodes.iter_mut().filter(|n| n.id == node) {
+        entry.state = NodeState::Removed;
+    }
+    for device in next.devices.iter_mut().filter(|d| d.node == node) {
+        device.state = DeviceState::Removed;
+    }
     next
 }
 
@@ -1059,12 +1080,7 @@ pub async fn plan_forced_removal(
     node: NodeId,
 ) -> Result<ForcedRemovalPlan, AdminError> {
     let current = fetch_document(connector, peer, cluster_id).await?;
-    if current.node(node).is_none() {
-        return Err(AdminError::UnknownNode(node));
-    }
-    if current.nodes.len() == 1 {
-        return Err(AdminError::LastNode);
-    }
+    check_removable(&current, node)?;
     let address = first_address(&current, node)?;
     let unreachable_because = match tokio::time::timeout(
         LIVENESS_TIMEOUT,
@@ -1106,7 +1122,7 @@ pub async fn execute_forced_removal(
     connector: &Connector,
     plan: &ForcedRemovalPlan,
 ) -> Result<ClusterDocument, AdminError> {
-    let next = document_without_node(&plan.current, plan.node);
+    let next = document_with_node_removed(&plan.current, plan.node);
     propose_skipping(connector, &plan.current, &next, Some(plan.node)).await?;
     Ok(next)
 }

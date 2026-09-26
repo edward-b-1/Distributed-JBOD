@@ -90,6 +90,7 @@ fn sample_document() -> ClusterDocument {
             id: node(1),
             addresses: vec!["10.0.0.1:7000".to_string()],
             label: Some("nas1".to_string()),
+            state: djbod_core::cluster::NodeState::Active,
         }],
         devices: vec![DeviceEntry {
             id: device(1),
@@ -486,12 +487,14 @@ fn every_response_round_trips() {
             coordinator: node(1),
             nodes: vec![
                 NodeStatus {
+                    state: djbod_core::cluster::NodeState::Active,
                     node: node(1),
                     reachable: true,
                     build: Some("0.1.0+0123456789".to_string()),
                     error: None,
                 },
                 NodeStatus {
+                    state: djbod_core::cluster::NodeState::Active,
                     node: node(2),
                     reachable: false,
                     build: None,

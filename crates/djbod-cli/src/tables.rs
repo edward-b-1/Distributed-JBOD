@@ -131,6 +131,21 @@ pub(super) fn cluster_show(document: &ClusterDocument, reports: &[NodeDocument])
             version,
         ]);
     }
+    // Removed nodes (6.2.2) are tombstones: listed from the document for
+    // the record, asked nothing.
+    for n in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+    {
+        table.add_row([
+            n.label.as_deref().unwrap_or("-").to_string(),
+            n.id.0.to_string(),
+            n.addresses.join(", "),
+            "-".to_string(),
+            "removed".to_string(),
+        ]);
+    }
     render(table, &[])
 }
 
@@ -242,6 +257,7 @@ mod tests {
                 id,
                 label: label.clone(),
                 addresses: addresses.clone(),
+                state: djbod_core::cluster::NodeState::Active,
             });
             reports.push(NodeDocument {
                 node: id,

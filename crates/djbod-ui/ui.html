@@ -685,7 +685,9 @@ async function refresh() {
 // document change may be refused by the older node.
 function renderHealth() {
   const { status, cluster } = state;
-  const nodes = cluster.nodes;
+  // Removed nodes (SPEC 6.2.2) are tombstones: listed, not asked, and no
+  // part of the cluster's health.
+  const nodes = cluster.nodes.filter((n) => n.state !== 'removed');
   const unreachable = nodes.filter((n) => n.error);
   const behind = nodes.filter((n) => !n.error && n.version !== status.document_version);
   const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build));
@@ -790,7 +792,7 @@ function nodeBuild(n) {
 }
 // The distinct builds among the reachable nodes.
 function nodeBuilds(cluster) {
-  return new Set(cluster.nodes.filter((n) => !n.error).map(nodeBuild));
+  return new Set(cluster.nodes.filter((n) => !n.error && n.state !== 'removed').map(nodeBuild));
 }
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
@@ -803,10 +805,11 @@ function renderOverview() {
   let total = 0, free = 0;
   let unavailable = 0;
   for (const d of devices) { counts[d.state]++; if (d.available === false) unavailable++; if (d.state !== 'removed') { total += d.total_bytes; free += d.free_bytes; } }
-  const unreachable = cluster.nodes.filter((n) => n.error).length;
-  const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
+  const members = cluster.nodes.filter((n) => n.state !== 'removed');
+  const unreachable = members.filter((n) => n.error).length;
+  const behind = members.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
   const tiles = [
-    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
+    ['Nodes', members.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
     ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed${unavailable ? `, ${unavailable} unavailable` : ''}`, 'nodes'],
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
@@ -818,8 +821,9 @@ function renderOverview() {
     }[status.transport || 'plain'] || ''],
   ];
   $('count-overview').textContent = '';
-  const off = cluster.nodes.filter((n) => n.error || n.version !== doc.version).length;
-  $('count-nodes').textContent = off ? `${off} off` : `${cluster.nodes.length}`;
+  const membersHere = cluster.nodes.filter((n) => n.state !== 'removed');
+  const off = membersHere.filter((n) => n.error || n.version !== doc.version).length;
+  $('count-nodes').textContent = off ? `${off} off` : `${membersHere.length}`;
   $('count-nodes').classList.toggle('bad', off > 0);
   const damaged = Object.keys(state.failures || {}).length;
   $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
@@ -843,6 +847,21 @@ function renderOverview() {
     ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
   $('nodes').replaceChildren(...cluster.nodes.map((n) => {
     const entry = doc.nodes.find((d) => d.id === n.node) || {};
+    if (n.state === 'removed') {
+      // A tombstone (SPEC 6.2.2): for the record, with nothing to check
+      // and nothing to do.
+      const own = devices.filter((d) => d.node === n.node);
+      return el('tr', { class: 'removed' },
+        el('td', {}, nodeCell(n.node)),
+        el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '0' })),
+        el('td', {}, own.length ? el('span', { class: 'hint', text: `${own.length} removed` }) : el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })));
+    }
     const reachable = !n.error;
     const atVersion = reachable && n.version === doc.version;
     const own = devices.filter((d) => d.node === n.node);
@@ -867,7 +886,7 @@ function renderOverview() {
       el('td', {}, byState.length ? el('span', { class: unavailableHere ? 'bad' : draining ? 'warn' : '', text: byState.map(([st, k]) => `${k} ${st}`).join(', '), title: unavailableHere ? 'nothing can be read from an unavailable device' : draining ? 'a drain is in progress or pending' : null }) : el('span', { class: 'hint', text: '\u2014' })),
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
-        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
+        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.filter((m) => m.state !== 'removed').length === 1 ? '' : null,
           title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
   }));
 
