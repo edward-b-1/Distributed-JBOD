@@ -277,6 +277,14 @@
   pre { font-family: var(--mono); font-size: 12px; overflow: auto; }
   .empty { color: var(--muted); padding: 12px; }
   .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0; }
+  /* The availability line over the key list (issue #218, step 4): how
+     many devices are out and what that means for reads, from the status
+     alone. The border takes the severity; the mark is the usual shape. */
+  .avail { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 7px 10px; margin: 0 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
+  .avail .h { font-weight: 600; white-space: nowrap; }
+  .avail .d { color: var(--text-2); flex: 1 1 30ch; }
+  .avail .n { margin-left: auto; color: var(--muted); white-space: nowrap; font-size: 11.5px; }
+  .avail.warn { border-color: var(--warning); } .avail.bad { border-color: var(--critical); }
   /* A table's heading with a viewing toggle beside it and, at the right,
      how many rows the toggle is hiding, so nothing is concealed. */
   .section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
@@ -367,6 +375,7 @@
     </div>
     <div class="filter-spacer"></div>
     <div class="list-column">
+      <div class="avail" id="avail" role="status" hidden></div>
       <div class="row paging">
         <button id="list-prev" title="the previous page">&#8249; Previous</button>
         <span id="list-page" class="hint">Page 1</span>
@@ -686,7 +695,7 @@ async function refresh() {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
-    renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
+    renderHeader(); renderBanners(); renderOverview(); renderAvailability(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
 // The health card: do all nodes hold the same configuration? Consistent
@@ -1028,6 +1037,57 @@ async function list(page = 1) {
     renderListing();
     document.querySelector('.scroll').scrollTop = 0;
   } catch (e) { fail('list', e); }
+}
+// The availability line over the key list (issue #218, step 4). From the
+// status alone: d, the devices in use (not removed) that nothing can be
+// read from, whether their node is unreachable or the device itself is
+// unavailable (5.6), against the scheme's k and m. Five cases, four
+// sentences, since the count cannot tell a lost parity shard from a lost
+// data shard:
+//   d = 0          every object readable at full speed, m more may fail
+//   0 < d <= m     every object still readable, some by reconstruction
+//   m < d < k+m    objects with more than m shards out are unreadable
+//   d >= k+m       as above, and objects stored only there leave no
+//                  trace, so listings and the inventory may be incomplete
+function renderAvailability() {
+  const { status, cluster } = state;
+  const doc = cluster.document;
+  const inUse = status.devices.filter((d) => d.state !== 'removed');
+  const out = inUse.filter((d) => d.available === false);
+  const members = cluster.nodes.filter((n) => n.state !== 'removed');
+  const unreachable = members.filter((n) => n.error).length;
+  const d = out.length, k = doc.k, m = doc.m;
+  // The devices out, grouped by node: "demo-d1, demo-d2 on devbox4".
+  const byNode = new Map();
+  for (const x of out) { if (!byNode.has(x.node)) byNode.set(x.node, []); byNode.get(x.node).push(deviceText(x.device)); }
+  const names = [...byNode].map(([node, list]) => `${list.join(', ')} on ${nodeText(node)}`).join('; ');
+  let level = 'ok', head, detail;
+  if (d === 0) {
+    head = `All ${plural(inUse.length, 'device')} available`;
+    detail = `Every object can be read at full speed; any ${plural(m, 'device')} can fail without loss (scheme ${k}+${m}).`;
+  } else if (d <= m) {
+    level = 'warn';
+    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
+    const margin = m - d;
+    detail = `${names}. Every object can still be read; those with a shard there are rebuilt from their other shards and may be slower. `
+      + (margin === 0 ? 'One more unavailable device may make some objects unreadable.' : `${plural(margin, 'more device')} may fail before any object becomes unreadable.`);
+  } else if (d < k + m) {
+    level = 'bad';
+    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
+    detail = `${names}. Objects with more than ${plural(m, 'shard')} on them cannot be read until they return; the record view says which.`;
+  } else {
+    level = 'bad';
+    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
+    detail = `${names}. Objects with more than ${plural(m, 'shard')} on them cannot be read, and objects stored only on them leave no trace: listings and the inventory may be incomplete.`;
+  }
+  const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
+  const box = $('avail');
+  box.className = 'avail ' + (level === 'ok' ? '' : level);
+  box.hidden = false;
+  box.replaceChildren(
+    el('span', { class: 'h' }, el('span', { class: level, text: head })),
+    el('span', { class: 'd', text: detail }),
+    el('span', { class: 'n', text: nodesText }));
 }
 function renderListing() {
   const { keys, truncated } = state.listing;
