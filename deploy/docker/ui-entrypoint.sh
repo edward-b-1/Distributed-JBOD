@@ -5,7 +5,7 @@
 set -eu
 if [ -z "${DJBOD_CLUSTER:-}" ]; then
     first="${DJBOD_BOOTSTRAP_NODE%%,*}"
-    until DJBOD_CLUSTER=$(djbod get-cluster-id --node "$first" 2>/dev/null); do
+    until DJBOD_CLUSTER=$(djbod get-cluster-id --bootstrap-node "$first" 2>/dev/null); do
         echo "djbod-ui-entrypoint: $first does not answer yet; retrying in 3 seconds" >&2
         sleep 3
     done

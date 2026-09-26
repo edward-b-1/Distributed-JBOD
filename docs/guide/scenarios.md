@@ -2,7 +2,7 @@
 
 Each scenario starts from what you can see, then gives the commands in
 order and the check that says you are done. The client is configured
-with `DJBOD_NODE` and `DJBOD_CLUSTER` as in [Setup](setup.md#the-client).
+with `DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER` as in [Setup](setup.md#the-client).
 Device and node labels are the ones from [Deployment](deployment.md).
 
 Have a spare device before you drain or force-remove anything that still
@@ -382,7 +382,7 @@ djbod cluster set-node-label <new-node-uuid> nas2
 djbod cluster show
 djbod put archive/c.bin c.bin
 djbod head archive/c.bin
-djbod --node 10.0.0.2:5263 get archive/a.bin /tmp/a.bin
+djbod --bootstrap-node 10.0.0.2:5263 get archive/a.bin /tmp/a.bin
 ```
 
 `cluster show` lists every node at one document version. `head` shows
@@ -454,7 +454,7 @@ Leave it in the document. While it is down:
   hold a copy is silent.
 - `djbod scrub` names the node, stops the cross-node checks, and exits 3
   when it saw no damage.
-- `djbod identity --node <an address that is up>` still answers.
+- `djbod identity --bootstrap-node <an address that is up>` still answers.
 - A membership change, including `set-scheme` and the next `join`, fails
   until the node answers. The document does not move without it.
 
@@ -582,7 +582,7 @@ djbod cluster reencode
 
 This streams each object through the client and writes it back under the
 current scheme and block size. The client is the coordinator for each
-object, so the machine in `--node` needs the memory the new block size
+object, so the machine in `--bootstrap-node` needs the memory the new block size
 requires. A re-encoded object gets a new version id. The command prints
 one line per object (`2+1 -> 1+0` and the old and new version ids) and a
 total, `N objects examined, N re-encoded, N failed`. It is safe to
