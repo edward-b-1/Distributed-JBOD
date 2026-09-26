@@ -2208,6 +2208,11 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     let mut moved = 0usize;
     let mut deleted = 0usize;
     let mut skipped: Vec<(String, String)> = Vec::new();
+    // Progress against the estimate, every DRAIN_PROGRESS_EVERY versions:
+    // counted from the events the drain already sends, so it costs the
+    // node nothing.
+    let started = std::time::Instant::now();
+    let mut progress = DrainProgress::default();
     let end = loop {
         match run.next_event().await.map_err(client_err)? {
             Ok(event) => {
@@ -2232,6 +2237,8 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         active_devices,
                         required_devices,
                     } => {
+                        progress.versions_total = versions;
+                        progress.bytes_total = shard_bytes;
                         println!(
                             "draining {} on node {}: {}, {} to move; {} free on {}, {required_devices} needed per version",
                             names::device_identity(device),
@@ -2247,9 +2254,11 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         shard_index,
                         destination,
                         rebuilt,
+                        shard_bytes,
                         ..
                     } => {
                         moved += 1;
+                        progress.bytes_moved += shard_bytes;
                         println!(
                             "moved    {key}  shard {shard_index}  {source} -> {}{}",
                             names::device_and_node(destination),
@@ -2264,6 +2273,11 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         deleted += 1;
                         println!("deleted  {key}  (removed since the pass began; nothing to move)");
                     }
+                }
+                progress.versions_done = (moved + skipped.len() + deleted) as u64;
+                if progress.versions_done > 0 && progress.versions_done % DRAIN_PROGRESS_EVERY == 0
+                {
+                    eprintln!("{}", progress.describe(started.elapsed()));
                 }
             }
             Err(end) => break end,
@@ -2284,6 +2298,56 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
         return Ok(false);
     }
     Ok(true)
+}
+
+/// How often the drain says where it is, in versions handled.
+const DRAIN_PROGRESS_EVERY: u64 = 1_000;
+
+/// Where a drain has got to against its estimate.
+#[derive(Default)]
+struct DrainProgress {
+    versions_total: u64,
+    versions_done: u64,
+    bytes_total: u64,
+    bytes_moved: u64,
+}
+
+impl DrainProgress {
+    /// One line: versions and bytes done of the estimate, the time so
+    /// far, and, from the rate so far, roughly how long remains.
+    fn describe(&self, elapsed: std::time::Duration) -> String {
+        let percent = (self.versions_done * 100)
+            .checked_div(self.versions_total)
+            .unwrap_or(100);
+        let remaining = if self.versions_done == 0 || self.versions_done >= self.versions_total {
+            None
+        } else {
+            let per_version = elapsed.as_secs_f64() / self.versions_done as f64;
+            Some(per_version * (self.versions_total - self.versions_done) as f64)
+        };
+        let mut line = format!(
+            "progress  {} of {} versions ({percent}%), {} of {} moved, {} elapsed",
+            self.versions_done,
+            self.versions_total,
+            human_bytes(self.bytes_moved),
+            human_bytes(self.bytes_total),
+            human_duration(elapsed.as_secs_f64())
+        );
+        if let Some(seconds) = remaining {
+            line.push_str(&format!(", about {} left", human_duration(seconds)));
+        }
+        line
+    }
+}
+
+/// Seconds as a person would say them: "45s", "3m 20s", "2h 05m".
+fn human_duration(seconds: f64) -> String {
+    let total = seconds.round() as u64;
+    match (total / 3600, (total % 3600) / 60, total % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s:02}s"),
+        (h, m, _) => format!("{h}h {m:02}m"),
+    }
 }
 
 /// A cross-node finding (20.1.2.2) in words, with the object first and
@@ -2459,6 +2523,35 @@ mod tests {
     }
 
     /// SPEC 20.1.2.3: the four outcomes and their codes, for both forms.
+    #[test]
+    fn drain_progress_reads_as_a_share_of_the_estimate() {
+        let progress = DrainProgress {
+            versions_total: 245_756,
+            versions_done: 12_000,
+            bytes_total: 25_000_000_000,
+            bytes_moved: 1_200_000_000,
+        };
+        let line = progress.describe(std::time::Duration::from_secs(80));
+        assert!(
+            line.starts_with("progress  12000 of 245756 versions (4%), "),
+            "{line}"
+        );
+        assert!(line.contains("1m 20s elapsed, about "), "{line}");
+        assert!(line.ends_with(" left"), "{line}");
+        let done = DrainProgress {
+            versions_total: 10,
+            versions_done: 10,
+            bytes_total: 1,
+            bytes_moved: 1,
+        };
+        assert!(done
+            .describe(std::time::Duration::from_secs(5))
+            .ends_with("(100%), 1 B of 1 B moved, 5s elapsed"));
+        assert_eq!(human_duration(45.0), "45s");
+        assert_eq!(human_duration(200.0), "3m 20s");
+        assert_eq!(human_duration(7500.0), "2h 05m");
+    }
+
     #[test]
     fn scrub_exit_codes_follow_the_four_outcomes() {
         // (repair, incomplete, findings, repair_failures) -> code
