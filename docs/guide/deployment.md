@@ -241,7 +241,7 @@ which is a different command and requires a restart of that node.
 
 ## Keep the node running
 
-The repository does not ship a service unit. This is a unit that runs
+The repository does not ship a node unit. This is a unit that runs
 the binary you installed as `/usr/local/bin/djbod-node`, as a user that
 can read the config, the certificates, and the device directories.
 Standard error goes to the journal.
@@ -290,7 +290,9 @@ export DJBOD_CLUSTER=<cluster-id>
 Put the web UI on one machine, bound to localhost, and reach it with an
 SSH tunnel (`ssh -L 5264:127.0.0.1:5264 nas1`) or from the machine
 itself. The UI has no login of its own. [Day to day](day-to-day.md#the-web-ui)
-has the details. Turn on [TLS](tls.md) before any of these addresses are
+has the details. [`contrib/systemd/djbod-ui.service`](../../contrib/systemd/djbod-ui.service)
+is a unit that keeps it running, with the steps to install it at the
+top. Turn on [TLS](tls.md) before any of these addresses are
 reachable from a network you do not trust. Until then the protocol is
 plain TCP and any client that can connect can do everything, including
 administration.

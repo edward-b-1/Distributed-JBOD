@@ -1,0 +1,42 @@
+# systemd unit for the Distributed-JBOD administration web UI.
+#
+# Install:
+#   sudo install -m 755 target/release/djbod-ui /usr/local/bin/djbod-ui
+#   sudo install -m 644 contrib/systemd/djbod-ui.service /etc/systemd/system/
+#   (edit DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER below)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now djbod-ui
+#
+# The UI has no login: anyone who can reach its address can administer the
+# cluster. It listens on localhost; reach it with an SSH tunnel
+# (ssh -L 5264:127.0.0.1:5264 <host>). To serve the LAN instead, use
+# --listen 0.0.0.0:5264, and only on a network you trust. A request by
+# host name is refused unless the name is given with --host <name>.
+
+[Unit]
+Description=Distributed-JBOD administration web UI
+Documentation=https://github.com/edward-b-1/Distributed-JBOD
+After=network-online.target djbod-node.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=djbod
+Group=djbod
+# the nodes to connect through, tried in order; a local node belongs first
+Environment=DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
+# as printed by djbod-node init-cluster, or djbod get-cluster-id
+Environment=DJBOD_CLUSTER=<cluster-id>
+# for a cluster whose transport is tls, also set DJBOD_TLS_CA,
+# DJBOD_TLS_CERT and DJBOD_TLS_KEY to files the djbod user can read
+ExecStart=/usr/local/bin/djbod-ui --listen 127.0.0.1:5264
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
