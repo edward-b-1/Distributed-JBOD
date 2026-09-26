@@ -173,7 +173,7 @@ so `docker ps` shows `healthy` once the node answers. The image's `djbod`
 client works from inside the container:
 
 ```sh
-docker exec djbod djbod --node 10.0.0.1:5263 --cluster <id> status
+docker exec djbod djbod --bootstrap-node 10.0.0.1:5263 --cluster <id> status
 ```
 
 ## Docker Compose: three nodes on one machine
@@ -188,7 +188,7 @@ it. A node on a real machine uses `docker-compose.node.yml` above.
 DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) \
   docker compose -f deploy/docker-compose.yml up -d --build
 docker compose -f deploy/docker-compose.yml exec node1 sh -c \
-  'djbod --node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --node 172.28.0.11:5263) status'
+  'djbod --bootstrap-node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --bootstrap-node 172.28.0.11:5263) status'
 open http://127.0.0.1:5264/
 docker compose -f deploy/docker-compose.yml down -v     # deletes the data too
 ```

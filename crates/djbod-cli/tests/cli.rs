@@ -88,7 +88,7 @@ fn djbod_command() -> Command {
 
 fn djbod_raw(test: &TestNode, args: &[&str]) -> (bool, Vec<u8>, String) {
     let output = djbod_command()
-        .arg("--node")
+        .arg("--bootstrap-node")
         .arg(test.addr.to_string())
         .arg("--cluster")
         .arg(test.node.cluster_id().to_string())
@@ -236,7 +236,7 @@ async fn a_damaged_block_is_reconstructed_and_reported_and_a_failed_get_removes_
     let output = work.path().join("output.bin");
     let run = djbod_command()
         .args([
-            "--node",
+            "--bootstrap-node",
             &test.addr.to_string(),
             "--cluster",
             &test.node.cluster_id().to_string(),
@@ -279,7 +279,7 @@ async fn missing_connection_details_are_explained() {
     let output = djbod_command().arg("status").output().expect("run djbod");
     assert!(!output.status.success());
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(err.contains("--node"), "{err}");
+    assert!(err.contains("--bootstrap-node"), "{err}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -688,7 +688,7 @@ async fn the_client_speaks_tls_with_flags_or_environment() {
     assert!(out.contains("transport tls"), "{out}");
     let copy = dir.path().join("copy.bin");
     let output = djbod_command()
-        .env("DJBOD_NODE", test.addr.to_string())
+        .env("DJBOD_BOOTSTRAP_NODE", test.addr.to_string())
         .env("DJBOD_CLUSTER", test.node.cluster_id().to_string())
         .env("DJBOD_TLS_CA", &ca)
         .env("DJBOD_TLS_CERT", cert)
@@ -946,7 +946,7 @@ async fn the_cluster_can_be_named_from_the_command_line() {
     assert!(err.contains("has no name"), "{err}");
 }
 
-/// `get-cluster-id` needs only `--node` (SPEC 19.1.5.1).
+/// `get-cluster-id` needs only `--bootstrap-node` (SPEC 19.1.5.1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn get_cluster_id_needs_no_cluster_id() {
     let test = start_node(2, 1, 1).await;
@@ -956,7 +956,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
 
     let run = |args: &[&str]| {
         let output = djbod_command()
-            .arg("--node")
+            .arg("--bootstrap-node")
             .arg(test.addr.to_string())
             .args(args)
             .output()
@@ -976,7 +976,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
     assert_eq!(json["cluster_id"], cluster);
     assert_eq!(json["cluster_name"], "Home NAS");
     assert_eq!(json["build"], djbod_client::BUILD);
-    // `identity` builds on it: who is at --node, in words.
+    // `identity` builds on it: who is at --bootstrap-node, in words.
     let node_id = test.node.id().0.to_string();
     let (ok, _, err) = djbod(&test, &["cluster", "set-node-label", &node_id, "nas1"]);
     assert!(ok, "{err}");
@@ -1007,7 +1007,7 @@ async fn get_cluster_id_needs_no_cluster_id() {
     assert!(err.contains("no cluster id"), "{err}");
 }
 
-/// `--node` takes several addresses (SPEC 20.8): a dead one first is
+/// `--bootstrap-node` takes several addresses (SPEC 20.8): a dead one first is
 /// skipped, for ordinary commands and for `get-cluster-id`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
@@ -1016,7 +1016,7 @@ async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
     let nodes = format!("127.0.0.1:1,{}", test.addr);
     let run = |args: &[&str]| {
         let output = djbod_command()
-            .arg("--node")
+            .arg("--bootstrap-node")
             .arg(&nodes)
             .args(args)
             .output()
@@ -1039,7 +1039,7 @@ async fn several_nodes_may_be_given_and_a_dead_one_is_skipped() {
     // Only dead addresses: every one is named.
     let output = djbod_command()
         .args([
-            "--node",
+            "--bootstrap-node",
             "127.0.0.1:1,127.0.0.1:2",
             "--cluster",
             &cluster,
@@ -1241,7 +1241,7 @@ async fn scrub_exit_codes_say_what_was_concluded() {
     let run = |args: &[&str]| {
         let output = djbod_command()
             .args([
-                "--node",
+                "--bootstrap-node",
                 &test.addr.to_string(),
                 "--cluster",
                 &test.node.cluster_id().to_string(),
@@ -1358,7 +1358,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     let output = dir.path().join("out.bin");
     let run = djbod_command()
         .args([
-            "--node",
+            "--bootstrap-node",
             &test.addr.to_string(),
             "--cluster",
             &test.node.cluster_id().to_string(),
@@ -1382,7 +1382,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     );
     let run = djbod_command()
         .args([
-            "--node",
+            "--bootstrap-node",
             &test.addr.to_string(),
             "--cluster",
             &test.node.cluster_id().to_string(),
@@ -1426,7 +1426,7 @@ async fn a_destroyed_device_is_reported_unavailable() {
     // run, exit 3, and no per-key noise for the copies it held.
     let scrub = djbod_command()
         .args([
-            "--node",
+            "--bootstrap-node",
             &test.addr.to_string(),
             "--cluster",
             &test.node.cluster_id().to_string(),

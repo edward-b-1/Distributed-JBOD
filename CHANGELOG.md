@@ -19,6 +19,13 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: djbod takes --bootstrap-node and DJBOD_BOOTSTRAP_NODE, as the web UI does
+
+### Changed
+
+- `djbod --node` and `DJBOD_NODE` are `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE`, the names `djbod-ui` already uses (#207): one setting, one name across both tools, and one variable in `/etc/djbod/client.env` for the UI, the scrub timer and the command line. Nothing is kept for the old name (SPEC 19.1.5.2). `DJBOD_NODE_ID`, the node's own identity, is unrelated and unchanged. The README, SPEC, the guides, the deployment files and the tests follow (#262).
+- Version 0.2.19.
+
 Pull request: Ship a systemd unit for djbod-ui
 
 ### Added
