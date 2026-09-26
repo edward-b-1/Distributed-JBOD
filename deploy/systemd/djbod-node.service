@@ -4,6 +4,15 @@
 # /etc/djbod/node.env (DJBOD_* variables) overrides the file (SPEC 20.6).
 # Logs go to the journal: journalctl -u djbod-node -f
 #
+# The unit names no site paths. StateDirectory= creates /var/lib/djbod
+# owned by the service user; the device mounts are wherever node.toml
+# says, and ProtectSystem=full leaves /srv, /mnt and /var writable while
+# /usr, /boot and /etc are not. A disk that is not mounted at start does
+# not stop the node: the node starts, reports that device unavailable, and
+# writes nothing into the empty mount point (SPEC 5.6). To confine the
+# node further, add a drop-in (systemctl edit djbod-node) with
+# ProtectSystem=strict and ReadWritePaths= listing your mounts.
+#
 # A node that has been removed from the cluster exits cleanly on its own;
 # Restart=on-failure leaves it stopped, which is what should happen.
 
@@ -12,25 +21,21 @@ Description=Distributed-JBOD node
 Documentation=https://github.com/edward-b-1/Distributed-JBOD
 After=network-online.target local-fs.target
 Wants=network-online.target
-# Add every device mount here, so the node never starts against an
-# unmounted disk and writes into the empty mount point instead.
-RequiresMountsFor=/var/lib/djbod /srv/djbod/disk0 /srv/djbod/disk1
 
 [Service]
 Type=simple
 User=djbod
 Group=djbod
+StateDirectory=djbod
+ConfigurationDirectory=djbod
 EnvironmentFile=-/etc/djbod/node.env
 ExecStart=/usr/local/bin/djbod-node run --config /etc/djbod/node.toml
 Restart=on-failure
 RestartSec=5s
-# Hardening. The node needs to write only its state directory and its
-# device mounts; list every device path here.
 NoNewPrivileges=yes
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes
-ReadWritePaths=/var/lib/djbod /srv/djbod
 # The node keeps one file open per active shard transfer plus its devices;
 # the default limit of 1024 is enough for a home cluster but not generous.
 LimitNOFILE=65536

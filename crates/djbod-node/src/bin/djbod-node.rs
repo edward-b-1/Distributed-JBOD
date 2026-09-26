@@ -203,10 +203,6 @@ enum Command {
         /// data.
         #[arg(long)]
         wipe_removed_device: bool,
-        /// Create the cluster with this id instead of a fresh one, so that
-        /// provisioning can hand the same id to the nodes that will join.
-        #[arg(long, env = "DJBOD_CLUSTER_ID")]
-        cluster_id: Option<uuid::Uuid>,
     },
     /// Join an existing cluster: fetch its document from a peer,
     /// initialise this node's devices, and add this node to the document.
@@ -322,7 +318,6 @@ async fn main() -> anyhow::Result<()> {
             max_object_bytes,
             max_user_metadata_bytes,
             wipe_removed_device,
-            cluster_id,
         } => {
             let config = config.resolve()?;
             if wipe_removed_device {
@@ -348,7 +343,6 @@ async fn main() -> anyhow::Result<()> {
                     max_key_bytes,
                     max_object_bytes,
                     max_user_metadata_bytes,
-                    cluster_id,
                 },
             )
             .context("initialising cluster")?;

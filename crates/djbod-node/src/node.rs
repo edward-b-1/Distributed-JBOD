@@ -38,9 +38,6 @@ pub struct ClusterParameters {
     pub max_key_bytes: u64,
     pub max_object_bytes: u64,
     pub max_user_metadata_bytes: u64,
-    /// The cluster id to create with, for provisioning that must know it
-    /// in advance (a compose file, a fleet tool); a fresh UUID if `None`.
-    pub cluster_id: Option<Uuid>,
 }
 
 impl Default for ClusterParameters {
@@ -54,7 +51,6 @@ impl Default for ClusterParameters {
             max_key_bytes: djbod_core::cluster::DEFAULT_MAX_KEY_BYTES,
             max_object_bytes: djbod_core::cluster::DEFAULT_MAX_OBJECT_BYTES,
             max_user_metadata_bytes: djbod_core::cluster::DEFAULT_MAX_USER_METADATA_BYTES,
-            cluster_id: None,
         }
     }
 }
@@ -229,7 +225,7 @@ impl Node {
         config: NodeConfig,
         parameters: ClusterParameters,
     ) -> Result<Node, NodeError> {
-        let cluster_id = parameters.cluster_id.unwrap_or_else(Uuid::new_v4);
+        let cluster_id = Uuid::new_v4();
         fs::create_dir_all(&config.state_dir).map_err(|source| NodeError::Io {
             path: config.state_dir.clone(),
             source,

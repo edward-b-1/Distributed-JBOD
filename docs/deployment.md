@@ -22,8 +22,12 @@ One machine, one node, started at boot and restarted if it fails.
    sudo install -m 755 target/release/djbod-node target/release/djbod \
      target/release/djbod-recover target/release/djbod-ui /usr/local/bin/
    sudo useradd --system --home-dir /var/lib/djbod --shell /usr/sbin/nologin djbod
-   sudo mkdir -p /etc/djbod /var/lib/djbod && sudo chown djbod:djbod /var/lib/djbod
    ```
+
+   The unit creates `/etc/djbod` and `/var/lib/djbod` itself, owned by
+   `djbod`, the first time it starts (`ConfigurationDirectory=` and
+   `StateDirectory=`); create `/etc/djbod` by hand only if you write the
+   configuration before the first start.
 
 2. **Mount the disks** where the node will find them, one filesystem per
    disk (SPEC 20.5), for example under `/srv/djbod/disk0`, and make each
@@ -55,13 +59,16 @@ One machine, one node, started at boot and restarted if it fails.
    journalctl -u djbod-node -f
    ```
 
-   The unit runs the node as `djbod`, restarts it on failure, and confines
-   it to its state directory and `/srv/djbod` for writing; edit
-   `ReadWritePaths=` and `RequiresMountsFor=` if your disks are mounted
-   elsewhere; the second keeps the node from starting against an unmounted
-   disk and writing into the empty mount point. A node that has
-   been removed from the cluster (`djbod cluster remove-node`) exits
-   cleanly and is not restarted, which is the intended outcome.
+   The unit runs the node as `djbod`, restarts it on failure, and names
+   no site paths: `ProtectSystem=full` leaves `/srv`, `/mnt` and `/var`
+   writable, so the disks may be mounted anywhere `node.toml` says. A
+   disk that is not mounted when the node starts does not stop it: the
+   node starts, reports that device unavailable, and writes nothing into
+   the empty mount point (SPEC 5.6). To confine the node further, add a
+   drop-in with `systemctl edit djbod-node` setting
+   `ProtectSystem=strict` and `ReadWritePaths=` for your mounts. A node
+   that has been removed from the cluster (`djbod cluster remove-node`)
+   exits cleanly and is not restarted, which is the intended outcome.
 
 6. **The scrub timer**, on one machine only, since a scrub is
    cluster-wide whichever node it is pointed at. Write
@@ -118,16 +125,18 @@ docker build -t djbod --build-arg DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEA
 docker run --rm --entrypoint djbod-node djbod --version   # djbod-node 0.1.0+<commit>
 ```
 
-The entry point creates or joins a cluster the first time the state
-volume is empty, then runs the node, all from environment variables:
+The entry point settles the node's id, creates or joins a cluster the
+first time the state directory has no document, then runs the node, all
+from environment variables. Nothing is chosen in advance: the node id is
+generated on the first start and kept in the state directory, and a
+joining node asks its peer for the cluster id (`djbod get-cluster-id`).
 
 | Variable | Meaning |
 |----------|---------|
-| `DJBOD_NODE_ID` | This node's UUID. Choose it once; keep it for the node's life. |
+| `DJBOD_NODE_ID` | Optional. This node's UUID; generated and kept in the state directory when not given, and stable for the node's life either way. |
 | `DJBOD_ADVERTISE` | The IP and port other nodes and clients use to reach this container. Not needed with `--network host`, where `DJBOD_LISTEN` is the machine's own address. |
 | `DJBOD_DEVICES` | Comma-separated device paths inside the container; default `/data/d0,/data/d1`. Mount one disk on each. |
-| `DJBOD_CLUSTER_ID` | The cluster id: chosen for the first node (any UUID), required for a node that joins. |
-| `DJBOD_JOIN_PEER` | Set on a joining node: a running node's IP and port. The entry point retries until the peer answers. |
+| `DJBOD_JOIN_PEER` | Set on a joining node: a running node's IP and port. The entry point asks it for the cluster id and retries until it answers. |
 | `DJBOD_K`, `DJBOD_M` | The scheme, read by the first node only; default `3` and `1`. |
 | `DJBOD_CLUSTER_NAME` | A name shown beside the cluster id, read by the first node only; `djbod cluster set-name` changes it later. |
 | `DJBOD_BOOTSTRAP_PEERS` | Other nodes to consult at startup for a newer cluster document, comma-separated. |
@@ -135,28 +144,28 @@ volume is empty, then runs the node, all from environment variables:
 | `DJBOD_ALLOW_SHARED_FILESYSTEM` | `true` only for experiments where several devices share one disk. |
 
 One node per machine, on the host network so the node's address is the
-machine's address:
+machine's address. The image declares no volumes: the state directory
+and the disks are bind mounts, one physical disk per device path, so
+the redundancy is real. `deploy/docker-compose.node.yml` is this as a
+Compose file, with its settings in one env file per machine
+(`deploy/docker/node.env.example`); by hand it is:
 
 ```sh
 docker run -d --name djbod --network host --restart unless-stopped \
-  -e DJBOD_NODE_ID=$(uuidgen) \
   -e DJBOD_LISTEN=10.0.0.1:5263 \
-  -e DJBOD_CLUSTER_ID=<the cluster id> \
   -e DJBOD_JOIN_PEER=10.0.0.2:5263 \          # omit on the first machine
   -v /var/lib/djbod:/var/lib/djbod \
   -v /mnt/disk0/djbod:/data/d0 -v /mnt/disk1/djbod:/data/d1 \
   djbod
 ```
 
-The state directory and the disks are bind mounts owned by uid 5263 (the
-`djbod` user in the image); `chown -R 5263:5263` them once. Bind a
-directory *inside* each disk's mount point rather than the mount point
-itself, as `/mnt/disk0/djbod` above would be if the disk is mounted at
+The state directory and the disks are owned by uid 5263 (the `djbod`
+user in the image); `chown -R 5263:5263` them once. Bind a directory
+*inside* each disk's mount point rather than the mount point itself, as
+`/mnt/disk0/djbod` above would be if the disk is mounted at
 `/mnt/disk0`: if the disk is ever not mounted, the directory does not
-exist, Docker refuses to start the container, and the node cannot write
-into the root filesystem by mistake. The systemd unit gets the same
-protection from its `RequiresMountsFor=` line, which lists the device
-mounts.
+exist, Docker refuses to start the container, and nothing is written
+into the root filesystem by mistake.
 
 The image has a health check: every 30 seconds it asks the node in the
 container for `status`, reading the cluster id from the saved document,
@@ -171,23 +180,25 @@ docker exec djbod djbod --node 10.0.0.1:5263 --cluster <id> status
 
 `deploy/docker-compose.yml` starts three nodes with two volumes each and
 the web UI, on a private network with fixed addresses, and creates a
-`2+1` cluster. It is for trying the system out; the six "devices" are on
-one disk.
+`2+1` cluster. It is for trying the system out and nothing more: the six
+"devices" are Docker volumes on one disk, so there is no redundancy in
+it. A node on a real machine uses `docker-compose.node.yml` above.
 
 ```sh
 DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) \
   docker compose -f deploy/docker-compose.yml up -d --build
-docker compose -f deploy/docker-compose.yml exec node1 djbod \
-  --node 172.28.0.11:5263 --cluster 3d1e7b3a-0c3f-4b0e-9a7f-1a2b3c4d5e6f status
+docker compose -f deploy/docker-compose.yml exec node1 sh -c \
+  'djbod --node 172.28.0.11:5263 --cluster $(djbod get-cluster-id --node 172.28.0.11:5263) status'
 open http://127.0.0.1:5264/
 docker compose -f deploy/docker-compose.yml down -v     # deletes the data too
 ```
 
-Node 1 creates the cluster with the id written in the file, named
-`compose trial`; nodes 2 and 3
-join it, retrying until node 1 answers, so the order the containers
-start in does not matter, and `docker compose ps` shows each node healthy
-once it serves. Stop and start the stack and every node comes back with
+No id appears in the file. Each node generates its own on first start
+and keeps it in its state volume; node 1 creates the cluster, named
+`compose trial`; nodes 2 and 3, and the UI, ask node 1 for the cluster
+id, retrying until it answers, so the order the containers start in
+does not matter, and `docker compose ps` shows each node healthy once
+it serves. Stop and start the stack and every node comes back with
 its state; every node lists the others as bootstrap peers, so one that
 missed a document change while down adopts it at startup.
 
@@ -200,9 +211,9 @@ That needs root for the mounts and is left out of this compose file. If port 526
 the UI elsewhere with `DJBOD_UI_PORT=15264 docker compose ... up -d`.
 
 Everything in the file is ordinary Compose: the fixed addresses exist
-because the cluster document holds nodes by IP and port, the UUIDs are
-arbitrary and can be changed, and `DJBOD_ALLOW_SHARED_FILESYSTEM` is set
-because the volumes share the host's disk.
+because the cluster document holds nodes by IP and port, and
+`DJBOD_ALLOW_SHARED_FILESYSTEM` is set because the volumes share the
+host's disk.
 
 ## Verified
 
