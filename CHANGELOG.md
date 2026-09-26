@@ -19,6 +19,13 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: The record's revision is required
+
+### Changed
+
+- `MetadataRecord.revision` is always written and required on read. It had been omitted when 0 and defaulted when absent so that records from before 18.8.1 still verified; nothing is released, so nothing is kept for compatibility (SPEC 9.4.2, 19.1.5.2). A record without the field no longer parses, and a record's checksum now covers `"revision": 0`, so every record written by an earlier build must be rewritten once (#155, #260).
+- Version 0.2.17.
+
 Pull request: Removed nodes stay in the cluster document as tombstones
 
 ### Changed
