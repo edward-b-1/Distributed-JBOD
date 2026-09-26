@@ -288,6 +288,7 @@ tripped over; a scrub finds damage first:
 ```sh
 target/release/djbod scrub            # every node checks its own disks; then cross-node checks
 target/release/djbod scrub --repair   # and rebuild what was found
+target/release/djbod inventory        # which objects are whole, degraded or unreadable right now
 ```
 
 Each node reads every record and every block on its own devices against

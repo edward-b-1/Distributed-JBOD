@@ -1380,7 +1380,9 @@ to the client:
   and shards that remain suffice (9.4.4, 11.4) and report it, and are
   refused with `NodeUnreachable` when they do not; and except for
   `ListKeys`, which lists what the reachable devices hold, names the rest,
-  and says whether a key could be hidden (15.1.1).
+  and says whether a key could be hidden (15.1.1); and except for
+  `Inventory`, which counts what the reachable devices hold, names the
+  rest, and says whether an object could be hidden (20.1.5).
 - More than m of an object's shards cannot be read at all, whether
   missing, unreadable, or on a device or node that cannot be reached
   (11.4); fewer are reconstructed around, served, and reported.
@@ -1885,6 +1887,14 @@ coordinator, and those nodes send to each other. Every response is either
   `Repaired` or `RepairFailed` per damaged key if repair was asked for; the
   end-of-stream carries an error if any node failed or any repair failed.
 
+`Inventory`
+: Request: optionally one object state whose keys to list. Response:
+  `InventoryStarted`, then a stream of CBOR `InventoryEvent` data frames:
+  one `Object` per version in the requested state, a `Progress` every
+  10,000 versions, and one `Summary` at the end with the counts, the
+  devices that were not read, and whether the counts are complete; then
+  the end-of-stream. Section 20.1.5. Reads records only, never a shard.
+
 `PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
   of k+m (device UUID, node address) chosen by 10.4 and 10.5. The
@@ -2350,6 +2360,51 @@ with a size cap); and how it is shown (`djbod status`, a `djbod scrub
 --history` listing, the web UI's overview). The offline `djbod-node scrub`
 should record its results the same way, since a machine that scrubs while
 its node is down is still a machine that has been scrubbed.
+
+20.1.5 [D] **Inventory.** `djbod inventory` answers the question a scrub
+does not: with the devices that can be read *now*, which objects are
+whole, which are degraded, and which cannot be read at all. It is the
+cross-node merge of 20.1.2.2 alone, one `LocalRecords` stream per device
+of every active node, with no shard read and no check made, so it costs
+one pass over the records and finishes in minutes where a scrub takes
+days. Unlike the scrub it goes around a node it cannot reach: the devices
+of such a node, and any device its node reports unavailable (5.6), are
+*unread*, which is exactly what the inventory exists to describe rather
+than a reason to stop. A stream that fails part way makes its device
+unread from that point.
+
+Each version is judged from its record copies at the highest revision,
+which must agree and must all be present on the devices that were read
+(9.4.4, as `versions_of` applies it in the scrub); a shard is *out* when
+its device is unread, when its device holds no file for it (the
+`shard_present` of the stream), or when it is lost on a removed device
+(18.3). The states, from the count and position of the shards out:
+
+| State | Meaning |
+|---|---|
+| whole | no shard out |
+| degraded-parity | at most m out, all of them parity: reads are unaffected, the redundancy is reduced |
+| degraded-data | at most m out, at least one data shard: every read succeeds by decoding parity and pays for it (11.4) |
+| unreadable | more than m out: fewer than k remain, and the object cannot be read until a device returns |
+| inconsistent | the copies read do not agree, or a copy is missing from a device that was read: the scrub's territory (20.1.2.2), and the shards are not judged |
+
+The `Summary` gives the count in each state, the unread devices with
+their nodes, and `complete`: true while fewer than k+m devices are
+unread, since every version has a record copy on each of the k+m
+devices that hold its shards and so leaves a trace on at least one that
+was read; false once k+m or more are unread, when a version stored only
+on them is invisible and the counts are a lower bound. With `--keys
+<state>` the stream also carries one `Object` per version in that state,
+with its version id and shards available of shards total, which the CLI
+prints one per line on standard output; the summary and progress go to
+standard error, and `--json` prints the events alone. The exit codes are
+the scrub's (20.1.2.3) with "damage" read as "not whole": 0 complete
+and every object whole, 2 complete with some object not whole or
+inconsistent, 3 incomplete and every object seen whole, 4 incomplete
+with some object not whole. The inventory changes nothing and reports no
+finding: an object it calls degraded is repaired by the scrub once its
+device is back or retired (18.3), and one it calls inconsistent is the
+scrub's to examine.
 
 ### 20.2 Recovery tool
 

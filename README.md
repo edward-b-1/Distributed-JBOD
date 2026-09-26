@@ -193,7 +193,10 @@ out, at the moment you would want to. `djbod status` and the web UI
 show the same facts on demand. `djbod scrub`, run by hand or from cron,
 checks every disk and every object and exits non-zero when it finds
 damage, so a scheduled scrub is one line of crontab and its exit code
-is the whole integration.
+is the whole integration. `djbod inventory` answers the quicker
+question, in minutes rather than days: with the disks readable right
+now, which objects are whole, which are degraded, and which cannot be
+read at all.
 
 Repair is a command, not a background process. `djbod repair <key>`
 rebuilds one object; `djbod scrub --repair` rebuilds everything the
