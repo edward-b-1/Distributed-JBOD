@@ -272,9 +272,8 @@ djbod-ui --bootstrap-node ADDR[,ADDR...] --cluster UUID [--listen 127.0.0.1:5264
 Serves the administration page. `--bootstrap-node`
 (`DJBOD_BOOTSTRAP_NODE`) is the ordered list of nodes to try. The first
 that answers coordinates the page. After the cluster document has been
-read, the other addresses in it are tried too. `--node` and `DJBOD_NODE`
-are the deprecated spelling: accepted with a warning, and ignored when
-the new spelling is set. `--cluster` and the TLS flags match `djbod`.
+read, the other addresses in it are tried too. `--cluster` and the TLS
+flags match `djbod`.
 `--listen` defaults to `127.0.0.1:5264`. There is no authentication on
 the HTTP port. `--host` adds a DNS name the server will answer, besides
 IP addresses and `localhost`. Other `Host` values get HTTP 403. The page
