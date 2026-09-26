@@ -19,6 +19,13 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Remove the UI's deprecated --node and DJBOD_NODE
+
+### Removed
+
+- `djbod-ui --node` and `DJBOD_NODE`, the deprecated spelling of `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE` kept by #207 and accepted with a warning at every start. Nothing is released, so nothing is kept for compatibility (SPEC 19.1.5.2). `djbod` itself keeps `--node`, which is that tool's own name for the setting (#260).
+- Version 0.2.17.
+
 Pull request: Removed nodes stay in the cluster document as tombstones
 
 ### Changed
