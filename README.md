@@ -319,7 +319,7 @@ djbod put backups/2026-09.tar backup.tar
 ```
 
 Give the disks and machines names once, so `status` reads as your
-hardware does: `djbod cluster set-label <device-uuid> nas1-disk0` and
+hardware does: `djbod cluster set-device-label <device-uuid> nas1-disk0` and
 `djbod cluster set-node-label <node-uuid> nas1`. For the web UI, run
 `djbod-ui` on one machine with the same two variables; it binds to
 localhost, so reach it over an SSH tunnel or put it behind something

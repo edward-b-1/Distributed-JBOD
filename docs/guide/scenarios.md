@@ -291,7 +291,7 @@ directory that is not empty is refused.
 3. Restart the node. `djbod status` lists the new device as `active`.
    `djbod contents` shows zero versions until a later write or a drain
    places a shard there.
-4. Label it: `djbod cluster set-label <new-uuid> nas1-bay4`.
+4. Label it: `djbod cluster set-device-label <new-uuid> nas1-bay4`.
 
 The node does not pick up a new path from the file by itself. The
 restart after `add-device` is required.

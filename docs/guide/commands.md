@@ -156,7 +156,7 @@ label.
 | `show` | Asks every node for its document. Prints the cluster, the version held by the node you asked, and a table of node, label, address, build, and version. An unreachable node is a row, not a failure. |
 | `sync` | Brings every reachable node up to the highest document version any of them holds. Prints `updated`, `already current`, and `unreachable`. Exit 2 if any node was unreachable. |
 | `set-state <DEVICE> <draining\|active>` | Changes the device's state. Moves no data. `draining` stops new shards landing on it. |
-| `set-label <DEVICE> [LABEL] [--clear]` | Label, 1 to 128 bytes, no whitespace, not a UUID, unique in the cluster. `--clear` removes it. |
+| `set-device-label <DEVICE> [LABEL] [--clear]` | Label, 1 to 128 bytes, no whitespace, not a UUID, unique in the cluster. `--clear` removes it. |
 | `set-name [NAME] [--clear]` | Cluster display name, 1 to 128 bytes. Spaces are allowed, so quote it. The id clients send does not change. |
 | `get-name` | Prints the cluster's name alone, for scripts, as `get-cluster-id` prints the id. Exit 1 with a message on standard error when no name is set. `--json` gives the id and the name. |
 | `set-node-label <NODE> [LABEL] [--clear]` | Same rules as a device label, for a node. |

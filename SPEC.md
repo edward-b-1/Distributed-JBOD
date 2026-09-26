@@ -353,7 +353,7 @@ no message grows with the number of objects.
 6.2.5.1 [D] **Device and node labels.** A device entry may carry a
 `label`, an administrator-chosen name of 1 to 128 bytes with no
 whitespace, unique among devices and not shaped like a UUID, set or
-cleared with `djbod cluster set-label` as a document change like any
+cleared with `djbod cluster set-device-label` as a document change like any
 other. `status` shows it beside the UUID, and every `djbod` command that
 takes a device accepts either the UUID or the label. Paths are still not
 recorded (5.2); the label is the administrator's name for the disk, for

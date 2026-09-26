@@ -193,7 +193,7 @@ enum ClusterCommand {
     SetState { device: String, state: StateArg },
     /// Give a device a short name shown beside its UUID, or clear it with
     /// --clear. Labels are unique within the cluster.
-    SetLabel {
+    SetDeviceLabel {
         /// The device, by UUID or current label.
         device: String,
         /// The new label: 1 to 128 characters, no whitespace.
@@ -1488,7 +1488,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
-                ClusterCommand::SetLabel {
+                ClusterCommand::SetDeviceLabel {
                     device,
                     label,
                     clear: _,

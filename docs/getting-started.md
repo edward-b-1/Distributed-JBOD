@@ -322,14 +322,14 @@ matches (SPEC.md 9.4.5).
 label wherever a command takes a device:
 
 ```sh
-target/release/djbod cluster set-label <device-uuid> nas1-bay0
+target/release/djbod cluster set-device-label <device-uuid> nas1-bay0
 target/release/djbod status                       # LABEL column
 target/release/djbod cluster set-state nas1-bay0 draining
 ```
 
 Labels are unique, up to 128 characters with no spaces, and live in the
 cluster document, so they follow the disk if it moves to another machine.
-`set-label <label> --clear` removes one. Nodes take labels the same way:
+`set-device-label <label> --clear` removes one. Nodes take labels the same way:
 
 ```sh
 target/release/djbod cluster set-node-label <node-uuid> nas1

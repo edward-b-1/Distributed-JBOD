@@ -27,7 +27,7 @@
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
-//! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
+//! | `POST /devices/{id}/label`           | `djbod cluster set-device-label`           |
 //! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
