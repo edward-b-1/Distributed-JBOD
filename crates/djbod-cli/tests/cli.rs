@@ -740,10 +740,16 @@ async fn devices_can_be_labelled_and_named_by_label() {
     let device = test.node.devices()[1].id().0.to_string();
     let other = test.node.devices()[2].id().0.to_string();
 
-    let (ok, out, err) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", &device, "nas1-bay1"],
+    );
     assert!(ok, "{err}");
     assert!(out.contains("is now labelled nas1-bay1"), "{out}");
-    let (ok, out, _) = djbod(&test, &["cluster", "set-label", &device, "nas1-bay1"]);
+    let (ok, out, _) = djbod(
+        &test,
+        &["cluster", "set-device-label", &device, "nas1-bay1"],
+    );
     assert!(ok);
     assert!(out.contains("nothing changed"), "{out}");
     let (ok, out, _) = djbod(&test, &["status"]);
@@ -753,13 +759,13 @@ async fn devices_can_be_labelled_and_named_by_label() {
 
     // A duplicate, a label with whitespace, and one that looks like a
     // UUID are refused by the document validator.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "nas1-bay1"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, "nas1-bay1"]);
     assert!(!ok);
     assert!(err.contains("used by more than one device"), "{err}");
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, "bay 2"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, "bay 2"]);
     assert!(!ok);
     assert!(err.contains("whitespace"), "{err}");
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &other, &device]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &other, &device]);
     assert!(!ok);
     assert!(err.contains("looks like a UUID"), "{err}");
 
@@ -785,9 +791,15 @@ async fn devices_can_be_labelled_and_named_by_label() {
     );
 
     // Relabel by the current label, then clear.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", "nas1-bay1", "nas1-bay9"]);
+    let (ok, _, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", "nas1-bay1", "nas1-bay9"],
+    );
     assert!(ok, "{err}");
-    let (ok, out, err) = djbod(&test, &["cluster", "set-label", "nas1-bay9", "--clear"]);
+    let (ok, out, err) = djbod(
+        &test,
+        &["cluster", "set-device-label", "nas1-bay9", "--clear"],
+    );
     assert!(ok, "{err}");
     assert!(out.contains("label cleared"), "{out}");
     let (ok, out, _) = djbod(&test, &["--json", "cluster-config"]);
@@ -822,7 +834,7 @@ async fn nodes_can_be_labelled_and_named_by_label() {
     assert!(out.contains(djbod_client::BUILD), "{out}");
 
     // A device may carry the same label as a node: separate namespaces.
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "nas1"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &device, "nas1"]);
     assert!(ok, "{err}");
     // A second node could not, but there is only one; a bad label is
     // refused the same way as for devices.
@@ -1057,7 +1069,7 @@ async fn contents_show_what_each_device_holds() {
 
     // By label, and by node.
     let device = rows[0]["device"].as_str().unwrap().to_string();
-    let (ok, _, err) = djbod(&test, &["cluster", "set-label", &device, "bay0"]);
+    let (ok, _, err) = djbod(&test, &["cluster", "set-device-label", &device, "bay0"]);
     assert!(ok, "{err}");
     let (ok, out, err) = djbod(&test, &["contents", "bay0"]);
     assert!(ok, "{err}");
