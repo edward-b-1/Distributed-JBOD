@@ -403,7 +403,9 @@ and `cluster show` print `name (id)`, the web UI's header and title show
 the name first, the node's startup log line carries both, and a node
 refusing a client of another cluster says which cluster it serves. It is
 set with `djbod-node init-cluster --name` and set or cleared with `djbod
-cluster set-name`, a document change like any other. `Status` and `Hello`
+cluster set-name`, a document change like any other, and printed alone
+by `djbod cluster get-name`, which exits 1 when none is set, so a script
+can tell. `Status` and `Hello`
 carry it so a client need not fetch the document. An absent name means an
 unnamed cluster; documents written before the field are valid, and a node
 on a build from before it refuses a document that carries one (6.2.6.4).

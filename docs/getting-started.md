@@ -344,6 +344,7 @@ log:
 
 ```sh
 target/release/djbod cluster set-name home-nas
+target/release/djbod cluster get-name             # prints home-nas; exit 1 when unnamed
 target/release/djbod status                       # cluster   home-nas (2e79b3df-…)
 ```
 
