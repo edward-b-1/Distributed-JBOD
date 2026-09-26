@@ -277,6 +277,14 @@
   pre { font-family: var(--mono); font-size: 12px; overflow: auto; }
   .empty { color: var(--muted); padding: 12px; }
   .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0; }
+  /* A table's heading with a viewing toggle beside it and, at the right,
+     how many rows the toggle is hiding, so nothing is concealed. */
+  .section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
+  .section-head h2 { margin: 0; }
+  .section-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .section-head label input { margin: 0; }
+  .section-head .hidden-note { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+  tr.removed td { color: var(--muted); }
   tr.selected td { background: var(--accent-track); }
   tr.clickable { cursor: pointer; }
 </style>
@@ -316,7 +324,9 @@
 </section>
 
 <section id="tab-nodes" hidden>
-  <h2>Nodes</h2>
+  <div class="section-head"><h2>Nodes</h2>
+    <label title="a removed node stays in the cluster document as a tombstone, for the record; nothing is checked or done for it"><input type="checkbox" id="show-removed-nodes"> Show removed</label>
+    <span class="hidden-note" id="nodes-hidden"></span></div>
   <table>
     <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
@@ -325,7 +335,9 @@
     <button id="sync">Sync documents</button>
     <span class="hint">Brings every reachable node up to the highest document version any holds. Removing a dead node needs the command line: <code>djbod cluster remove-node &lt;id&gt; --force</code>.</span>
   </div>
-  <h2>Devices</h2>
+  <div class="section-head"><h2>Devices</h2>
+    <label title="a removed device stays in the cluster document as a tombstone, for the record; it holds nothing and takes nothing"><input type="checkbox" id="show-removed-devices"> Show removed</label>
+    <span class="hidden-note" id="devices-hidden"></span></div>
   <table>
     <thead><tr><th>Device</th><th>Node</th><th>State</th><th>Used</th><th class="num">Free</th><th class="num">Total</th><th></th></tr></thead>
     <tbody id="devices"></tbody>
@@ -797,6 +809,31 @@ function nodeBuilds(cluster) {
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
 }
+// Whether removed nodes and devices (tombstones, SPEC 6.2.2 and 18.2.1)
+// are listed. A viewing preference, remembered per browser; it changes
+// which rows are drawn and nothing the page computes.
+const view = { removedNodes: false, removedDevices: false };
+try {
+  view.removedNodes = localStorage.getItem('show-removed-nodes') === '1';
+  view.removedDevices = localStorage.getItem('show-removed-devices') === '1';
+} catch (_) { /* defaults */ }
+$('show-removed-nodes').checked = view.removedNodes;
+$('show-removed-devices').checked = view.removedDevices;
+$('show-removed-nodes').addEventListener('change', (e) => {
+  view.removedNodes = e.target.checked;
+  try { localStorage.setItem('show-removed-nodes', view.removedNodes ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+$('show-removed-devices').addEventListener('change', (e) => {
+  view.removedDevices = e.target.checked;
+  try { localStorage.setItem('show-removed-devices', view.removedDevices ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+// The note beside a table: how many removed entries exist and whether
+// they are hidden, so the toggle never conceals that there are any.
+function hiddenNote(id, removed, shown) {
+  $(id).textContent = removed === 0 ? '' : shown ? `${removed} removed shown` : `${removed} removed, hidden`;
+}
 function renderOverview() {
   const { status, cluster } = state;
   const doc = cluster.document;
@@ -845,7 +882,9 @@ function renderOverview() {
   const mixed = nodeBuilds(cluster).size > 1;
   $('nodes').parentElement.querySelector('thead').replaceChildren(el('tr', {},
     ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
-  $('nodes').replaceChildren(...cluster.nodes.map((n) => {
+  const removedNodes = cluster.nodes.filter((n) => n.state === 'removed').length;
+  hiddenNote('nodes-hidden', removedNodes, view.removedNodes);
+  $('nodes').replaceChildren(...cluster.nodes.filter((n) => view.removedNodes || n.state !== 'removed').map((n) => {
     const entry = doc.nodes.find((d) => d.id === n.node) || {};
     if (n.state === 'removed') {
       // A tombstone (SPEC 6.2.2): for the record, with nothing to check
@@ -890,7 +929,8 @@ function renderOverview() {
           title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
   }));
 
-  $('devices').replaceChildren(...devices.map((d) => {
+  hiddenNote('devices-hidden', counts.removed, view.removedDevices);
+  $('devices').replaceChildren(...devices.filter((d) => view.removedDevices || d.state !== 'removed').map((d) => {
     const used = d.total_bytes - d.free_bytes;
     const fraction = d.total_bytes ? used / d.total_bytes : 0;
     const freeFraction = d.total_bytes ? d.free_bytes / d.total_bytes : 0;
@@ -906,7 +946,7 @@ function renderOverview() {
       actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
     }
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
-    return el('tr', {}, el('td', {}, deviceCell(d.device)),
+    return el('tr', { class: d.state === 'removed' ? 'removed' : null }, el('td', {}, deviceCell(d.device)),
       el('td', {}, nodeCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
       el('td', {}, stateCell(d)),
       el('td', {}, d.state === 'removed' || d.available === false ? el('span', { class: 'hint', text: '—' }) : meter),
