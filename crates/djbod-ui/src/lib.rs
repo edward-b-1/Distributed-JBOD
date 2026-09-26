@@ -30,7 +30,7 @@
 //! | `POST /devices/{id}/label`           | `djbod cluster set-device-label`           |
 //! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
-//! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
+//! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`; body `{"force": true}` is `--force` |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
 //! | `POST /nodes/{id}/label`             | `djbod cluster set-node-label`      |
 //!
@@ -1577,15 +1577,36 @@ async fn set_device_label(
     })))
 }
 
-async fn remove_device(State(app): State<Arc<App>>, Path(id): Path<String>) -> ApiResult {
+#[derive(Deserialize, Default)]
+struct RemoveDeviceBody {
+    /// `djbod cluster remove-device --force` (SPEC 18.2.1.1): mark the
+    /// device removed without draining it or checking what it holds, for
+    /// a device the cluster can no longer read. Every shard on it is
+    /// lost and rebuilt elsewhere by `scrub --repair`. The page has the
+    /// user type the device's name back before sending this.
+    #[serde(default)]
+    force: bool,
+}
+
+async fn remove_device(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: Option<Json<RemoveDeviceBody>>,
+) -> ApiResult {
     let target = &app.target;
+    let force = body.map(|Json(b)| b.force).unwrap_or(false);
     let device = device_param(&app, &id).await?;
-    let (document, changed) =
-        admin::remove_device(&target.connector, app.peer().await?, target.cluster, device).await?;
+    let peer = app.peer().await?;
+    let (document, changed) = if force {
+        admin::remove_device_forced(&target.connector, peer, target.cluster, device).await?
+    } else {
+        admin::remove_device(&target.connector, peer, target.cluster, device).await?
+    };
     Ok(Json(json!({
         "device": device,
         "document_version": document.version,
         "changed": changed,
+        "forced": force,
     })))
 }
 
