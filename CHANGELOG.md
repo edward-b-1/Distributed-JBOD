@@ -19,6 +19,16 @@ next change to this file moves them under that commit's hash and date.
 
 ## [Unreleased]
 
+Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
+
+### Added
+
+- `Dockerfile` and `.dockerignore`: a multi-stage, `--locked` build of all four binaries into a slim image with an unprivileged `djbod` user, no volume declarations (the state directory and devices are bind mounts, one physical disk per device path), a health check that asks the node for `status`, and an entry point that generates the node's id on the first start and keeps it in the state directory, asks the peer for the cluster id when joining, runs `init-cluster` or `join` once and `djbod-node run` after, all from `DJBOD_*` variables (SPEC 20.6). `DJBOD_GIT_COMMIT` is a build argument so the image's binaries carry a real build id.
+- `deploy/docker-compose.node.yml` and `deploy/docker/node.env.example`: one node on a real machine, bind mounts, host network, one env file per machine. `deploy/docker-compose.yml`: a three-node trial on volumes with the web UI, which asks node 1 for the cluster id; no id appears in either file.
+- `deploy/systemd/`: `djbod-node.service` (runs as `djbod`, restarts on failure, `StateDirectory=` and `ProtectSystem=full` so it names no site paths and an unmounted disk leaves the node running with that device unavailable, as SPEC 5.6 has it), `djbod-scrub.service` and `djbod-scrub.timer` (weekly, randomised, rate-limited, report-only, exit 2 not a failure), and `node.env.example`. The web UI's unit and `client.env.example` come with #259.
+- `docs/deployment.md`: the three ways step by step, with TLS and upgrade notes; the README and the guides point to it (#73).
+- Version 0.2.18.
+
 Pull request: Remove the UI's deprecated --node and DJBOD_NODE
 
 ### Removed
