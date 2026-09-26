@@ -27,7 +27,7 @@ Pull request: Removed nodes stay in the cluster document as tombstones
 
 ### Added
 
-- `state` on node entries in the cluster document, `active` or `removed`; absent in a document written before, which reads as active, and always written from now on. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
+- `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
 
 ## [3e55cc5] - 2026-09-25
 

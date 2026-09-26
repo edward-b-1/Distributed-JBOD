@@ -59,9 +59,7 @@ pub struct NodeEntry {
     /// An administrator-chosen name shown beside the UUID (SPEC 6.2.5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    /// Absent in documents written before nodes had a state, which is
-    /// every node active; always written from now on (6.2.2).
-    #[serde(default)]
+    /// Required, like every field but the names (6.2.2, 19.1.5.2).
     pub state: NodeState,
 }
 
@@ -754,8 +752,8 @@ mod tests {
     }
 
     /// SPEC 6.2.2, 6.2.5.2: a removed node is a tombstone. Its address and
-    /// label no longer count against a new node, and a document from
-    /// before nodes had a state reads every node as active.
+    /// label no longer count against a new node, and a document without
+    /// a node state is refused, the field being required.
     #[test]
     fn a_removed_node_frees_its_address_and_label() {
         let mut doc = sample();
@@ -775,9 +773,11 @@ mod tests {
         for node in json["nodes"].as_array_mut().expect("nodes") {
             node.as_object_mut().expect("node").remove("state");
         }
-        let old: ClusterDocument = serde_json::from_value(json).expect("reads without state");
-        assert!(old.nodes.iter().all(|n| n.state == NodeState::Active));
-        let written = serde_json::to_string(&old).expect("json");
+        assert!(
+            serde_json::from_value::<ClusterDocument>(json).is_err(),
+            "a node without a state is refused"
+        );
+        let written = serde_json::to_string(&sample()).expect("json");
         assert!(written.contains("\"state\":\"active\""), "{written}");
     }
 }

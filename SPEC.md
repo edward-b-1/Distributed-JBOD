@@ -328,9 +328,8 @@ state, optional label), and the device list (UUID, owning node, state,
 optional label). A node's state is `active` or `removed`; a removed node
 is a tombstone (18.2.1): listed for the record, asked nothing, never
 revived. Every field is required except the names and labels, whose
-absence means unnamed, and a node's state, whose absence in a document
-written before nodes had one means active and which is always written
-from then on (19.1.5.2). `djbod cluster set-limits` and `djbod
+absence means unnamed (19.1.5.2); a document from before nodes had a
+state is refused until each node entry carries one. `djbod cluster set-limits` and `djbod
 cluster set-transport` change the limits and the transport. The document
 never holds key material (20.6).
 
