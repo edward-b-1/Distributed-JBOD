@@ -888,9 +888,9 @@ k, m                integers, the global values when written (6.3)
 block_size          integer, B when written
 shards              array of { index, device }, exactly k+m entries, one per
                     shard index, each device distinct
-revision            integer, the placement revision (18.8.1); 0 when the
-                    version is first written and then omitted from the
-                    file, incremented by every re-placement
+revision            integer, required, the placement revision (18.8.1);
+                    0 when the version is first written, incremented by
+                    every re-placement
 content_type        string, optional, at most 1 KiB
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer; keys and values together at
