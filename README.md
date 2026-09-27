@@ -74,6 +74,11 @@ systemd units for a node per machine, a Docker image configured entirely
 by environment variables, and a Docker Compose stack of three nodes and
 the web UI for trying it on one computer.
 
+[docs/releasing.md](docs/releasing.md) says what a version number
+promises and how a release is cut: a tag `vX.Y.Z` builds the binaries,
+the Python wheel and the Docker image and publishes them as a GitHub
+release.
+
 The [detailed user guide](docs/user-guide.md) covers deployment,
 configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
 

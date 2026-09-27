@@ -9,20 +9,35 @@ and every crate inherits it. A build identifies itself as `<version>+<git
 commit>`, which `djbod --version`, `djbod identity`, `djbod status` and `djbod
 cluster show` print.
 
-The workspace carried version 0.1.0 from the first commit on 16 September 2026,
-no build was published, and version increments start at 0.2.0. No release is
-tagged yet. Each section is one commit on `main`. A commit that set a new
-version is headed by that version, with its short hash beside it, as
-`## [0.2.1] - 2026-09-25 ([2d88af6])`; every other commit, and every commit
-before 0.2.0, is headed by its short hash alone, and runs the version of the
-nearest version heading below it, or 0.1.0 below 0.2.0. Each pull request adds its entries under
-`Unreleased` as part of the change, since it cannot know its merge commit; the
-next change to this file moves them under that commit's hash and date, or under
-the version and hash if the pull request set a new version.
+A release is a tag `vX.Y.Z` on `main`, built and published by
+`.github/workflows/release.yml`; [docs/releasing.md](docs/releasing.md) has the
+steps. Each pull request adds its entries under `Unreleased` and leaves the
+version alone; the release's own pull request sets the version and renames
+`Unreleased` to `[X.Y.Z]` with the date.
+
+Before that process, from the first commit on 16 September 2026 until it began
+on 27 September 2026, each section is one commit on `main`. A commit that set a
+new version is headed by that version, with its short hash beside it, as
+`## [0.2.1] - 2026-09-25 ([2d88af6])`; every other commit is headed by its
+short hash alone and runs the version of the nearest version heading below it, or
+0.1.0 below 0.2.0. The tags `v0.2.0` to `v0.2.21` were put on those commits on
+27 September 2026; none of those versions was published.
 
 ## [Unreleased]
 
-Pull request: CHANGELOG.md: a version's section is headed by its version
+### Added
+
+- `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
+- `docs/releasing.md`: what a minor and a patch bump promise, what every pull request does, the steps of a release, and what to do when the workflow fails (#172).
+- The Docker image carries `LICENSE` and `THIRD-PARTY-NOTICES` in `/usr/share/doc/djbod/`, and the Python wheel both beside the module (SPEC 21.5) (#165, #169).
+
+### Changed
+
+- A pull request no longer sets a new version, and `CHANGELOG.md` collects every pull request's entries under `Unreleased` until a release names them, instead of one section per commit. The version headings from 0.2.0 to 0.2.21 link to their tags (#172).
+
+## [1f5c440] - 2026-09-27
+
+Pull request #267: CHANGELOG.md: a version's section is headed by its version
 
 ### Changed
 
@@ -2037,60 +2052,61 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/fa0dca9...HEAD
-[0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.21...HEAD
+[1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
+[0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.20...v0.2.21
 [fa0dca9]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
-[0.2.20]: https://github.com/edward-b-1/Distributed-JBOD/commit/b36dbea05b36ceaa746f71b8fe5f479a99169b05
+[0.2.20]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.19...v0.2.20
 [b36dbea]: https://github.com/edward-b-1/Distributed-JBOD/commit/b36dbea05b36ceaa746f71b8fe5f479a99169b05
-[0.2.19]: https://github.com/edward-b-1/Distributed-JBOD/commit/b1a9a3c64bddc598c1439031388c7d62d1eade6d
+[0.2.19]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.18...v0.2.19
 [b1a9a3c]: https://github.com/edward-b-1/Distributed-JBOD/commit/b1a9a3c64bddc598c1439031388c7d62d1eade6d
 [2fdbba1]: https://github.com/edward-b-1/Distributed-JBOD/commit/2fdbba1a53b061e131ab9ecd11b6017dba3f2e7e
-[0.2.18]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea18734ef9f5be0e1a1e6f851f5679a8586f57ea
+[0.2.18]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.17...v0.2.18
 [ea18734]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea18734ef9f5be0e1a1e6f851f5679a8586f57ea
-[0.2.17]: https://github.com/edward-b-1/Distributed-JBOD/commit/57746ff8e614fcb17c1ade411b3d1e9e8247cdfa
+[0.2.17]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.16...v0.2.17
 [57746ff]: https://github.com/edward-b-1/Distributed-JBOD/commit/57746ff8e614fcb17c1ade411b3d1e9e8247cdfa
 [15798b3]: https://github.com/edward-b-1/Distributed-JBOD/commit/15798b3c9f685282e21aa47fc0d0e301ca97cab4
-[0.2.16]: https://github.com/edward-b-1/Distributed-JBOD/commit/52c4f525b28852e7f72a1c842857f2ba94aa1c09
+[0.2.16]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.15...v0.2.16
 [52c4f52]: https://github.com/edward-b-1/Distributed-JBOD/commit/52c4f525b28852e7f72a1c842857f2ba94aa1c09
 [d42a7dc]: https://github.com/edward-b-1/Distributed-JBOD/commit/d42a7dc47005c1bcd4f4e184ee10d040377253a9
-[0.2.15]: https://github.com/edward-b-1/Distributed-JBOD/commit/4e127a6bf553260abb631f55600328b2cb8ea63d
+[0.2.15]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.14...v0.2.15
 [4e127a6]: https://github.com/edward-b-1/Distributed-JBOD/commit/4e127a6bf553260abb631f55600328b2cb8ea63d
-[0.2.14]: https://github.com/edward-b-1/Distributed-JBOD/commit/5ce1b6cf3325e727fa5ad780b32b8806f35392bc
+[0.2.14]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.13...v0.2.14
 [5ce1b6c]: https://github.com/edward-b-1/Distributed-JBOD/commit/5ce1b6cf3325e727fa5ad780b32b8806f35392bc
-[0.2.13]: https://github.com/edward-b-1/Distributed-JBOD/commit/81ca3d5883221601e4c219716503a3976eafdeff
+[0.2.13]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.12...v0.2.13
 [81ca3d5]: https://github.com/edward-b-1/Distributed-JBOD/commit/81ca3d5883221601e4c219716503a3976eafdeff
-[0.2.12]: https://github.com/edward-b-1/Distributed-JBOD/commit/5f8cc7915c33688c6b899142c68d1d42242215b4
+[0.2.12]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.11...v0.2.12
 [5f8cc79]: https://github.com/edward-b-1/Distributed-JBOD/commit/5f8cc7915c33688c6b899142c68d1d42242215b4
-[0.2.11]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea49f21f55995d6a04cec82130708db4cf863dfa
+[0.2.11]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.10...v0.2.11
 [ea49f21]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea49f21f55995d6a04cec82130708db4cf863dfa
-[0.2.10]: https://github.com/edward-b-1/Distributed-JBOD/commit/8e97556fd6c59ae97e5e4da3c40a17b2795b61a6
+[0.2.10]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.9...v0.2.10
 [8e97556]: https://github.com/edward-b-1/Distributed-JBOD/commit/8e97556fd6c59ae97e5e4da3c40a17b2795b61a6
-[0.2.9]: https://github.com/edward-b-1/Distributed-JBOD/commit/a7c36bc04a255af763d74c5cc586686ec8c5137d
+[0.2.9]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.8...v0.2.9
 [a7c36bc]: https://github.com/edward-b-1/Distributed-JBOD/commit/a7c36bc04a255af763d74c5cc586686ec8c5137d
-[0.2.8]: https://github.com/edward-b-1/Distributed-JBOD/commit/d99a71af9bff0df9c1010abc2323b2f6def40e44
+[0.2.8]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.7...v0.2.8
 [d99a71a]: https://github.com/edward-b-1/Distributed-JBOD/commit/d99a71af9bff0df9c1010abc2323b2f6def40e44
-[0.2.7]: https://github.com/edward-b-1/Distributed-JBOD/commit/20609e4c435d88acc866c7b71af174c451562ece
+[0.2.7]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.6...v0.2.7
 [20609e4]: https://github.com/edward-b-1/Distributed-JBOD/commit/20609e4c435d88acc866c7b71af174c451562ece
-[0.2.6]: https://github.com/edward-b-1/Distributed-JBOD/commit/96e0872519868fc3b5ceadaa64fab073fca5c141
+[0.2.6]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.5...v0.2.6
 [96e0872]: https://github.com/edward-b-1/Distributed-JBOD/commit/96e0872519868fc3b5ceadaa64fab073fca5c141
 [5a5fbdc]: https://github.com/edward-b-1/Distributed-JBOD/commit/5a5fbdc660ed65abfd4e861cd985afd7016008b9
-[0.2.5]: https://github.com/edward-b-1/Distributed-JBOD/commit/1b8e434cdb3817ce416ce1b154c5a1c9663f964f
+[0.2.5]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.4...v0.2.5
 [1b8e434]: https://github.com/edward-b-1/Distributed-JBOD/commit/1b8e434cdb3817ce416ce1b154c5a1c9663f964f
 [cd95829]: https://github.com/edward-b-1/Distributed-JBOD/commit/cd95829e9f8e3824676db2b88def315072be5b3e
-[0.2.4]: https://github.com/edward-b-1/Distributed-JBOD/commit/26064ba1025bd576d7bac6871d43b6b4b501d387
+[0.2.4]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.3...v0.2.4
 [26064ba]: https://github.com/edward-b-1/Distributed-JBOD/commit/26064ba1025bd576d7bac6871d43b6b4b501d387
-[0.2.3]: https://github.com/edward-b-1/Distributed-JBOD/commit/2286527908f8014f27ceaacb8f3a9211d945b850
+[0.2.3]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.2...v0.2.3
 [2286527]: https://github.com/edward-b-1/Distributed-JBOD/commit/2286527908f8014f27ceaacb8f3a9211d945b850
-[0.2.2]: https://github.com/edward-b-1/Distributed-JBOD/commit/af5af8b89a6a2628d663eb99da17a1e0233291ed
+[0.2.2]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.1...v0.2.2
 [af5af8b]: https://github.com/edward-b-1/Distributed-JBOD/commit/af5af8b89a6a2628d663eb99da17a1e0233291ed
 [3f33beb]: https://github.com/edward-b-1/Distributed-JBOD/commit/3f33beb07a395068c2c6414efac5f1581a51e160
-[0.2.1]: https://github.com/edward-b-1/Distributed-JBOD/commit/2d88af6a0ccd252867d71d1394654ff1276c59d8
+[0.2.1]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.0...v0.2.1
 [2d88af6]: https://github.com/edward-b-1/Distributed-JBOD/commit/2d88af6a0ccd252867d71d1394654ff1276c59d8
 [ea584ef]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea584ef57b8a7b7fff770128465bed4eac09c09f
 [3e55cc5]: https://github.com/edward-b-1/Distributed-JBOD/commit/3e55cc571b1e0f6771971407e928eef701c751c3
 [92c4f75]: https://github.com/edward-b-1/Distributed-JBOD/commit/92c4f7516e676beb33ff04c620b7f849f9c12736
 [b928225]: https://github.com/edward-b-1/Distributed-JBOD/commit/b928225f2ee451dc4e4a2914b478b43673f37269
-[0.2.0]: https://github.com/edward-b-1/Distributed-JBOD/commit/dffe86d5741d31192cf7e0cd865594121dae5720
+[0.2.0]: https://github.com/edward-b-1/Distributed-JBOD/releases/tag/v0.2.0
 [dffe86d]: https://github.com/edward-b-1/Distributed-JBOD/commit/dffe86d5741d31192cf7e0cd865594121dae5720
 [ad9bfa3]: https://github.com/edward-b-1/Distributed-JBOD/commit/ad9bfa33c4cbb8b2431988c2fd1570dc623ea40f
 [d0b8133]: https://github.com/edward-b-1/Distributed-JBOD/commit/d0b8133c6f1bc794b74925a6c5caea06a6db6fab
