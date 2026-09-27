@@ -755,10 +755,11 @@ function renderObjectHealth() {
   if (inv.running) {
     title = 'Counting objects…';
     sub = `${inv.checked.toLocaleString()} versions checked so far; records only, no shard is read.`;
+    actions.push({ button: 'Counting…', disabled: true });
   } else if (!s) {
     title = 'Object health not computed';
     sub = 'Counts every object by how many of its shards can be read now, from records alone. One pass over every record; a minute or so at hundreds of thousands of objects.';
-    actions.push(['Compute →', runInventory]);
+    actions.push({ button: 'Compute', go: runInventory });
   } else {
     const degraded = s.degraded_parity + s.degraded_data;
     const n = s.versions_checked;
@@ -790,12 +791,15 @@ function renderObjectHealth() {
       if (!s.complete) cls = 'bad';
     }
     sub += ` Computed at ${inv.at.toLocaleTimeString()}.`;
-    actions.push(['Recompute', runInventory]);
+    actions.push({ button: 'Recompute', go: runInventory });
   }
+  // The links lead somewhere; the one thing that does work here is a button.
   $('object-health').replaceChildren(el('div', { class: 'health ' + cls },
     el('div', { class: 'mark', 'aria-hidden': 'true' }),
     el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
-    el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+    el('div', { class: 'actions' }, ...actions.map((a) => Array.isArray(a)
+      ? el('a', { text: a[0], onclick: a[1], role: 'button', tabindex: '0' })
+      : el('button', { text: a.button, class: 'primary', onclick: a.go, disabled: a.disabled ? '' : null, title: 'one pass over every record, no shard read' })))));
 }
 async function runInventory() {
   const inv = state.inventory;
