@@ -1,0 +1,75 @@
+# Every pull request and every push to main: formatting, lints, the Rust
+# tests, the Python client's tests against a real node, the scripts'
+# tests, and THIRD-PARTY-NOTICES against Cargo.lock. The toolchain is the
+# Dockerfile's, so CI builds what the image builds.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels the run it replaces; runs on main
+# always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  python:
+    name: Python client
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: astral-sh/setup-uv@v6
+      - name: Test
+        run: scripts/python-tests.sh
+
+  scripts:
+    name: Scripts and notices
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: PKI helper tests
+        run: python3 -m unittest discover -s scripts/tests -v
+      # The script reads each dependency's license files from the local
+      # registry, which `cargo fetch` fills.
+      - name: THIRD-PARTY-NOTICES matches Cargo.lock
+        run: |
+          cargo fetch --locked
+          python3 scripts/third-party-notices.py > "$RUNNER_TEMP/notices"
+          diff -u THIRD-PARTY-NOTICES "$RUNNER_TEMP/notices" || {
+            echo "::error file=THIRD-PARTY-NOTICES::out of date; run: python3 scripts/third-party-notices.py > THIRD-PARTY-NOTICES"
+            exit 1
+          }
