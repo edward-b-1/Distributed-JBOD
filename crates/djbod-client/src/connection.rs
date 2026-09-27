@@ -15,7 +15,8 @@ use djbod_core::record::DeviceId;
 use djbod_core::stripe::ShardBlock;
 use djbod_proto::handshake::{Hello, HelloError, PeerKind, PROTOCOL_VERSION};
 use djbod_proto::message::{
-    DataFrame, ErrorDetail, Message, ObjectRead, ObjectWrite, Request, Response, StreamEnd,
+    DataFrame, ErrorDetail, InventoryQuery, Message, ObjectRead, ObjectWrite, Request, Response,
+    StreamEnd,
 };
 
 use crate::transport::{Connector, Stream};
@@ -565,6 +566,27 @@ impl Connection {
         }
     }
 
+    /// Start an inventory (SPEC 20.1.5) and return the request id to
+    /// read events with.
+    pub async fn start_inventory(&mut self, query: InventoryQuery) -> Result<u32, ConnectionError> {
+        let id = self.send_request(Request::Inventory(query)).await?;
+        match self.read_response(id).await? {
+            Response::InventoryStarted => Ok(id),
+            other => Err(ConnectionError::UnexpectedMessage {
+                expected: "InventoryStarted",
+                got: format!("{other:?}"),
+            }),
+        }
+    }
+
+    /// The next inventory event, or the stream's end.
+    pub async fn next_inventory_event(
+        &mut self,
+        id: u32,
+    ) -> Result<Result<djbod_proto::message::InventoryEvent, StreamEnd>, ConnectionError> {
+        self.next_event(id).await
+    }
+
     /// The next drain event, or the stream's end.
     pub async fn next_drain_event(
         &mut self,
@@ -573,9 +595,8 @@ impl Connection {
         self.next_event(id).await
     }
 
-    /// The next CBOR event of a streaming administrative operation, or
-    /// the stream's end.
-    /// The next event of a scrub or drain stream, or its end.
+    /// The next CBOR event of a streaming administrative operation
+    /// (scrub, drain or inventory), or the stream's end.
     pub async fn next_event<E: serde::de::DeserializeOwned>(
         &mut self,
         id: u32,

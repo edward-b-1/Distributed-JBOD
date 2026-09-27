@@ -30,10 +30,10 @@ use djbod_core::text::counted;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
     ClusterFinding, DataFrame, DeviceContents, DeviceExposure, DeviceRecord, DeviceStatus,
-    DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message,
-    MissingRecordCopy, NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport,
-    Request, Response, ScrubEvent, ScrubItem, ShardAvailability, ShardCondition, ShardRepair,
-    StreamEnd, UnavailableDevice,
+    DrainEvent, ErrorCode, ErrorDetail, InventoryEvent, InventoryQuery, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, MissingRecordCopy, NodeStatus, ObjectState,
+    Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response, ScrubEvent,
+    ScrubItem, ShardAvailability, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -57,6 +57,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::MoveShard { .. }
             | Request::Scrub { .. }
             | Request::Drain { .. }
+            | Request::Inventory(_)
     )
 }
 
@@ -95,6 +96,7 @@ pub async fn handle(
             repair,
         } => scrub(node, id, writer, max_bytes_per_second, repair).await,
         Request::Drain { device, partial } => drain(node, id, writer, device, partial).await,
+        Request::Inventory(query) => inventory(node, id, writer, query).await,
         Request::GetObject { key } => get_object(node, id, writer, &key).await,
         Request::PutObject {
             key,
@@ -3940,6 +3942,267 @@ async fn relay_local_scrub(
     }
 }
 
+// ------------------------------------------------------------ INVENTORY
+
+/// The inventory (SPEC 20.1.5): every version's state against the
+/// devices that can be read now, from the record streams alone, with no
+/// shard read. The merge is the cross-node scrub's (20.1.2.2) without
+/// its checks, and unlike the scrub it goes around a node it cannot
+/// reach: that node's devices are unread, which is what the inventory
+/// exists to describe.
+async fn inventory(
+    node: &Arc<Node>,
+    id: u32,
+    writer: &mut Writer,
+    query: InventoryQuery,
+) -> Result<(), Failure> {
+    respond(writer, id, Ok(Response::InventoryStarted)).await?;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<InventoryEvent>(256);
+    let merge = {
+        let node = node.clone();
+        tokio::spawn(async move { inventory_merge(&node, query, sender).await })
+    };
+    let mut sequence: u64 = 0;
+    while let Some(event) = receiver.recv().await {
+        send_event(writer, id, &mut sequence, &event).await?;
+    }
+    merge.await.map_err(|join| {
+        error(
+            ErrorCode::Internal,
+            format!("inventory task failed: {join}"),
+        )
+    })?;
+    write_message(
+        writer,
+        &Message::EndOfStream {
+            id,
+            end: StreamEnd::ok(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Open one record stream per device of every active node and merge
+/// them (20.1.5). A device that cannot be opened is unread from the
+/// start; its node may be down, or the device unavailable (5.6).
+async fn inventory_merge(
+    node: &Arc<Node>,
+    query: InventoryQuery,
+    events: tokio::sync::mpsc::Sender<InventoryEvent>,
+) {
+    let document = node.document();
+    let mut sources = Vec::new();
+    let mut unread: BTreeMap<DeviceId, NodeId> = BTreeMap::new();
+    for entry in document
+        .devices
+        .iter()
+        .filter(|d| d.state != DeviceState::Removed)
+    {
+        if !document
+            .node(entry.node)
+            .is_some_and(|n| n.state == NodeState::Active)
+        {
+            continue;
+        }
+        match DeviceStream::open(node, entry.node, entry.id).await {
+            Ok(stream) => sources.push(RecordSource::Device(Box::new(stream))),
+            Err(_) => {
+                unread.insert(entry.id, entry.node);
+            }
+        }
+    }
+    let limit = document.k as usize + document.m as usize;
+    merge_inventory(sources, unread, limit, query, events).await;
+}
+
+/// The counts an inventory returns, built up version by version.
+#[derive(Default)]
+struct InventoryCounts {
+    versions_checked: u64,
+    whole: u64,
+    degraded_parity: u64,
+    degraded_data: u64,
+    unreadable: u64,
+    inconsistent: u64,
+}
+
+impl InventoryCounts {
+    fn note(&mut self, state: ObjectState) {
+        self.versions_checked += 1;
+        match state {
+            ObjectState::Whole => self.whole += 1,
+            ObjectState::DegradedParity => self.degraded_parity += 1,
+            ObjectState::DegradedData => self.degraded_data += 1,
+            ObjectState::Unreadable => self.unreadable += 1,
+            ObjectState::Inconsistent => self.inconsistent += 1,
+        }
+    }
+}
+
+/// A version's state (20.1.5) from which of its shards are out: none,
+/// only parity within m, some data within m, or more than m.
+fn object_state(record: &MetadataRecord, out: &[u8]) -> ObjectState {
+    if out.is_empty() {
+        ObjectState::Whole
+    } else if out.len() > record.m as usize {
+        ObjectState::Unreadable
+    } else if out.iter().any(|index| *index < record.k) {
+        ObjectState::DegradedData
+    } else {
+        ObjectState::DegradedParity
+    }
+}
+
+/// Merge the sources in (key hash, version) order and classify each
+/// version from its group (20.1.5). A stream that fails for any reason
+/// makes its device unread from that point, as the scrub does for an
+/// unavailable device (20.1.2.2); nothing stops the merge but a client
+/// that no longer reads. `unread` starts as the devices no stream could
+/// be opened for; `unread_limit` is k+m, the number of unread devices at
+/// which a version can leave no trace and the counts become a lower
+/// bound.
+async fn merge_inventory(
+    mut sources: Vec<RecordSource>,
+    mut unread: BTreeMap<DeviceId, NodeId>,
+    unread_limit: usize,
+    query: InventoryQuery,
+    events: tokio::sync::mpsc::Sender<InventoryEvent>,
+) {
+    let known: BTreeSet<DeviceId> = sources.iter().map(|s| s.device()).collect();
+    let mut counts = InventoryCounts::default();
+    let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
+    for source in sources.iter_mut() {
+        match source.next().await {
+            Ok(head) => heads.push(head),
+            Err(_) => {
+                unread.insert(source.device(), source.owner());
+                heads.push(None);
+            }
+        }
+    }
+    while let Some(smallest) = heads
+        .iter()
+        .flatten()
+        .map(|h| (h.record.key_hash, h.record.version))
+        .min()
+    {
+        let mut group: Vec<LocatedRecord> = Vec::new();
+        let mut present: BTreeMap<DeviceId, bool> = BTreeMap::new();
+        let mut taken: Vec<usize> = Vec::new();
+        for (index, head) in heads.iter_mut().enumerate() {
+            let matches = head
+                .as_ref()
+                .is_some_and(|h| (h.record.key_hash, h.record.version) == smallest);
+            if matches {
+                let item = head.take().expect("matched");
+                present.insert(item.device, item.shard_present);
+                group.push(LocatedRecord {
+                    device: item.device,
+                    record: item.record,
+                });
+                taken.push(index);
+            }
+        }
+        let unread_devices: BTreeSet<DeviceId> = unread.keys().copied().collect();
+        let (state, record, out) = classify_group(&group, &present, &unread_devices, &known);
+        counts.note(state);
+        if query.keys == Some(state) {
+            let total = record.k + record.m;
+            let event = InventoryEvent::Object {
+                key: record.key.clone(),
+                version: record.version,
+                state,
+                shards_available: total.saturating_sub(out),
+                shards_total: total,
+            };
+            if events.send(event).await.is_err() {
+                return;
+            }
+        }
+        if counts.versions_checked % PROGRESS_EVERY_VERSIONS == 0 {
+            let progress = InventoryEvent::Progress {
+                versions_checked: counts.versions_checked,
+            };
+            if events.send(progress).await.is_err() {
+                return;
+            }
+        }
+        for index in taken {
+            match sources[index].next().await {
+                Ok(head) => heads[index] = head,
+                Err(_) => {
+                    unread.insert(sources[index].device(), sources[index].owner());
+                    heads[index] = None;
+                }
+            }
+        }
+    }
+    let complete = unread.len() < unread_limit;
+    let unread = unread
+        .into_iter()
+        .map(|(device, node)| UnavailableDevice { device, node })
+        .collect();
+    let _ = events
+        .send(InventoryEvent::Summary {
+            versions_checked: counts.versions_checked,
+            whole: counts.whole,
+            degraded_parity: counts.degraded_parity,
+            degraded_data: counts.degraded_data,
+            unreadable: counts.unreadable,
+            inconsistent: counts.inconsistent,
+            unread,
+            complete,
+        })
+        .await;
+}
+
+/// One version's state from its group of record copies (20.1.5), with
+/// the record it was judged from and how many of its shards are out. A
+/// shard is out when its device is unread, when it is lost (a listed
+/// device with no stream and not unread: removed or gone from the
+/// document, 18.3), or when its device holds no file for it. Copies that
+/// do not agree, or a copy missing from a device that was read, make the
+/// version inconsistent; the shards of an inconsistent version are not
+/// judged, and the highest revision stands in for its record.
+fn classify_group(
+    group: &[LocatedRecord],
+    present: &BTreeMap<DeviceId, bool>,
+    unread: &BTreeSet<DeviceId>,
+    known: &BTreeSet<DeviceId>,
+) -> (ObjectState, MetadataRecord, u8) {
+    let current = group
+        .iter()
+        .max_by_key(|c| c.record.revision)
+        .expect("a group has at least one copy");
+    let key = current.record.key.clone();
+    let lost: BTreeSet<DeviceId> = current
+        .record
+        .shards
+        .iter()
+        .map(|s| s.device)
+        .filter(|device| !known.contains(device) && !unread.contains(device))
+        .collect();
+    let not_expected: BTreeSet<DeviceId> = unread.union(&lost).copied().collect();
+    match versions_of_excluding(&key, group.to_vec(), &not_expected) {
+        Ok(mut versions) if versions.len() == 1 => {
+            let record = versions.remove(0);
+            let out: Vec<u8> = record
+                .shards
+                .iter()
+                .filter(|shard| {
+                    not_expected.contains(&shard.device)
+                        || present.get(&shard.device) == Some(&false)
+                })
+                .map(|shard| shard.index)
+                .collect();
+            let state = object_state(&record, &out);
+            (state, record, out.len() as u8)
+        }
+        _ => (ObjectState::Inconsistent, current.record.clone(), 0),
+    }
+}
+
 /// The checks only the coordinator can make for one key: record copies
 /// complete and agreeing, and every listed device actually holding its
 /// shard file.
@@ -4909,6 +5172,152 @@ mod tests {
         assert!(matches!(
             shard_to_drain(device(2), &copy, &[newer]),
             Err(Failure::Error(ref d)) if d.message.contains("stale copy")
+        ));
+    }
+
+    async fn inventoried(
+        sources: Vec<RecordSource>,
+        unread: BTreeMap<DeviceId, NodeId>,
+        unread_limit: usize,
+        query: InventoryQuery,
+    ) -> Vec<InventoryEvent> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
+        let merge = tokio::spawn(async move {
+            merge_inventory(sources, unread, unread_limit, query, sender).await
+        });
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            events.push(event);
+        }
+        merge.await.expect("merge task");
+        events
+    }
+
+    /// SPEC 20.1.5: each version is classified from its copies and the
+    /// shards its read devices hold; a stream that fails makes its device
+    /// unread from then on, and the merge goes on; the summary counts
+    /// every state and names the unread device.
+    #[tokio::test]
+    async fn the_inventory_classifies_each_version_and_goes_around_a_failed_stream() {
+        // Six versions in hash order, whatever their key text; the roles
+        // are given by position so the streams stay in order.
+        let mut records: Vec<MetadataRecord> = (1..=6u8)
+            .map(|v| {
+                let mut r = record(v, 0, [1, 2]);
+                r.key = format!("key-{v}");
+                r.key_hash = hash_key(r.key.as_bytes());
+                r
+            })
+            .collect();
+        records.sort_by_key(|r| (r.key_hash, r.version));
+        // Data shard 0 on device 2 for the degraded-data case.
+        records[2].shards.swap(0, 1);
+        records[2].shards[0].index = 0;
+        records[2].shards[1].index = 1;
+        // Shard 1 on device 3, which has no stream: lost (18.3).
+        records[3].shards[1].device = device(3);
+        let r = &records;
+        // Device 1 holds every copy but the fifth's, and lacks the
+        // fourth's shard file.
+        let a = fixed_on(
+            node(1),
+            device(1),
+            vec![
+                Ok(streamed(1, &r[0], true)),
+                Ok(streamed(1, &r[1], true)),
+                Ok(streamed(1, &r[2], true)),
+                Ok(streamed(1, &r[3], false)),
+                Ok(streamed(1, &r[5], true)),
+            ],
+        );
+        // Device 2 lacks the shard files of the second and third, holds
+        // no copy of the fourth (not listed on it), and dies after the
+        // fifth.
+        let b = fixed_on(
+            node(2),
+            device(2),
+            vec![
+                Ok(streamed(2, &r[0], true)),
+                Ok(streamed(2, &r[1], false)),
+                Ok(streamed(2, &r[2], false)),
+                Ok(streamed(2, &r[4], true)),
+                Err(ErrorDetail::new(ErrorCode::NodeUnreachable, "gone")),
+            ],
+        );
+        let query = InventoryQuery {
+            keys: Some(ObjectState::DegradedParity),
+        };
+        let events = inventoried(vec![a, b], BTreeMap::new(), 2, query).await;
+        // The second (parity shard file missing on a read device) and the
+        // sixth (its parity shard on the device that died) are listed.
+        let listed: Vec<(&String, u8, u8)> = events
+            .iter()
+            .filter_map(|e| match e {
+                InventoryEvent::Object {
+                    key,
+                    state: ObjectState::DegradedParity,
+                    shards_available,
+                    shards_total,
+                    ..
+                } => Some((key, *shards_available, *shards_total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![(&r[1].key, 1, 2), (&r[5].key, 1, 2)],
+            "{events:?}"
+        );
+        let Some(InventoryEvent::Summary {
+            versions_checked,
+            whole,
+            degraded_parity,
+            degraded_data,
+            unreadable,
+            inconsistent,
+            unread,
+            complete,
+        }) = events.last()
+        else {
+            panic!("no summary: {events:?}");
+        };
+        assert_eq!(
+            (
+                *versions_checked,
+                *whole,
+                *degraded_parity,
+                *degraded_data,
+                *unreadable,
+                *inconsistent
+            ),
+            (6, 1, 2, 1, 1, 1)
+        );
+        assert_eq!(
+            unread,
+            &vec![UnavailableDevice {
+                device: device(2),
+                node: node(2),
+            }]
+        );
+        // One device unread of a 1+1 scheme: every version left a trace.
+        assert!(complete);
+        assert_eq!(events.len(), 3, "{events:?}");
+    }
+
+    /// SPEC 20.1.5: with k+m devices unread the counts are a lower bound.
+    #[tokio::test]
+    async fn the_inventory_is_incomplete_once_k_plus_m_devices_are_unread() {
+        let unread = BTreeMap::from([(device(2), node(2)), (device(3), node(3))]);
+        let a = fixed_on(node(1), device(1), vec![]);
+        let query = InventoryQuery { keys: None };
+        let events = inventoried(vec![a], unread, 2, query).await;
+        assert!(matches!(
+            events.as_slice(),
+            [InventoryEvent::Summary {
+                versions_checked: 0,
+                complete: false,
+                ..
+            }]
         ));
     }
 }

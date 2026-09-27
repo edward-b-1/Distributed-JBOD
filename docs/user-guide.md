@@ -456,6 +456,25 @@ successful repair run can exit 0 despite having found damage; incomplete
 scrubs and failed repairs exit 2. Inspect the events and run a subsequent
 scrub to confirm the result.
 
+### Inventory
+
+```sh
+djbod inventory
+djbod inventory --keys unreadable
+```
+
+Where a scrub reads every block and takes days, an inventory reads the
+records alone and takes minutes: with the devices that can be read
+*now*, it counts the objects that are whole, degraded with only parity
+shards out (reads unaffected), degraded with a data shard out (every
+read decodes), unreadable (more than m shards out), or inconsistent (the
+record copies disagree, which is the scrub's job to examine). A node
+that is down does not stop it: that node's devices are reported as
+unread, and the summary says whether every object could be seen, which
+holds while fewer than k+m devices are unread. `--keys <state>` lists
+the objects in that state, one per line with their shards available.
+The exit codes are the scrub's, with "not whole" in place of damage.
+
 At this revision, `djbod scrub --json` can emit finding events and still
 exit 0 when the scan completes. For alerts based on exit status, use the
 ordinary text command, which exits 2 on findings without `--repair`.
