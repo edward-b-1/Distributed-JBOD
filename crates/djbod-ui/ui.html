@@ -208,6 +208,7 @@
   .health .mark::before { margin: 0; }
   .health.bad .mark { background: var(--critical-soft); } .health.bad .mark::before { background: var(--critical); border-radius: .12em; }
   .health.warn .mark { background: var(--warning-soft); } .health.warn .mark::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .health.unk .mark { background: var(--line); } .health.unk .mark::before { background: var(--muted); border-radius: .12em; }
   .health .title { font-weight: 600; font-size: 15px; }
   .health .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
   .health .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -320,6 +321,7 @@
 
 <section id="tab-overview">
   <div id="health" role="status"></div>
+  <div id="object-health" role="status"></div>
   <div class="tiles" id="tiles"></div>
 </section>
 
@@ -364,6 +366,14 @@
       <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
       <button id="list-go" class="primary">List</button>
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
+      <label title="list only the objects in one state, as the inventory judges them now (djbod inventory --keys)">Health <select id="health-filter">
+        <option value="">all</option>
+        <option value="whole">whole</option>
+        <option value="degraded_parity">degraded, parity out</option>
+        <option value="degraded_data">degraded, data out</option>
+        <option value="unreadable">unreadable</option>
+        <option value="inconsistent">inconsistent</option>
+      </select></label>
     </div>
     <div class="filter-spacer"></div>
     <div class="list-column">
@@ -455,7 +465,10 @@ const PAGE_SIZE = 100;
 // The listing is paged through the node's own cursor (SPEC 15.2.1): page
 // n starts after the last key of page n-1, and `after` remembers each
 // page's starting key so Previous can go back the same way.
-const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null] }, selectedKey: null, failures: {} };
+const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null], mode: 'keys', total: null }, selectedKey: null, failures: {},
+  // The last inventory (SPEC 20.1.5): its summary and when it was taken.
+  // Computed on demand, since it is a pass over every record.
+  inventory: { running: false, checked: 0, summary: null, at: null } };
 
 // ------------------------------------------------------------ helpers
 
@@ -686,7 +699,7 @@ async function refresh() {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
-    renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
+    renderHeader(); renderBanners(); renderOverview(); renderObjectHealth(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
 // The health card: do all nodes hold the same configuration? Consistent
@@ -727,6 +740,81 @@ function renderHealth() {
     el('div', { class: 'mark', 'aria-hidden': 'true' }),
     el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
     el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+}
+// The object health card (SPEC 20.1.5, issue #218): every object counted
+// by how many of its shards can be read now, from records alone. Beside
+// the cluster health card: that one says whether the cluster is healthy,
+// this one whether the data is. Computed on demand, since it is one pass
+// over every record, and it says when it was last computed.
+const STATE_WORDS = { whole: 'whole', degraded_parity: 'degraded, parity out', degraded_data: 'degraded, data out', unreadable: 'unreadable', inconsistent: 'inconsistent' };
+function renderObjectHealth() {
+  const inv = state.inventory;
+  const s = inv.summary;
+  let cls = 'unk', title, sub;
+  const actions = [];
+  if (inv.running) {
+    title = 'Counting objects…';
+    sub = `${inv.checked.toLocaleString()} versions checked so far; records only, no shard is read.`;
+  } else if (!s) {
+    title = 'Object health not computed';
+    sub = 'Counts every object by how many of its shards can be read now, from records alone. One pass over every record; a minute or so at hundreds of thousands of objects.';
+    actions.push(['Compute →', runInventory]);
+  } else {
+    const degraded = s.degraded_parity + s.degraded_data;
+    const n = s.versions_checked;
+    if (s.unreadable > 0) {
+      cls = 'bad';
+      title = `${plural(s.unreadable, 'object')} unreadable`;
+      sub = `${s.whole.toLocaleString()} whole, ${degraded.toLocaleString()} degraded, ${s.inconsistent.toLocaleString()} inconsistent; fewer than k shards of each unreadable object can be reached until a device returns.`;
+      actions.push(['Unreadable keys →', () => showObjects('unreadable')]);
+    } else if (degraded > 0) {
+      cls = 'warn';
+      title = `${plural(degraded, 'object')} degraded`;
+      sub = `every object can be read; ${s.degraded_parity.toLocaleString()} with parity out (reads unaffected), ${s.degraded_data.toLocaleString()} with data out (every read decodes); ${s.whole.toLocaleString()} whole` + (s.inconsistent ? `, ${s.inconsistent.toLocaleString()} inconsistent.` : '.');
+      actions.push(['Degraded keys →', () => showObjects(s.degraded_data > 0 ? 'degraded_data' : 'degraded_parity')]);
+    } else if (s.inconsistent > 0) {
+      cls = 'warn';
+      title = `${plural(s.inconsistent, 'object')} inconsistent`;
+      sub = `${s.whole.toLocaleString()} whole; the record copies of the rest disagree or one is missing, which a scrub sorts out.`;
+      actions.push(['Inconsistent keys →', () => showObjects('inconsistent')]);
+    } else {
+      cls = 'ok';
+      title = `All ${plural(n, 'object')} whole`;
+      sub = 'every shard of every object is on a device that can be read.';
+    }
+    if (s.unread.length) {
+      const devices = s.unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
+      sub += s.complete
+        ? ` Counted around ${plural(s.unread.length, 'unread device')} (${devices}); complete, since fewer than k+m devices are out.`
+        : ` Counted around ${plural(s.unread.length, 'unread device')} (${devices}); incomplete: objects stored only on them leave no trace, so these counts are a lower bound.`;
+      if (!s.complete) cls = 'bad';
+    }
+    sub += ` Computed at ${inv.at.toLocaleTimeString()}.`;
+    actions.push(['Recompute', runInventory]);
+  }
+  $('object-health').replaceChildren(el('div', { class: 'health ' + cls },
+    el('div', { class: 'mark', 'aria-hidden': 'true' }),
+    el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
+    el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+}
+async function runInventory() {
+  const inv = state.inventory;
+  if (inv.running) return;
+  inv.running = true; inv.checked = 0; renderObjectHealth();
+  try {
+    await streamLines('/inventory', {}, (e) => {
+      if (e.event === 'progress') { inv.checked = e.versions_checked; renderObjectHealth(); }
+      else if (e.event === 'summary') { inv.summary = e; inv.at = new Date(); }
+    });
+  } catch (e) { fail('inventory', e); }
+  inv.running = false;
+  renderObjectHealth();
+}
+// From the card to the keys: the Objects page, filtered to one state.
+function showObjects(objectState) {
+  $('health-filter').value = objectState;
+  document.querySelector('nav [data-tab="objects"]').click();
+  list();
 }
 function renderHeader() {
   const { status, cluster } = state;
@@ -1011,9 +1099,15 @@ $('refresh').addEventListener('click', refresh);
 
 // ------------------------------------------------------------ objects
 
+// At most this many keys of one state are fetched for the page; the
+// inventory's count says how many there are in all.
+const STATE_LIST_LIMIT = 1000;
 async function list(page = 1) {
+  const objectState = $('health-filter').value;
+  if (objectState) return listByState(objectState);
   const prefix = $('prefix').value;
   const listing = state.listing;
+  listing.mode = 'keys'; listing.total = null;
   if (prefix !== listing.prefix || page === 1) { listing.prefix = prefix; listing.after = [null]; page = 1; }
   const startAfter = listing.after[page - 1];
   if (page > 1 && startAfter === undefined) return;
@@ -1029,20 +1123,69 @@ async function list(page = 1) {
     document.querySelector('.scroll').scrollTop = 0;
   } catch (e) { fail('list', e); }
 }
+// The objects in one state (djbod inventory --keys STATE): the inventory
+// streams every version in that state, so the page reads the first
+// STATE_LIST_LIMIT that match the prefix and stops the stream. The
+// summary at the end of a full run says how many there are in all.
+async function listByState(objectState) {
+  const prefix = $('prefix').value;
+  const listing = state.listing;
+  listing.mode = 'health'; listing.prefix = prefix; listing.page = 1; listing.after = [null];
+  listing.keys = []; listing.truncated = false; listing.unread = []; listing.complete = true; listing.total = null;
+  listing.objectState = objectState;
+  $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: `finding ${STATE_WORDS[objectState]} objects…` })));
+  try {
+    const response = await fetch('/api/inventory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys: objectState }) });
+    if (!response.ok) throw Object.assign(JSON.parse(await response.text()), { status: response.status });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '', stopped = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, cut); buffered = buffered.slice(cut + 1);
+        if (!line.trim()) continue;
+        const e = JSON.parse(line);
+        if (e.event === 'object') {
+          if (prefix && !e.key.startsWith(prefix)) continue;
+          if (listing.keys.length < STATE_LIST_LIMIT) listing.keys.push({ key: e.key, version: e.version, state: e.state, shards_available: e.shards_available, shards_total: e.shards_total });
+          else { listing.truncated = true; stopped = true; break; }
+        } else if (e.event === 'summary') {
+          listing.unread = e.unread || []; listing.complete = e.complete !== false;
+          listing.total = e[objectState];
+          state.inventory.summary = e; state.inventory.at = new Date(); renderObjectHealth();
+        }
+      }
+      if (stopped) { await reader.cancel(); break; }
+    }
+    renderListing();
+    document.querySelector('.scroll').scrollTop = 0;
+  } catch (e) { fail('list', e); }
+}
 function renderListing() {
-  const { keys, truncated } = state.listing;
+  const { keys, truncated, mode } = state.listing;
+  const health = mode === 'health';
+  const stateMark = (st) => st === 'whole' ? 'ok' : st === 'unreadable' || st === 'inconsistent' ? 'bad' : 'warn';
+  document.querySelector('#tab-objects thead th.num').textContent = health ? 'Shards' : 'Size';
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
+    el('td', {}, health ? el('span', { class: stateMark(k.state), title: STATE_WORDS[k.state] })
+      : state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
     el('td', { class: 'key', text: k.key }),
-    el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
-  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
-  const { page, after } = state.listing;
+    health ? el('td', { class: 'num', text: `${k.shards_available} of ${k.shards_total}`, title: `${k.shards_available} of ${k.shards_total} shards on devices that can be read` }) : el('td', { class: 'num', text: human(k.size) }),
+    el('td', { class: 'id', text: k.version }))));
+  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: health ? `no ${STATE_WORDS[state.listing.objectState]} objects` : 'no objects' })));
+  const { page, after, total } = state.listing;
   $('count-objects').textContent = keys.length ? `${keys.length}${truncated || page > 1 ? '+' : ''}` : '';
-  $('list-prev').disabled = page <= 1;
-  $('list-next').disabled = !truncated;
-  $('list-page').textContent = `Page ${page}`;
-  const cursor = after[page - 1];
-  $('list-count').textContent = `${plural(keys.length, 'key')} on this page`;
+  $('list-prev').disabled = health || page <= 1;
+  $('list-next').disabled = health || !truncated;
+  $('list-page').textContent = health ? `Filtered: ${STATE_WORDS[state.listing.objectState]}` : `Page ${page}`;
+  const cursor = health ? null : after[page - 1];
+  $('list-count').textContent = health
+    ? (truncated ? `first ${keys.length.toLocaleString()} shown` : `${plural(keys.length, 'key')}`) + (total !== null && total !== undefined ? ` of ${total.toLocaleString()} in this state` : '') + (state.listing.prefix ? ' under the prefix' : '')
+    : `${plural(keys.length, 'key')} on this page`;
   $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
   // The listing went around devices the cluster cannot read (SPEC 15.1):
   // complete while fewer than k+m are out, possibly short once that many are.
@@ -1053,7 +1196,8 @@ function renderListing() {
     : el('span', { class: 'bad' }, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
 }
 $('list-go').addEventListener('click', () => list());
-$('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
+$('list-clear').addEventListener('click', () => { $('prefix').value = ''; $('health-filter').value = ''; list(); });
+$('health-filter').addEventListener('change', () => list());
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
 $('list-prev').addEventListener('click', () => list(state.listing.page - 1));
 $('list-next').addEventListener('click', () => list(state.listing.page + 1));
