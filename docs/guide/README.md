@@ -65,8 +65,8 @@ runbook.
 | `scripts/djbod-pki.sh` | Creates the certificate authority and the node and client certificates used by [TLS](tls.md). |
 
 From a program, the same client operations are the `djbod-client` Rust
-crate and the `djbod` Python package. The Python package's own readme is
-`crates/djbod-python/README.md`.
+crate and the `djbod` Python package. The Python package's own readme,
+`crates/djbod-python/README.md`, says how to install it from a release.
 
 ## What this guide leaves to SPEC.md
 

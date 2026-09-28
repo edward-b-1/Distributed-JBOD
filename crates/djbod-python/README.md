@@ -27,6 +27,44 @@ memory. `Client(..., cluster="<uuid>")` names the cluster when it is
 known; `tls_ca`, `tls_cert` and `tls_key` take the same PEM files as the
 `djbod` command.
 
+## Installing
+
+The package is not on PyPI yet, so `pip install djbod` does not install
+it (and would install whatever else claims that name). Each
+[GitHub release](https://github.com/edward-b-1/Distributed-JBOD/releases)
+carries it as a wheel for Linux on x86_64 and on aarch64, for any glibc
+from 2.17 and every Python from 3.10, named for example
+`djbod-0.2.23-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl`.
+Install the one for your machine by its URL, into a virtual environment:
+
+```sh
+v=0.2.23
+arch=$(uname -m)        # x86_64 or aarch64
+python3 -m venv .venv
+.venv/bin/pip install "https://github.com/edward-b-1/Distributed-JBOD/releases/download/v$v/djbod-$v-cp310-abi3-manylinux_2_17_$arch.manylinux2014_$arch.whl"
+.venv/bin/python -c 'import djbod; print(djbod.__version__)'
+```
+
+`uv pip install` takes the same URL. To pin it in a project, name it in
+`requirements.txt`, or in `pyproject.toml`'s dependencies:
+
+```
+djbod @ https://github.com/edward-b-1/Distributed-JBOD/releases/download/v0.2.23/djbod-0.2.23-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl
+```
+
+To check the file first, download it and the release's `SHA256SUMS`,
+with the GitHub CLI or from the release page, and compare:
+
+```sh
+gh release download v$v --repo edward-b-1/Distributed-JBOD --pattern "djbod-$v-*$arch.whl" --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+.venv/bin/pip install ./djbod-$v-*$arch.whl
+```
+
+Use the release that matches your nodes: a new minor version may not
+work with the one before (SPEC 20.7.1), and its release notes say so. On macOS, Windows, musl-based
+Linux, or any release before 0.2.23, build it from the source as below.
+
 ## Building
 
 The package is built with [maturin](https://www.maturin.rs/) from this
