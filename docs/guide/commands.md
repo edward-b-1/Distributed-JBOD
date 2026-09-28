@@ -29,6 +29,14 @@ djbod [--bootstrap-node ADDR[,ADDR...]] [--cluster UUID] [--json]
 A flag wins over the environment variable. Exit codes for the whole
 tool are in [Day to day](day-to-day.md#exit-codes).
 
+Where a command names a device or a node, it uses the label when the
+document has one and the UUID when it does not. A line that records
+what was acted on, and an error, prints the label with the UUID in
+brackets: `nas1-bay0 (<uuid>)`. A place in a sentence, such as a moved
+shard, reads `node nas1 device nas1-bay0`. `status`, `contents`, and
+`cluster show` put the LABEL column first and the UUID in the next
+column.
+
 ### `status`
 
 Every device's state, free space, label, owning node, and that node's
@@ -118,7 +126,8 @@ headroom, the three size limits, transport, nodes, devices.
 Rebuild damaged or missing shards of one object from the intact ones,
 and rewrite a record copy that is missing once a bad record file is out
 of the way. Prints each shard's condition and whether it was rewritten
-or rebuilt onto another device, then `N shards rewritten`. Fails with
+or rebuilt onto another device, each named `node <name> device <name>`,
+then `N shards rewritten`. Fails with
 `NodeUnreachable` if any node does not answer. Fails with
 `DeviceUnavailable` while a disk that holds a shard is still a member
 and cannot be read: the replacement would be written back to that disk.
@@ -130,8 +139,9 @@ usable blocks, and changes nothing in that case. See
 
 Copy one shard to another device and publish a new record revision.
 `--to` is a device UUID or label. Without it, the destination is chosen
-like a write. Prints whether the shard was copied or rebuilt, and warns
-when the old copy could not be deleted.
+like a write. Prints both ends as `node <name> device <name>`, whether
+the shard was copied or rebuilt, and warns when the old copy could not
+be deleted.
 
 ### `scrub [--rate-mib N] [--repair]`
 
