@@ -93,10 +93,15 @@ else was also damaged). A node that does not answer does the same: the
 scrub names it, stops the cross-node checks, and exits 3 when it saw no
 damage. `--repair` does not rebuild a device's shards while it is still
 a member and cannot be read. After `remove-device --force`, a repair
-that has nowhere to put the rebuilt shard exits 2 and also prints
-`scrub incomplete: WriteFailed`. The last line of the human output
-states which of the four outcomes it was, and when a device was
-unchecked it is followed by how many versions have a shard there.
+that has nowhere to put the rebuilt shard exits 2. That is a finished
+run: the verdict line counts the repairs that failed, and the command
+does not add `scrub incomplete` for that ending. A run with `--repair`
+prints the shards-available count twice, `shards available before
+repair` and `shards available after repair`, so the two lines show what
+the repairs changed. A run without `--repair` prints it once, as
+`shards available`. The last line of the human output states which of
+the four outcomes it was, and when a device was unchecked it is followed
+by how many versions have a shard there.
 `--json` prints one event per line and the exit code carries the outcome.
 
 `djbod-node scrub`, the offline check of one machine, exits 0 when it

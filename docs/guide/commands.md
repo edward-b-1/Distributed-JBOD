@@ -140,10 +140,13 @@ Every node checks its own disks, then the cross-node checks run.
 the checks found damaged. It does not rebuild a device that is
 unavailable and still a member. A node that does not answer is named,
 the cross-node checks stop, and the exit code is 3 or 4. Exit codes are
-0, 2, 3, and 4, as in [Day to day](day-to-day.md#exit-codes). The human
-output ends with the outcome, then, when a device was unchecked, how
-many versions have a shard on it. `--json` is one event per line and
-the exit code is the only summary.
+0, 2, 3, and 4, as in [Day to day](day-to-day.md#exit-codes). A repair
+that fails is still a finished run: the verdict counts it, and the
+output does not say `scrub incomplete` for that ending. With `--repair`
+the shards-available count is printed before the repairs and again
+after them. The human output ends with the outcome, then, when a device
+was unchecked, how many versions have a shard on it. `--json` is one
+event per line and the exit code is the only summary.
 
 ### `cluster`
 

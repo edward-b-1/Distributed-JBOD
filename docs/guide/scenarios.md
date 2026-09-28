@@ -115,10 +115,11 @@ not already hold a shard of that object. With room, the line is
 `repaired <key>: 1 shard rewritten` (or `shards` when several were
 rewritten). A clean finish is exit 0 and `complete, everything found
 was repaired`. Without room the repair of that key fails with
-`InsufficientDevices`, the summary says some damage could not be
-repaired, and the command also prints `scrub incomplete: WriteFailed`.
-The exit code is 2. Add a device and run `scrub --repair` again; the
-removed device's shards are still the ones to rebuild.
+`InsufficientDevices`, and the summary says some damage could not be
+repaired. The exit code is 2. The same run prints `shards available
+before repair` and `shards available after repair`. Add a device and
+run `scrub --repair` again; the removed device's shards are still the
+ones to rebuild.
 
 Then:
 
