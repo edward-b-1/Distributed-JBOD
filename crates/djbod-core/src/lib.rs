@@ -38,4 +38,5 @@ pub mod record;
 pub mod scrub;
 pub mod shardfile;
 pub mod stripe;
+pub mod text;
 pub mod version;

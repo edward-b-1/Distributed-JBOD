@@ -17,7 +17,7 @@ use tokio::task::JoinSet;
 use xxhash_rust::xxh3::Xxh3;
 
 use djbod_core::checksum::{checksum_block, BlockChecksum};
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState};
 use djbod_core::erasure::{ReedSolomonCode, Scheme, ShardIndex};
 use djbod_core::keyhash::{hash_key, KeyHash};
 use djbod_core::record::{
@@ -26,12 +26,14 @@ use djbod_core::record::{
 };
 use djbod_core::shardfile::{shard_file_length, shard_geometry};
 use djbod_core::stripe::{decode_stripe, encode_stripe, DecodedStripe, FaultKind, ShardBlock};
+use djbod_core::text::counted;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    ClusterFinding, DataFrame, DeviceContents, DeviceRecord, DeviceStatus, DrainEvent, ErrorCode,
-    ErrorDetail, KeyEntry, ListQuery, LocatedRecord, LookupCursor, Message, MissingRecordCopy,
-    NodeStatus, Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response,
-    ScrubEvent, ScrubItem, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
+    ClusterFinding, DataFrame, DeviceContents, DeviceExposure, DeviceRecord, DeviceStatus,
+    DrainEvent, ErrorCode, ErrorDetail, InventoryEvent, InventoryQuery, KeyEntry, ListQuery,
+    LocatedRecord, LookupCursor, Message, MissingRecordCopy, NodeStatus, ObjectState,
+    Reconstruction, RecordCopyFault, RecordCursor, RepairReport, Request, Response, ScrubEvent,
+    ScrubItem, ShardAvailability, ShardCondition, ShardRepair, StreamEnd, UnavailableDevice,
 };
 
 use crate::local_ops::{respond, Failure};
@@ -55,6 +57,7 @@ pub fn is_client_operation(request: &Request) -> bool {
             | Request::MoveShard { .. }
             | Request::Scrub { .. }
             | Request::Drain { .. }
+            | Request::Inventory(_)
     )
 }
 
@@ -93,6 +96,7 @@ pub async fn handle(
             repair,
         } => scrub(node, id, writer, max_bytes_per_second, repair).await,
         Request::Drain { device, partial } => drain(node, id, writer, device, partial).await,
+        Request::Inventory(query) => inventory(node, id, writer, query).await,
         Request::GetObject { key } => get_object(node, id, writer, &key).await,
         Request::PutObject {
             key,
@@ -232,7 +236,7 @@ async fn broadcast_each(
 ) -> Result<Vec<(NodeId, Result<Response, Failure>)>, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         let request = request.clone();
@@ -287,7 +291,7 @@ struct Lookup {
 async fn lookup_reachable(node: &Arc<Node>, key_hash: KeyHash) -> Result<Lookup, Failure> {
     let document = node.document();
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         tasks.spawn(async move { (target, lookup_on(&node, target, key_hash).await) });
@@ -652,7 +656,8 @@ async fn newest_readable_version(
                 ..ErrorDetail::new(
                     code,
                     format!(
-                        "no copy of key {key:?} on the devices that could be read, and {out} device(s) could not be, enough to hold every copy of a version: {reason}"
+                        "no copy of key {key:?} on the devices that could be read, and {} not be, enough to hold every copy of a version: {reason}",
+                        counted(out, "device could", "devices could")
                     ),
                 )
             }));
@@ -774,6 +779,7 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
                 if let Response::LocalStatus { build, .. } = &response {
                     nodes.push(NodeStatus {
                         node: target,
+                        state: NodeState::Active,
                         reachable: true,
                         build: Some(build.clone()),
                         error: None,
@@ -791,16 +797,16 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
                 let unreachable = Unreachable::from_failure(target, failure);
                 nodes.push(NodeStatus {
                     node: target,
+                    state: NodeState::Active,
                     reachable: false,
                     build: None,
                     error: Some(unreachable.detail.message),
                 });
+                // Every device the document lists for the node, removed
+                // ones included (18.2.1): the status shows the whole
+                // document, and what to hide is the reader's choice.
                 let node_label = document.node(target).and_then(|n| n.label.clone());
-                for entry in document
-                    .devices
-                    .iter()
-                    .filter(|d| d.node == target && d.state != DeviceState::Removed)
-                {
+                for entry in document.devices.iter().filter(|d| d.node == target) {
                     devices.push(DeviceStatus {
                         device: entry.id,
                         node: target,
@@ -816,6 +822,34 @@ async fn status(node: &Arc<Node>) -> Result<Response, Failure> {
         }
     }
     devices.extend(device_statuses(node, answered)?);
+    // A removed node (6.2.2) is listed for the record, not asked, with
+    // its devices from the document; the reader decides whether to show
+    // them.
+    for entry in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == NodeState::Removed)
+    {
+        nodes.push(NodeStatus {
+            node: entry.id,
+            state: NodeState::Removed,
+            reachable: false,
+            build: None,
+            error: None,
+        });
+        for device in document.devices.iter().filter(|d| d.node == entry.id) {
+            devices.push(DeviceStatus {
+                device: device.id,
+                node: entry.id,
+                state: device.state,
+                available: false,
+                label: device.label.clone(),
+                node_label: entry.label.clone(),
+                total_bytes: 0,
+                free_bytes: 0,
+            });
+        }
+    }
     // Document order, whichever node answered first.
     let position = |id: DeviceId| document.devices.iter().position(|d| d.id == id);
     devices.sort_by_key(|d| position(d.device));
@@ -1482,8 +1516,8 @@ async fn get_object(
                     ..ErrorDetail::new(
                         ErrorCode::BlockChecksumMismatch,
                         format!(
-                            "{} damaged block(s) in stripe {stripe}, {usable} usable of {needed} needed; first: {:?}",
-                            faults.len(),
+                            "{} in stripe {stripe}, {usable} usable of {needed} needed; first: {:?}",
+                            counted(faults.len(), "damaged block", "damaged blocks"),
                             first.kind
                         ),
                     )
@@ -1628,8 +1662,8 @@ fn place(
             String::new()
         } else {
             format!(
-                "; {} active device(s) unavailable: {}",
-                unavailable.len(),
+                "; {} unavailable: {}",
+                counted(unavailable.len(), "active device", "active devices"),
                 unavailable.join(", ")
             )
         };
@@ -2421,8 +2455,8 @@ async fn repair_object(node: &Arc<Node>, key: &str) -> Result<Response, Failure>
                     ..ErrorDetail::new(
                         ErrorCode::BlockChecksumMismatch,
                         format!(
-                            "stripe {stripe} has {usable} usable blocks of {needed} needed; {} damaged shard(s): {:?}",
-                            faults.len(),
+                            "stripe {stripe} has {usable} usable blocks of {needed} needed; {}: {:?}",
+                            counted(faults.len(), "damaged shard", "damaged shards"),
                             faults.iter().map(|f| f.index.0).collect::<Vec<u8>>()
                         ),
                     )
@@ -2582,9 +2616,10 @@ async fn relocate_lost_shards(
             ..ErrorDetail::new(
                 ErrorCode::InsufficientDevices,
                 format!(
-                    "{} shard(s) are on devices no longer in the cluster, but only {} active device(s) with {shard_bytes} bytes free hold no shard of this version",
-                    lost.len(),
-                    ranked.len()
+                    "{} on devices no longer in the cluster, but only {} with {shard_bytes} bytes free {} no shard of this version",
+                    counted(lost.len(), "shard is", "shards are"),
+                    counted(ranked.len(), "active device", "active devices"),
+                    if ranked.len() == 1 { "holds" } else { "hold" }
                 ),
             )
         }));
@@ -3111,8 +3146,8 @@ async fn drain(
     .await?;
     let shortfall = if (active.len() as u64) < required_devices {
         Some(format!(
-            "{} active device(s), but every version needs {required_devices}; no version has a legal target",
-            active.len()
+            "{}, but every version needs {required_devices}; no version has a legal target",
+            counted(active.len(), "active device", "active devices")
         ))
     } else if target_free_bytes < shard_bytes {
         Some(format!(
@@ -3139,6 +3174,17 @@ async fn drain(
     let total = records.len();
     let mut skipped = 0usize;
     for record in &records {
+        // The shard file's size, from the record's own geometry, for the
+        // client's progress against the estimate.
+        let shard_bytes = if record.size == 0 {
+            0
+        } else {
+            record
+                .scheme()
+                .ok()
+                .and_then(|scheme| shard_file_length(scheme, record.block_size, record.size))
+                .unwrap_or(0)
+        };
         let event = match drain_one(node, device, record).await {
             Ok(DrainOutcome::Moved(moved)) => DrainEvent::Moved {
                 key: record.key.clone(),
@@ -3146,6 +3192,7 @@ async fn drain(
                 shard_index: moved.shard_index,
                 destination: moved.destination,
                 rebuilt: moved.rebuilt,
+                shard_bytes,
             },
             Ok(DrainOutcome::Deleted) => DrainEvent::Deleted {
                 key: record.key.clone(),
@@ -3181,7 +3228,8 @@ async fn drain(
             ..ErrorDetail::new(
                 ErrorCode::WriteFailed,
                 format!(
-                    "{skipped} of {total} version(s) could not be moved; the device stays draining and serves what it holds"
+                    "{skipped} of {} could not be moved; the device stays draining and serves what it holds",
+                    counted(total as usize, "version", "versions")
                 ),
             )
         })
@@ -3669,6 +3717,9 @@ async fn scrub(
     respond(writer, id, Ok(Response::ScrubStarted)).await?;
     let mut sequence: u64 = 0;
     let mut damaged_keys: BTreeSet<String> = std::collections::BTreeSet::new();
+    // Shards the nodes' own scrubs found damaged, for the availability
+    // count of the cross-node phase (20.1.2.2).
+    let mut damaged_shards: BTreeSet<(VersionId, u8)> = BTreeSet::new();
     let mut failed_nodes = 0usize;
     let mut finding_count = 0usize;
 
@@ -3677,7 +3728,7 @@ async fn scrub(
     let document = node.document();
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
     let mut tasks = JoinSet::new();
-    for entry in &document.nodes {
+    for entry in document.active_nodes() {
         let target = entry.id;
         let node = node.clone();
         let sender = sender.clone();
@@ -3706,6 +3757,21 @@ async fn scrub(
                 if let Some(key) = finding.repair_key() {
                     damaged_keys.insert(key.to_string());
                 }
+                match finding {
+                    djbod_core::scrub::Finding::ShardUnreadable {
+                        version,
+                        shard_index,
+                        ..
+                    }
+                    | djbod_core::scrub::Finding::ShardBlocksCorrupt {
+                        version,
+                        shard_index,
+                        ..
+                    } => {
+                        damaged_shards.insert((*version, *shard_index));
+                    }
+                    _ => {}
+                }
             }
             ScrubEvent::NodeFailed { .. } => failed_nodes += 1,
             _ => {}
@@ -3719,30 +3785,44 @@ async fn scrub(
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<ScrubEvent>(256);
     let merge = {
         let node = node.clone();
-        tokio::spawn(async move { cross_check(&node, sender).await })
+        tokio::spawn(async move { cross_check(&node, sender, damaged_shards).await })
     };
     while let Some(event) = receiver.recv().await {
         send_event(writer, id, &mut sequence, &event).await?;
     }
-    let outcome = merge.await.map_err(|join| {
+    let mut outcome = merge.await.map_err(|join| {
         error(
             ErrorCode::Internal,
             format!("cross-node check task failed: {join}"),
         )
     })?;
     finding_count += outcome.findings;
-    damaged_keys.extend(outcome.damaged_keys);
+    damaged_keys.extend(outcome.damaged_keys.iter().cloned());
     let check_stopped: Option<u64> = outcome.stopped_after;
+    // A repairing run reports the count twice, before and after the
+    // repairs, so the two lines show what the run changed (20.1.2.2).
+    if repair {
+        send_event(
+            writer,
+            id,
+            &mut sequence,
+            &outcome.availability_event(false),
+        )
+        .await?;
+    }
 
     // Phase 3: repairs, one per damaged key, from this one place.
     let mut repair_failures = 0usize;
     if repair {
         for key in &damaged_keys {
             let event = match repair_object(node, key).await {
-                Ok(Response::RepairObject(report)) => ScrubEvent::Repaired {
-                    key: key.clone(),
-                    report,
-                },
+                Ok(Response::RepairObject(report)) => {
+                    outcome.note_repaired(key);
+                    ScrubEvent::Repaired {
+                        key: key.clone(),
+                        report,
+                    }
+                }
                 Ok(other) => ScrubEvent::RepairFailed {
                     key: key.clone(),
                     detail: ErrorDetail::new(ErrorCode::Internal, format!("unexpected {other:?}")),
@@ -3759,24 +3839,36 @@ async fn scrub(
             send_event(writer, id, &mut sequence, &event).await?;
         }
     }
+    // Every version checked, by shards available, as the run leaves it
+    // (20.1.2.2): the only count without --repair, the second with it.
+    send_event(
+        writer,
+        id,
+        &mut sequence,
+        &outcome.availability_event(repair),
+    )
+    .await?;
 
     let end = if failed_nodes > 0 || check_stopped.is_some() {
         let checks = match check_stopped {
             Some(checked) => format!(
-                "the cross-node checks stopped after {checked} version(s), the rest unchecked"
+                "the cross-node checks stopped after {}, the rest unchecked",
+                counted(checked as usize, "version", "versions")
             ),
             None => "every version was checked".to_string(),
         };
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::NodeUnreachable,
             format!(
-                "{failed_nodes} node(s) could not be scrubbed; {checks}; {finding_count} finding(s) where checks ran"
+                "{} not be scrubbed; {checks}; {} where checks ran",
+                counted(failed_nodes, "node could", "nodes could"),
+                counted(finding_count, "finding", "findings")
             ),
         ))
     } else if repair_failures > 0 {
         StreamEnd::failed(ErrorDetail::new(
             ErrorCode::WriteFailed,
-            format!("{repair_failures} repair(s) failed"),
+            format!("{} failed", counted(repair_failures, "repair", "repairs")),
         ))
     } else {
         StreamEnd::ok()
@@ -3847,6 +3939,267 @@ async fn relay_local_scrub(
             }
             Err(e) => return Err(remote_failure(target, e)),
         }
+    }
+}
+
+// ------------------------------------------------------------ INVENTORY
+
+/// The inventory (SPEC 20.1.5): every version's state against the
+/// devices that can be read now, from the record streams alone, with no
+/// shard read. The merge is the cross-node scrub's (20.1.2.2) without
+/// its checks, and unlike the scrub it goes around a node it cannot
+/// reach: that node's devices are unread, which is what the inventory
+/// exists to describe.
+async fn inventory(
+    node: &Arc<Node>,
+    id: u32,
+    writer: &mut Writer,
+    query: InventoryQuery,
+) -> Result<(), Failure> {
+    respond(writer, id, Ok(Response::InventoryStarted)).await?;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<InventoryEvent>(256);
+    let merge = {
+        let node = node.clone();
+        tokio::spawn(async move { inventory_merge(&node, query, sender).await })
+    };
+    let mut sequence: u64 = 0;
+    while let Some(event) = receiver.recv().await {
+        send_event(writer, id, &mut sequence, &event).await?;
+    }
+    merge.await.map_err(|join| {
+        error(
+            ErrorCode::Internal,
+            format!("inventory task failed: {join}"),
+        )
+    })?;
+    write_message(
+        writer,
+        &Message::EndOfStream {
+            id,
+            end: StreamEnd::ok(),
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Open one record stream per device of every active node and merge
+/// them (20.1.5). A device that cannot be opened is unread from the
+/// start; its node may be down, or the device unavailable (5.6).
+async fn inventory_merge(
+    node: &Arc<Node>,
+    query: InventoryQuery,
+    events: tokio::sync::mpsc::Sender<InventoryEvent>,
+) {
+    let document = node.document();
+    let mut sources = Vec::new();
+    let mut unread: BTreeMap<DeviceId, NodeId> = BTreeMap::new();
+    for entry in document
+        .devices
+        .iter()
+        .filter(|d| d.state != DeviceState::Removed)
+    {
+        if !document
+            .node(entry.node)
+            .is_some_and(|n| n.state == NodeState::Active)
+        {
+            continue;
+        }
+        match DeviceStream::open(node, entry.node, entry.id).await {
+            Ok(stream) => sources.push(RecordSource::Device(Box::new(stream))),
+            Err(_) => {
+                unread.insert(entry.id, entry.node);
+            }
+        }
+    }
+    let limit = document.k as usize + document.m as usize;
+    merge_inventory(sources, unread, limit, query, events).await;
+}
+
+/// The counts an inventory returns, built up version by version.
+#[derive(Default)]
+struct InventoryCounts {
+    versions_checked: u64,
+    whole: u64,
+    degraded_parity: u64,
+    degraded_data: u64,
+    unreadable: u64,
+    inconsistent: u64,
+}
+
+impl InventoryCounts {
+    fn note(&mut self, state: ObjectState) {
+        self.versions_checked += 1;
+        match state {
+            ObjectState::Whole => self.whole += 1,
+            ObjectState::DegradedParity => self.degraded_parity += 1,
+            ObjectState::DegradedData => self.degraded_data += 1,
+            ObjectState::Unreadable => self.unreadable += 1,
+            ObjectState::Inconsistent => self.inconsistent += 1,
+        }
+    }
+}
+
+/// A version's state (20.1.5) from which of its shards are out: none,
+/// only parity within m, some data within m, or more than m.
+fn object_state(record: &MetadataRecord, out: &[u8]) -> ObjectState {
+    if out.is_empty() {
+        ObjectState::Whole
+    } else if out.len() > record.m as usize {
+        ObjectState::Unreadable
+    } else if out.iter().any(|index| *index < record.k) {
+        ObjectState::DegradedData
+    } else {
+        ObjectState::DegradedParity
+    }
+}
+
+/// Merge the sources in (key hash, version) order and classify each
+/// version from its group (20.1.5). A stream that fails for any reason
+/// makes its device unread from that point, as the scrub does for an
+/// unavailable device (20.1.2.2); nothing stops the merge but a client
+/// that no longer reads. `unread` starts as the devices no stream could
+/// be opened for; `unread_limit` is k+m, the number of unread devices at
+/// which a version can leave no trace and the counts become a lower
+/// bound.
+async fn merge_inventory(
+    mut sources: Vec<RecordSource>,
+    mut unread: BTreeMap<DeviceId, NodeId>,
+    unread_limit: usize,
+    query: InventoryQuery,
+    events: tokio::sync::mpsc::Sender<InventoryEvent>,
+) {
+    let known: BTreeSet<DeviceId> = sources.iter().map(|s| s.device()).collect();
+    let mut counts = InventoryCounts::default();
+    let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
+    for source in sources.iter_mut() {
+        match source.next().await {
+            Ok(head) => heads.push(head),
+            Err(_) => {
+                unread.insert(source.device(), source.owner());
+                heads.push(None);
+            }
+        }
+    }
+    while let Some(smallest) = heads
+        .iter()
+        .flatten()
+        .map(|h| (h.record.key_hash, h.record.version))
+        .min()
+    {
+        let mut group: Vec<LocatedRecord> = Vec::new();
+        let mut present: BTreeMap<DeviceId, bool> = BTreeMap::new();
+        let mut taken: Vec<usize> = Vec::new();
+        for (index, head) in heads.iter_mut().enumerate() {
+            let matches = head
+                .as_ref()
+                .is_some_and(|h| (h.record.key_hash, h.record.version) == smallest);
+            if matches {
+                let item = head.take().expect("matched");
+                present.insert(item.device, item.shard_present);
+                group.push(LocatedRecord {
+                    device: item.device,
+                    record: item.record,
+                });
+                taken.push(index);
+            }
+        }
+        let unread_devices: BTreeSet<DeviceId> = unread.keys().copied().collect();
+        let (state, record, out) = classify_group(&group, &present, &unread_devices, &known);
+        counts.note(state);
+        if query.keys == Some(state) {
+            let total = record.k + record.m;
+            let event = InventoryEvent::Object {
+                key: record.key.clone(),
+                version: record.version,
+                state,
+                shards_available: total.saturating_sub(out),
+                shards_total: total,
+            };
+            if events.send(event).await.is_err() {
+                return;
+            }
+        }
+        if counts.versions_checked % PROGRESS_EVERY_VERSIONS == 0 {
+            let progress = InventoryEvent::Progress {
+                versions_checked: counts.versions_checked,
+            };
+            if events.send(progress).await.is_err() {
+                return;
+            }
+        }
+        for index in taken {
+            match sources[index].next().await {
+                Ok(head) => heads[index] = head,
+                Err(_) => {
+                    unread.insert(sources[index].device(), sources[index].owner());
+                    heads[index] = None;
+                }
+            }
+        }
+    }
+    let complete = unread.len() < unread_limit;
+    let unread = unread
+        .into_iter()
+        .map(|(device, node)| UnavailableDevice { device, node })
+        .collect();
+    let _ = events
+        .send(InventoryEvent::Summary {
+            versions_checked: counts.versions_checked,
+            whole: counts.whole,
+            degraded_parity: counts.degraded_parity,
+            degraded_data: counts.degraded_data,
+            unreadable: counts.unreadable,
+            inconsistent: counts.inconsistent,
+            unread,
+            complete,
+        })
+        .await;
+}
+
+/// One version's state from its group of record copies (20.1.5), with
+/// the record it was judged from and how many of its shards are out. A
+/// shard is out when its device is unread, when it is lost (a listed
+/// device with no stream and not unread: removed or gone from the
+/// document, 18.3), or when its device holds no file for it. Copies that
+/// do not agree, or a copy missing from a device that was read, make the
+/// version inconsistent; the shards of an inconsistent version are not
+/// judged, and the highest revision stands in for its record.
+fn classify_group(
+    group: &[LocatedRecord],
+    present: &BTreeMap<DeviceId, bool>,
+    unread: &BTreeSet<DeviceId>,
+    known: &BTreeSet<DeviceId>,
+) -> (ObjectState, MetadataRecord, u8) {
+    let current = group
+        .iter()
+        .max_by_key(|c| c.record.revision)
+        .expect("a group has at least one copy");
+    let key = current.record.key.clone();
+    let lost: BTreeSet<DeviceId> = current
+        .record
+        .shards
+        .iter()
+        .map(|s| s.device)
+        .filter(|device| !known.contains(device) && !unread.contains(device))
+        .collect();
+    let not_expected: BTreeSet<DeviceId> = unread.union(&lost).copied().collect();
+    match versions_of_excluding(&key, group.to_vec(), &not_expected) {
+        Ok(mut versions) if versions.len() == 1 => {
+            let record = versions.remove(0);
+            let out: Vec<u8> = record
+                .shards
+                .iter()
+                .filter(|shard| {
+                    not_expected.contains(&shard.device)
+                        || present.get(&shard.device) == Some(&false)
+                })
+                .map(|shard| shard.index)
+                .collect();
+            let state = object_state(&record, &out);
+            (state, record, out.len() as u8)
+        }
+        _ => (ObjectState::Inconsistent, current.record.clone(), 0),
     }
 }
 
@@ -3992,6 +4345,116 @@ struct CrossCheckOutcome {
     versions_checked: u64,
     /// `Some(n)` when a stream failed after `n` versions were checked.
     stopped_after: Option<u64>,
+    exposure: Exposure,
+    /// Versions by (shards total, shards available, k).
+    availability: BTreeMap<(u8, u8, u8), u64>,
+    /// The bucket of each version counted with a shard unavailable, by
+    /// key, so that a repair can move it to whole.
+    damaged_availability: BTreeMap<String, (u8, u8, u8)>,
+}
+
+impl CrossCheckOutcome {
+    /// A repair of `key` succeeded: every shard the record lists is in
+    /// place, so the version is whole.
+    fn note_repaired(&mut self, key: &str) {
+        let Some(bucket) = self.damaged_availability.remove(key) else {
+            return;
+        };
+        if let Some(count) = self.availability.get_mut(&bucket) {
+            *count -= 1;
+            if *count == 0 {
+                self.availability.remove(&bucket);
+            }
+        }
+        let (total, _, k) = bucket;
+        *self.availability.entry((total, total, k)).or_default() += 1;
+    }
+
+    /// The count of every version checked by its shards available, for
+    /// the end of the run (20.1.2.2). Whole versions first.
+    fn availability_event(&self, after_repair: bool) -> ScrubEvent {
+        let mut versions: Vec<ShardAvailability> = self
+            .availability
+            .iter()
+            .map(|((total, available, k), count)| ShardAvailability {
+                shards_total: *total,
+                shards_available: *available,
+                k: *k,
+                versions: *count,
+            })
+            .collect();
+        versions.sort_by_key(|v| (v.shards_total, std::cmp::Reverse(v.shards_available)));
+        ScrubEvent::CrossCheckAvailability {
+            versions_checked: self.versions_checked,
+            versions,
+            after_repair,
+        }
+    }
+}
+
+/// How many of one version's shards are available, and of how many.
+struct ShardCount {
+    total: u8,
+    available: u8,
+    k: u8,
+}
+
+/// What the devices the merge could not read (5.6) cost, counted from
+/// the records of every version checked (20.1.2.2): not damage, since
+/// nothing is known to be wrong with a shard on such a device, but the
+/// versions that can be read only by going around it, or not at all.
+#[derive(Default)]
+struct Exposure {
+    /// Checked versions with a shard on each unread device.
+    by_device: BTreeMap<DeviceId, u64>,
+    /// Versions with at least one shard on an unread device.
+    with_shards_out: u64,
+    /// Of those, with exactly m out: one further loss makes them unreadable.
+    at_the_limit: u64,
+    /// With more than m out: unreadable until a device returns.
+    unreadable: u64,
+}
+
+impl Exposure {
+    /// Count one version from its record and the devices not read.
+    fn note(&mut self, record: &MetadataRecord, unread: &BTreeSet<DeviceId>) {
+        let mut out = 0usize;
+        for shard in &record.shards {
+            if unread.contains(&shard.device) {
+                out += 1;
+                *self.by_device.entry(shard.device).or_default() += 1;
+            }
+        }
+        if out == 0 {
+            return;
+        }
+        self.with_shards_out += 1;
+        if out == record.m as usize {
+            self.at_the_limit += 1;
+        } else if out > record.m as usize {
+            self.unreadable += 1;
+        }
+    }
+
+    /// The event for the end of the phase, when any device was unread.
+    fn event(&self, unread: &BTreeSet<DeviceId>, versions_checked: u64) -> Option<ScrubEvent> {
+        if unread.is_empty() {
+            return None;
+        }
+        Some(ScrubEvent::CrossCheckExposure {
+            unread: unread
+                .iter()
+                .map(|device| DeviceExposure {
+                    device: *device,
+                    versions: self.by_device.get(device).copied().unwrap_or(0),
+                })
+                .collect(),
+            versions_checked,
+            versions_with_shards_out: self.with_shards_out,
+            versions_at_the_limit: self.at_the_limit,
+            versions_unreadable: self.unreadable,
+        })
+    }
 }
 
 /// How often the merge reports where it is (20.1.2.2).
@@ -4002,6 +4465,7 @@ const PROGRESS_EVERY_VERSIONS: u64 = 10_000;
 async fn cross_check(
     node: &Arc<Node>,
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
+    damaged_shards: BTreeSet<(VersionId, u8)>,
 ) -> CrossCheckOutcome {
     let document = node.document();
     let mut sources = Vec::new();
@@ -4024,7 +4488,7 @@ async fn cross_check(
             }
         }
     }
-    merge_sources(sources, events).await
+    merge_sources(sources, events, &damaged_shards).await
 }
 
 /// Merge the sources in (key hash, version) order; each group of equal
@@ -4034,6 +4498,7 @@ async fn cross_check(
 async fn merge_sources(
     mut sources: Vec<RecordSource>,
     events: tokio::sync::mpsc::Sender<ScrubEvent>,
+    damaged_shards: &BTreeSet<(VersionId, u8)>,
 ) -> CrossCheckOutcome {
     let mut outcome = CrossCheckOutcome::default();
     // Record streams that failed because their device could not be read
@@ -4043,6 +4508,10 @@ async fn merge_sources(
     // that fails part way joins the set at that point; the groups before
     // it were checked with its copies present.
     let mut unread: BTreeSet<DeviceId> = BTreeSet::new();
+    // The devices with a stream: a listed device outside this set, and
+    // not unread, is removed or gone from the document, and a shard the
+    // record places on it is lost (18.3), not a copy that went missing.
+    let known: BTreeSet<DeviceId> = sources.iter().map(|s| s.device()).collect();
     let mut heads: Vec<Option<StreamedRecord>> = Vec::with_capacity(sources.len());
     for source in sources.iter_mut() {
         match source.next().await {
@@ -4065,6 +4534,9 @@ async fn merge_sources(
             .map(|h| (h.record.key_hash, h.record.version))
             .min()
         else {
+            if let Some(exposure) = outcome.exposure.event(&unread, outcome.versions_checked) {
+                let _ = events.send(exposure).await;
+            }
             return outcome;
         };
         let mut group: Vec<LocatedRecord> = Vec::new();
@@ -4084,7 +4556,23 @@ async fn merge_sources(
                 taken.push(index);
             }
         }
-        for finding in check_group(group, &present, &unread) {
+        // What the unread devices cost this version (5.6), from the copy
+        // at the highest revision, whatever the checks below conclude.
+        if let Some(current) = group.iter().max_by_key(|c| c.record.revision) {
+            outcome.exposure.note(&current.record, &unread);
+        }
+        let key = group.first().map(|c| c.record.key.clone());
+        let (findings, shards) = check_group(group, &present, &unread, &known, damaged_shards);
+        if let Some(shards) = shards {
+            let bucket = (shards.total, shards.available, shards.k);
+            *outcome.availability.entry(bucket).or_default() += 1;
+            if shards.available < shards.total {
+                if let Some(key) = key {
+                    outcome.damaged_availability.insert(key, bucket);
+                }
+            }
+        }
+        for finding in findings {
             outcome.findings += 1;
             outcome
                 .damaged_keys
@@ -4117,6 +4605,12 @@ async fn merge_sources(
                 Err(failure) => {
                     let unreachable = Unreachable::from_failure(sources[index].owner(), failure);
                     stop(&events, &mut outcome, unreachable).await;
+                    // What was counted before the stop still stands.
+                    if let Some(exposure) =
+                        outcome.exposure.event(&unread, outcome.versions_checked)
+                    {
+                        let _ = events.send(exposure).await;
+                    }
                     return outcome;
                 }
             }
@@ -4142,18 +4636,38 @@ async fn stop(
 
 /// The checks for one version from its copies (20.1.2.2): that the
 /// copies of the current revision exist and agree, that no stale copy
-/// remains, and that every listed device also has the shard file.
+/// remains, that every listed device also has the shard file, and that
+/// no shard sits on a device the cluster has given up (18.2.1, 18.3).
+/// Also how many of the version's shards are available, counting a
+/// shard on an unread or lost device, a missing file, or one the node's
+/// own scrub found damaged as not; `None` when the copies could not be
+/// trusted, since then the version's shards are not known.
 fn check_group(
     group: Vec<LocatedRecord>,
     present: &BTreeMap<DeviceId, bool>,
     unread: &BTreeSet<DeviceId>,
-) -> Vec<ClusterFinding> {
+    known: &BTreeSet<DeviceId>,
+    damaged_shards: &BTreeSet<(VersionId, u8)>,
+) -> (Vec<ClusterFinding>, Option<ShardCount>) {
     let mut findings = Vec::new();
     let Some(first) = group.first() else {
-        return findings;
+        return (findings, None);
     };
     let key = first.record.key.clone();
-    let versions = match versions_of_excluding(&key, group.clone(), unread) {
+    // A listed device with no copy here, no stream, and not unread is
+    // removed or gone from the document: its shard is lost, which is a
+    // finding of its own below, not a copy count that came up short.
+    let lost: BTreeSet<DeviceId> = group
+        .iter()
+        .flat_map(|copy| copy.record.shards.iter().map(|s| s.device))
+        .filter(|device| {
+            !known.contains(device)
+                && !unread.contains(device)
+                && !group.iter().any(|copy| copy.device == *device)
+        })
+        .collect();
+    let not_expected: BTreeSet<DeviceId> = unread.union(&lost).copied().collect();
+    let versions = match versions_of_excluding(&key, group.clone(), &not_expected) {
         Ok(versions) => versions,
         Err(Failure::Error(detail)) => {
             findings.push(ClusterFinding::RecordsInconsistent {
@@ -4161,10 +4675,29 @@ fn check_group(
                 version: detail.version,
                 detail: detail.message,
             });
-            return findings;
+            return (findings, None);
         }
-        Err(_) => return findings,
+        Err(_) => return (findings, None),
     };
+    // The group is one version, so this is its one trusted record.
+    let shards = versions.first().map(|record| {
+        let unavailable = record
+            .shards
+            .iter()
+            .filter(|shard| {
+                lost.contains(&shard.device)
+                    || unread.contains(&shard.device)
+                    || present.get(&shard.device) == Some(&false)
+                    || damaged_shards.contains(&(record.version, shard.index))
+            })
+            .count();
+        let total = record.k + record.m;
+        ShardCount {
+            total,
+            available: total.saturating_sub(unavailable as u8),
+            k: record.k,
+        }
+    });
     for record in &versions {
         for (device, revision) in stale_copies(record, &group) {
             findings.push(ClusterFinding::StaleCopy {
@@ -4177,15 +4710,20 @@ fn check_group(
         }
     }
     for record in versions {
-        if record.size == 0 {
-            continue;
-        }
         for shard in &record.shards {
-            // A device the document no longer lists has no stream, so its
-            // copy is absent and the version is already inconsistent
-            // above; here every listed device has a copy, and the
-            // question is only whether it also has the shard file.
-            if present.get(&shard.device) == Some(&false) {
+            if lost.contains(&shard.device) {
+                findings.push(ClusterFinding::ShardLost {
+                    key: key.clone(),
+                    version: record.version,
+                    device: shard.device,
+                    shard_index: shard.index,
+                });
+                continue;
+            }
+            // Every other listed device has a copy or is unread; the
+            // question is only whether it also has the shard file, which
+            // an empty object never has.
+            if record.size > 0 && present.get(&shard.device) == Some(&false) {
                 findings.push(ClusterFinding::ShardMissingOnDevice {
                     key: key.clone(),
                     version: record.version,
@@ -4195,13 +4733,14 @@ fn check_group(
             }
         }
     }
-    findings
+    (findings, shards)
 }
 
 fn finding_key(finding: &ClusterFinding) -> &str {
     match finding {
         ClusterFinding::RecordsInconsistent { key, .. }
         | ClusterFinding::ShardMissingOnDevice { key, .. }
+        | ClusterFinding::ShardLost { key, .. }
         | ClusterFinding::StaleCopy { key, .. } => key,
     }
 }
@@ -4304,7 +4843,7 @@ mod tests {
             Err(Failure::Error(detail)) => {
                 assert_eq!(detail.code, ErrorCode::InsufficientDevices);
                 assert!(
-                    detail.message.contains("1 active device(s) unavailable"),
+                    detail.message.contains("1 active device unavailable"),
                     "{}",
                     detail.message
                 );
@@ -4320,9 +4859,20 @@ mod tests {
     }
 
     fn fixed(owner: NodeId, items: Vec<Result<StreamedRecord, ErrorDetail>>) -> RecordSource {
+        fixed_on(owner, DeviceId(Uuid::nil()), items)
+    }
+
+    /// A source that stands for `device`'s stream, so that a copy the
+    /// device should have had and does not is a copy gone missing, not a
+    /// device gone from the document.
+    fn fixed_on(
+        owner: NodeId,
+        device: DeviceId,
+        items: Vec<Result<StreamedRecord, ErrorDetail>>,
+    ) -> RecordSource {
         RecordSource::Fixed {
             owner,
-            device: DeviceId(Uuid::nil()),
+            device,
             items: items.into(),
         }
     }
@@ -4348,6 +4898,92 @@ mod tests {
         assert_eq!(outcome.versions_checked, 1, "{events:?}");
         assert_eq!(outcome.stopped_after, None, "{events:?}");
         assert_eq!(outcome.findings, 0, "{events:?}");
+        // Not damage, but exposure, reported once at the end: the one
+        // version has its shard on device 2, which is m = 1 out, so it is
+        // readable and one further loss away from not being; the count
+        // by shards available says the same: 1 of 2, at k = 1.
+        assert_eq!(
+            events,
+            vec![ScrubEvent::CrossCheckExposure {
+                unread: vec![DeviceExposure {
+                    device: device(2),
+                    versions: 1,
+                }],
+                versions_checked: 1,
+                versions_with_shards_out: 1,
+                versions_at_the_limit: 1,
+                versions_unreadable: 0,
+            }]
+        );
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((2, 1, 1), 1)]),
+            "{:?}",
+            outcome.availability
+        );
+        assert_eq!(
+            outcome.availability_event(false),
+            ScrubEvent::CrossCheckAvailability {
+                versions_checked: 1,
+                versions: vec![ShardAvailability {
+                    shards_total: 2,
+                    shards_available: 1,
+                    k: 1,
+                    versions: 1,
+                }],
+                after_repair: false,
+            }
+        );
+    }
+
+    /// A repaired version is whole: its bucket moves to all shards
+    /// available, and one that failed to repair stays where it was.
+    #[test]
+    fn a_repair_moves_the_version_to_whole() {
+        let mut outcome = CrossCheckOutcome {
+            availability: BTreeMap::from([((3, 2, 2), 2), ((3, 3, 2), 5)]),
+            damaged_availability: BTreeMap::from([
+                ("a".to_string(), (3, 2, 2)),
+                ("b".to_string(), (3, 2, 2)),
+            ]),
+            ..CrossCheckOutcome::default()
+        };
+        outcome.note_repaired("a");
+        outcome.note_repaired("never damaged");
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((3, 2, 2), 1), ((3, 3, 2), 6)])
+        );
+        assert_eq!(outcome.damaged_availability.len(), 1);
+        outcome.note_repaired("b");
+        assert_eq!(outcome.availability, BTreeMap::from([((3, 3, 2), 7)]));
+        assert!(matches!(
+            outcome.availability_event(true),
+            ScrubEvent::CrossCheckAvailability {
+                after_repair: true,
+                ..
+            }
+        ));
+    }
+
+    /// The exposure counts by how many of a version's shards are on
+    /// unread devices against its m: none, within m, at m, beyond m.
+    #[test]
+    fn exposure_classifies_a_version_by_shards_out_against_m() {
+        let mut exposure = Exposure::default();
+        let unread: BTreeSet<DeviceId> = [device(2), device(3)].into_iter().collect();
+        // k = 1, m = 1 on devices 1 and 2: one out is at the limit.
+        exposure.note(&record(1, 0, [1, 2]), &unread);
+        // Devices 1 and 4: nothing out.
+        exposure.note(&record(2, 0, [1, 4]), &unread);
+        // Devices 2 and 3: two out of m = 1, unreadable.
+        exposure.note(&record(3, 0, [2, 3]), &unread);
+        assert_eq!(exposure.with_shards_out, 2);
+        assert_eq!(exposure.at_the_limit, 1);
+        assert_eq!(exposure.unreadable, 1);
+        assert_eq!(exposure.by_device.get(&device(2)), Some(&2));
+        assert_eq!(exposure.by_device.get(&device(3)), Some(&1));
+        assert!(exposure.event(&BTreeSet::new(), 3).is_none());
     }
 
     /// Run a merge over fixed sources and collect its events. The
@@ -4356,7 +4992,8 @@ mod tests {
     /// sends more events than the buffer holds.
     async fn merged(sources: Vec<RecordSource>) -> (CrossCheckOutcome, Vec<ScrubEvent>) {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
-        let merge = tokio::spawn(merge_sources(sources, sender));
+        let merge =
+            tokio::spawn(async move { merge_sources(sources, sender, &BTreeSet::new()).await });
         let mut events = Vec::new();
         while let Some(event) = receiver.recv().await {
             events.push(event);
@@ -4416,36 +5053,59 @@ mod tests {
                 if *n == node(2)
         ));
         assert_eq!(events.len(), 2, "{events:?}");
+        // The intact version has both shards; the one missing a shard
+        // file has one of two, and is remembered for a repair to mend.
+        assert_eq!(
+            outcome.availability,
+            BTreeMap::from([((2, 2, 1), 1), ((2, 1, 1), 1)])
+        );
+        assert_eq!(
+            outcome.damaged_availability.keys().collect::<Vec<_>>(),
+            vec![&missing.key]
+        );
     }
 
-    /// A copy missing on one device is fewer than the record lists, and
-    /// so is a copy on a device the document no longer has, since that
-    /// device has no stream; a run over clean copies reports progress and
-    /// nothing else.
+    /// A copy missing on a device that has a stream is fewer than the
+    /// record lists; a shard placed on a device with no stream, removed
+    /// or gone from the document, is lost (18.3), one finding per shard;
+    /// a run over clean copies reports progress and nothing else.
     #[tokio::test]
-    async fn the_merge_reports_inconsistent_copies_unlisted_devices_and_progress() {
+    async fn the_merge_reports_inconsistent_copies_lost_shards_and_progress() {
         let only_on_one = record(1, 0, [1, 2]);
         let mut on_gone_device = record(2, 0, [1, 3]);
         on_gone_device.key = "gone".to_string();
         on_gone_device.key_hash = hash_key(b"gone");
-        let a = fixed(
+        let a = fixed_on(
             node(1),
+            device(1),
             vec![
                 Ok(streamed(1, &only_on_one, true)),
                 Ok(streamed(1, &on_gone_device, true)),
             ],
         );
-        let b = fixed(node(2), vec![]);
+        let b = fixed_on(node(2), device(2), vec![]);
         let (outcome, events) = merged(vec![a, b]).await;
         assert_eq!(outcome.versions_checked, 2);
         assert_eq!(outcome.stopped_after, None);
-        assert!(events.iter().any(|e| matches!(e,
-            ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, .. }) if key == "k")));
+        assert_eq!(outcome.findings, 2, "{events:?}");
         assert!(
             events.iter().any(|e| matches!(e,
             ScrubEvent::ClusterFinding(ClusterFinding::RecordsInconsistent { key, detail, .. })
-                if key == "gone" && detail.contains("1 record copies found, 2 expected"))),
+                if key == "k" && detail.contains("1 record copies found, 2 expected"))),
             "{events:?}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e,
+            ScrubEvent::ClusterFinding(ClusterFinding::ShardLost { key, device: d, shard_index: 1, .. })
+                if key == "gone" && *d == device(3))),
+            "{events:?}"
+        );
+        // The inconsistent version's shards are not known and not counted;
+        // the lost shard leaves the other version with 1 of 2.
+        assert_eq!(outcome.availability, BTreeMap::from([((2, 1, 1), 1)]));
+        assert_eq!(
+            outcome.damaged_availability,
+            BTreeMap::from([("gone".to_string(), (2, 1, 1))])
         );
 
         // Progress: two clean streams of PROGRESS_EVERY_VERSIONS + 1 versions.
@@ -4470,9 +5130,10 @@ mod tests {
                 events.as_slice(),
                 [ScrubEvent::CrossCheckProgress { versions_checked, .. }] if *versions_checked == PROGRESS_EVERY_VERSIONS
             ),
-            "{} event(s)",
-            events.len()
+            "{events:?}"
         );
+        assert_eq!(outcome.availability, BTreeMap::from([((2, 2, 1), count)]));
+        assert!(outcome.damaged_availability.is_empty());
     }
 
     #[test]
@@ -4511,6 +5172,152 @@ mod tests {
         assert!(matches!(
             shard_to_drain(device(2), &copy, &[newer]),
             Err(Failure::Error(ref d)) if d.message.contains("stale copy")
+        ));
+    }
+
+    async fn inventoried(
+        sources: Vec<RecordSource>,
+        unread: BTreeMap<DeviceId, NodeId>,
+        unread_limit: usize,
+        query: InventoryQuery,
+    ) -> Vec<InventoryEvent> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(256);
+        let merge = tokio::spawn(async move {
+            merge_inventory(sources, unread, unread_limit, query, sender).await
+        });
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            events.push(event);
+        }
+        merge.await.expect("merge task");
+        events
+    }
+
+    /// SPEC 20.1.5: each version is classified from its copies and the
+    /// shards its read devices hold; a stream that fails makes its device
+    /// unread from then on, and the merge goes on; the summary counts
+    /// every state and names the unread device.
+    #[tokio::test]
+    async fn the_inventory_classifies_each_version_and_goes_around_a_failed_stream() {
+        // Six versions in hash order, whatever their key text; the roles
+        // are given by position so the streams stay in order.
+        let mut records: Vec<MetadataRecord> = (1..=6u8)
+            .map(|v| {
+                let mut r = record(v, 0, [1, 2]);
+                r.key = format!("key-{v}");
+                r.key_hash = hash_key(r.key.as_bytes());
+                r
+            })
+            .collect();
+        records.sort_by_key(|r| (r.key_hash, r.version));
+        // Data shard 0 on device 2 for the degraded-data case.
+        records[2].shards.swap(0, 1);
+        records[2].shards[0].index = 0;
+        records[2].shards[1].index = 1;
+        // Shard 1 on device 3, which has no stream: lost (18.3).
+        records[3].shards[1].device = device(3);
+        let r = &records;
+        // Device 1 holds every copy but the fifth's, and lacks the
+        // fourth's shard file.
+        let a = fixed_on(
+            node(1),
+            device(1),
+            vec![
+                Ok(streamed(1, &r[0], true)),
+                Ok(streamed(1, &r[1], true)),
+                Ok(streamed(1, &r[2], true)),
+                Ok(streamed(1, &r[3], false)),
+                Ok(streamed(1, &r[5], true)),
+            ],
+        );
+        // Device 2 lacks the shard files of the second and third, holds
+        // no copy of the fourth (not listed on it), and dies after the
+        // fifth.
+        let b = fixed_on(
+            node(2),
+            device(2),
+            vec![
+                Ok(streamed(2, &r[0], true)),
+                Ok(streamed(2, &r[1], false)),
+                Ok(streamed(2, &r[2], false)),
+                Ok(streamed(2, &r[4], true)),
+                Err(ErrorDetail::new(ErrorCode::NodeUnreachable, "gone")),
+            ],
+        );
+        let query = InventoryQuery {
+            keys: Some(ObjectState::DegradedParity),
+        };
+        let events = inventoried(vec![a, b], BTreeMap::new(), 2, query).await;
+        // The second (parity shard file missing on a read device) and the
+        // sixth (its parity shard on the device that died) are listed.
+        let listed: Vec<(&String, u8, u8)> = events
+            .iter()
+            .filter_map(|e| match e {
+                InventoryEvent::Object {
+                    key,
+                    state: ObjectState::DegradedParity,
+                    shards_available,
+                    shards_total,
+                    ..
+                } => Some((key, *shards_available, *shards_total)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![(&r[1].key, 1, 2), (&r[5].key, 1, 2)],
+            "{events:?}"
+        );
+        let Some(InventoryEvent::Summary {
+            versions_checked,
+            whole,
+            degraded_parity,
+            degraded_data,
+            unreadable,
+            inconsistent,
+            unread,
+            complete,
+        }) = events.last()
+        else {
+            panic!("no summary: {events:?}");
+        };
+        assert_eq!(
+            (
+                *versions_checked,
+                *whole,
+                *degraded_parity,
+                *degraded_data,
+                *unreadable,
+                *inconsistent
+            ),
+            (6, 1, 2, 1, 1, 1)
+        );
+        assert_eq!(
+            unread,
+            &vec![UnavailableDevice {
+                device: device(2),
+                node: node(2),
+            }]
+        );
+        // One device unread of a 1+1 scheme: every version left a trace.
+        assert!(complete);
+        assert_eq!(events.len(), 3, "{events:?}");
+    }
+
+    /// SPEC 20.1.5: with k+m devices unread the counts are a lower bound.
+    #[tokio::test]
+    async fn the_inventory_is_incomplete_once_k_plus_m_devices_are_unread() {
+        let unread = BTreeMap::from([(device(2), node(2)), (device(3), node(3))]);
+        let a = fixed_on(node(1), device(1), vec![]);
+        let query = InventoryQuery { keys: None };
+        let events = inventoried(vec![a], unread, 2, query).await;
+        assert!(matches!(
+            events.as_slice(),
+            [InventoryEvent::Summary {
+                versions_checked: 0,
+                complete: false,
+                ..
+            }]
         ));
     }
 }

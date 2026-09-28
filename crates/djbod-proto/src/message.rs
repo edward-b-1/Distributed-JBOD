@@ -26,7 +26,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use djbod_core::checksum::BlockChecksum;
-use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, Transport};
+use djbod_core::cluster::{ClusterDocument, DeviceState, NodeId, NodeState, Transport};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_core::scrub::{Finding, ScrubSummary};
@@ -220,6 +220,11 @@ pub enum Request {
         /// Start even if the estimate says not everything will fit.
         partial: bool,
     },
+    /// Every object's state against the devices that can be read now
+    /// (SPEC 20.1.5): a merge of the record streams, no shard read.
+    /// Answered with `InventoryStarted`, then a stream of CBOR
+    /// `InventoryEvent` data frames, then end-of-stream.
+    Inventory(InventoryQuery),
 
     // ---- node to node
     LocalStatus,
@@ -330,6 +335,8 @@ pub struct DeviceContents {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub node: NodeId,
+    /// A removed node (6.2.2) is listed for the record, not asked.
+    pub state: NodeState,
     pub reachable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build: Option<String>,
@@ -478,6 +485,8 @@ pub enum Response {
     ScrubStarted,
     /// Followed by a stream of `DrainEvent` frames.
     DrainStarted,
+    /// Followed by a stream of `InventoryEvent` frames.
+    InventoryStarted,
 
     // ---- node to node
     LocalStatus {
@@ -571,6 +580,16 @@ pub enum ClusterFinding {
         device: DeviceId,
         shard_index: u8,
     },
+    /// The record places a shard on a device that is `removed` or no
+    /// longer in the cluster document (18.2.1): the shard is lost (18.3),
+    /// and repair rebuilds it onto another device. Not a fault of the
+    /// device that was consulted; the device is gone by decision.
+    ShardLost {
+        key: String,
+        version: VersionId,
+        device: DeviceId,
+        shard_index: u8,
+    },
     /// A copy of the record at a lower placement revision than the
     /// current one, on a device the current revision no longer lists:
     /// left behind by an interrupted re-placement (SPEC 18.8.1).
@@ -625,6 +644,38 @@ pub enum ScrubEvent {
         versions_checked: u64,
         key_hash: KeyHash,
     },
+    /// Every version checked, counted by how many of its shards are
+    /// available against how many it has (20.1.2.2): a shard is not
+    /// available when its device is unread or removed, its file is
+    /// missing, or the node's own scrub found it damaged. Sent once at
+    /// the end of the run, whatever it found, and after the repairs of a
+    /// `--repair` run, counting each repaired version as whole: the
+    /// answer to "what state is my data in" in one line.
+    CrossCheckAvailability {
+        versions_checked: u64,
+        versions: Vec<ShardAvailability>,
+        /// Whether the count follows the run's repairs.
+        after_repair: bool,
+    },
+    /// What the devices the merge could not read cost (20.1.2.2, 5.6),
+    /// sent once when the cross-node phase ends with any device unread.
+    /// Not damage: nothing is known to be wrong with a shard on such a
+    /// device, and no repair can reach it. Exposure: these versions are
+    /// readable only by going around the device, or not at all.
+    CrossCheckExposure {
+        /// The devices whose record streams could not be read, each with
+        /// how many checked versions have a shard on it.
+        unread: Vec<DeviceExposure>,
+        versions_checked: u64,
+        /// Versions with at least one shard on an unread device.
+        versions_with_shards_out: u64,
+        /// Of those, versions with exactly m shards out: readable, and
+        /// one further loss makes them unreadable.
+        versions_at_the_limit: u64,
+        /// Versions with more than m shards out: unreadable until a
+        /// device returns.
+        versions_unreadable: u64,
+    },
     Repaired {
         key: String,
         report: RepairReport,
@@ -632,6 +683,89 @@ pub enum ScrubEvent {
     RepairFailed {
         key: String,
         detail: ErrorDetail,
+    },
+}
+
+/// Versions with `shards_available` of `shards_total` shards available,
+/// at scheme `k`: whole when equal, readable while at least k are, with
+/// `shards_available - k` to spare, and unreadable below k.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardAvailability {
+    pub shards_total: u8,
+    pub shards_available: u8,
+    pub k: u8,
+    pub versions: u64,
+}
+
+/// One device the cross-node checks could not read (5.6), and how many
+/// of the versions checked have a shard on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceExposure {
+    pub device: DeviceId,
+    pub versions: u64,
+}
+
+/// What an inventory should stream besides its summary (SPEC 20.1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryQuery {
+    /// Stream one `Object` event for every version in this state; none
+    /// when absent, which gives the counts alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<ObjectState>,
+}
+
+/// A version's state against the devices that can be read now (SPEC
+/// 20.1.5), from its record alone: a shard is out when its device is
+/// unread or removed, or the device has no file for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectState {
+    /// Every shard on a device that can be read.
+    Whole,
+    /// At most m shards out, all of them parity: a read is unaffected,
+    /// the redundancy is reduced.
+    DegradedParity,
+    /// At most m shards out, at least one of them data: a read succeeds
+    /// by decoding parity and pays for it every time (11.4).
+    DegradedData,
+    /// More than m shards out: fewer than k remain, and the object cannot
+    /// be read until a device returns.
+    Unreadable,
+    /// The record copies that could be read do not agree, or a copy is
+    /// missing from a device that was read: the scrub's territory
+    /// (20.1.2.2); the shards are not known.
+    Inconsistent,
+}
+
+/// One frame of an `Inventory` stream (SPEC 20.1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum InventoryEvent {
+    /// A version in the state the query asked for.
+    Object {
+        key: String,
+        version: VersionId,
+        state: ObjectState,
+        shards_available: u8,
+        shards_total: u8,
+    },
+    /// Where the merge has got to: every 10,000 versions.
+    Progress { versions_checked: u64 },
+    /// The counts, sent once at the end. `complete` is whether every
+    /// version could be seen: true while fewer than k+m devices are
+    /// unread, since every version has a record copy on k+m devices;
+    /// false once that many are out, when a version stored only on them
+    /// leaves no trace and the counts are a lower bound.
+    Summary {
+        versions_checked: u64,
+        whole: u64,
+        degraded_parity: u64,
+        degraded_data: u64,
+        unreadable: u64,
+        inconsistent: u64,
+        /// The devices whose records could not be read, with their node.
+        unread: Vec<UnavailableDevice>,
+        complete: bool,
     },
 }
 
@@ -662,6 +796,9 @@ pub enum DrainEvent {
         /// Rebuilt from the other shards rather than copied from the
         /// draining device.
         rebuilt: bool,
+        /// The shard file's size, so a client can show how much of the
+        /// estimate's bytes have moved.
+        shard_bytes: u64,
     },
     /// The version stays where it is; the detail says why.
     Skipped {

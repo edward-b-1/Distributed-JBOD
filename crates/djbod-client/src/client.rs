@@ -14,9 +14,9 @@ use uuid::Uuid;
 use djbod_core::cluster::{ClusterDocument, NodeId, Transport};
 use djbod_core::record::{DeviceId, MetadataRecord};
 use djbod_proto::message::{
-    DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    NodeStatus, ObjectRead, ObjectWrite, RepairReport, Request, Response, ScrubEvent, StreamEnd,
-    UnavailableDevice,
+    DeviceContents, DeviceStatus, DrainEvent, ErrorCode, ErrorDetail, InventoryEvent,
+    InventoryQuery, KeyEntry, ListQuery, NodeStatus, ObjectRead, ObjectWrite, RepairReport,
+    Request, Response, ScrubEvent, StreamEnd, UnavailableDevice,
 };
 
 use crate::connection::{Connection, ConnectionError, DEFAULT_BODY_CHUNK};
@@ -148,8 +148,8 @@ pub struct MoveShardReport {
     pub rebuilt: bool,
 }
 
-/// A scrub or drain in progress: the events as the node sends them, then
-/// the end. Reading past the end is an error.
+/// A scrub, drain or inventory in progress: the events as the node
+/// sends them, then the end. Reading past the end is an error.
 pub struct EventRun<E> {
     connection: Connection,
     id: u32,
@@ -561,6 +561,22 @@ impl Client {
         self.connection().await?;
         let (_, mut connection) = self.connection.take().expect("connected");
         let id = connection.start_drain(device, partial).await?;
+        Ok(EventRun {
+            connection,
+            id,
+            event: std::marker::PhantomData,
+        })
+    }
+
+    /// Start an inventory (20.1.5): every object's state against the
+    /// devices that can be read now; events as for [`Client::scrub`].
+    pub async fn inventory(
+        &mut self,
+        query: InventoryQuery,
+    ) -> Result<EventRun<InventoryEvent>, ClientError> {
+        self.connection().await?;
+        let (_, mut connection) = self.connection.take().expect("connected");
+        let id = connection.start_inventory(query).await?;
         Ok(EventRun {
             connection,
             id,

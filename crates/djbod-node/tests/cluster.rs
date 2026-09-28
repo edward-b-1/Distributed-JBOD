@@ -389,25 +389,24 @@ async fn a_stopped_node_fails_requests_with_its_name_and_resumes_after_restart()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
-    // 1+1: two record copies per version over four devices, three of
-    // them on b. With b down, three devices are out, more than k+m, so a
-    // version with both copies on b leaves no trace on a: the listing
-    // shows what a holds and says it may be incomplete (15.1, 13.3).
-    let a = first_node(1, 1, 1).await;
-    let mut b = joined_node(3, &a).await;
+    // 1+1: two record copies per version over four devices, two on each
+    // node. With b down, two devices are out, which is k+m, so a version
+    // with both copies on b leaves no trace on a: the listing shows what
+    // a holds and says it may be incomplete (15.1, 13.3). Whether any
+    // version is in fact hidden depends on placement, which on one
+    // shared filesystem ties on free space and picks the same pair every
+    // time (10.5); the listing is right either way.
+    let a = first_node(2, 1, 1).await;
+    let mut b = joined_node(2, &a).await;
     let mut client = a.client().await;
     let records = put_objects(&mut client, 8, 300).await;
-    let on_a = a.node.devices()[0].id();
+    let on_a: Vec<DeviceId> = a.node.devices().iter().map(|d| d.id()).collect();
     let mut visible: Vec<String> = records
         .iter()
-        .filter(|r| r.shard_on(on_a).is_some())
+        .filter(|r| on_a.iter().any(|d| r.shard_on(*d).is_some()))
         .map(|r| r.key.clone())
         .collect();
     visible.sort();
-    assert!(
-        visible.len() < records.len(),
-        "placement over four equal devices alternates pairs, so some versions have no copy on a"
-    );
 
     b.stop();
     match client
@@ -426,7 +425,7 @@ async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
         }) => {
             assert!(!complete);
             assert!(!truncated);
-            assert_eq!(unread.len(), 3, "{unread:?}");
+            assert_eq!(unread.len(), 2, "{unread:?}");
             assert!(unread.iter().all(|u| u.node == b.node.id()));
             assert_eq!(
                 keys.iter().map(|k| k.key.clone()).collect::<Vec<_>>(),
@@ -435,6 +434,126 @@ async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
         }
         other => panic!("expected ListKeys, got {other:?}"),
     }
+}
+
+async fn run_inventory(
+    conn: &mut Connection,
+    keys: Option<djbod_proto::message::ObjectState>,
+) -> Vec<djbod_proto::message::InventoryEvent> {
+    let id = conn
+        .start_inventory(djbod_proto::message::InventoryQuery { keys })
+        .await
+        .expect("start inventory");
+    let mut events = Vec::new();
+    loop {
+        match conn
+            .next_inventory_event(id)
+            .await
+            .expect("inventory event")
+        {
+            Ok(event) => events.push(event),
+            Err(end) => {
+                assert!(end.error.is_none(), "{end:?}");
+                return events;
+            }
+        }
+    }
+}
+
+/// SPEC 20.1.5: the inventory reads records alone, goes around a node
+/// that is down, judges each version by the shards its unread devices
+/// hold, and says when the unread devices could hide a version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inventory_counts_objects_by_state_and_goes_around_a_dead_node() {
+    use djbod_proto::message::{InventoryEvent, ObjectState};
+    let a = first_node(2, 1, 1).await;
+    let mut b = joined_node(2, &a).await;
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 8, 400).await;
+    let on_b: Vec<DeviceId> = b.node.devices().iter().map(|d| d.id()).collect();
+
+    // Every node up: eight whole objects, nothing unread, complete.
+    let events = run_inventory(&mut client, Some(ObjectState::Whole)).await;
+    let mut listed: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            InventoryEvent::Object { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    listed.sort();
+    let mut all: Vec<String> = records.iter().map(|r| r.key.clone()).collect();
+    all.sort();
+    assert_eq!(listed, all, "{events:?}");
+    assert!(
+        matches!(
+            events.last(),
+            Some(InventoryEvent::Summary {
+                versions_checked: 8,
+                whole: 8,
+                complete: true,
+                unread,
+                ..
+            }) if unread.is_empty()
+        ),
+        "{events:?}"
+    );
+
+    // With b down its two devices are unread, which is k+m: a version
+    // with both shards on b leaves no trace and the summary says so; one
+    // with one shard on b is degraded, by that shard's index; one with
+    // none is whole. Which is which depends on placement (10.5), so the
+    // expectation is read from the records.
+    b.stop();
+    let on_b_count = |r: &djbod_core::record::MetadataRecord| {
+        r.shards.iter().filter(|s| on_b.contains(&s.device)).count()
+    };
+    let expected_whole = records.iter().filter(|r| on_b_count(r) == 0).count() as u64;
+    let expected_parity = records
+        .iter()
+        .filter(|r| {
+            on_b_count(r) == 1
+                && r.shards
+                    .iter()
+                    .any(|s| on_b.contains(&s.device) && s.index == 1)
+        })
+        .count() as u64;
+    let expected_data = records
+        .iter()
+        .filter(|r| {
+            on_b_count(r) == 1
+                && r.shards
+                    .iter()
+                    .any(|s| on_b.contains(&s.device) && s.index == 0)
+        })
+        .count() as u64;
+    let events = run_inventory(&mut client, None).await;
+    let Some(InventoryEvent::Summary {
+        versions_checked,
+        whole,
+        degraded_parity,
+        degraded_data,
+        unreadable,
+        inconsistent,
+        unread,
+        complete,
+    }) = events.last()
+    else {
+        panic!("no summary: {events:?}");
+    };
+    assert_eq!(
+        *versions_checked,
+        expected_whole + expected_parity + expected_data
+    );
+    assert_eq!(*whole, expected_whole);
+    assert_eq!(*degraded_parity, expected_parity);
+    assert_eq!(*degraded_data, expected_data);
+    assert_eq!((*unreadable, *inconsistent), (0, 0));
+    assert_eq!(unread.len(), 2, "{unread:?}");
+    assert!(unread
+        .iter()
+        .all(|u| u.node == b.node.id() && on_b.contains(&u.device)));
+    assert!(!complete);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -883,7 +1002,7 @@ async fn cluster_scrub_reports_a_node_it_cannot_reach_and_still_scrubs_the_rest(
     let error = end.error.expect("incomplete scrub is reported");
     assert_eq!(error.code, ErrorCode::NodeUnreachable);
     assert!(
-        error.message.contains("stopped after 0 version(s)"),
+        error.message.contains("stopped after 0 versions"),
         "{}",
         error.message
     );
@@ -1375,8 +1494,21 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = admin::remove_node(&Connector::plain(), a.addr, cluster, d_id)
         .await
         .expect("remove node");
-    assert!(document.node(d_id).is_none());
-    assert!(document.device(device).is_none());
+    // Tombstones (18.2.1): the node and its device stay, marked removed,
+    // and a second removal says so.
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert_eq!(
+        document.device(device).map(|d| d.state),
+        Some(DeviceState::Removed)
+    );
+    assert_eq!(document.active_nodes().count(), 3);
+    match admin::remove_node(&Connector::plain(), a.addr, cluster, d_id).await {
+        Err(admin::AdminError::NodeRemoved(node)) => assert_eq!(node, d_id),
+        other => panic!("expected NodeRemoved, got {other:?}"),
+    }
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }
@@ -1398,7 +1530,14 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
         Err(other) => panic!("expected NotAMember, got {other:?}"),
         Ok(_) => panic!("expected NotAMember, but the node opened"),
     }
-    // Nor can its device rejoin unwiped; wiped, it joins as a new device.
+    // Nor can it rejoin under its old id, which is a tombstone; with a
+    // new id, its device is refused unwiped and, wiped, joins as a new
+    // device.
+    match membership::join(&d.config, a.addr, cluster, true).await {
+        Err(membership::MembershipError::RemovedNode { node }) => assert_eq!(node, d_id),
+        other => panic!("expected RemovedNode, got {other:?}"),
+    }
+    d.config.node_id = Uuid::new_v4();
     match membership::join(&d.config, a.addr, cluster, false).await {
         Err(membership::MembershipError::RemovedDevice {
             path,
@@ -1412,6 +1551,7 @@ async fn remove_node_drops_it_after_a_drain_and_the_node_stops_and_can_rejoin_on
     let document = membership::join(&d.config, a.addr, cluster, true)
         .await
         .expect("join wiped");
+    let d_id = djbod_core::cluster::NodeId(d.config.node_id);
     let new_device = document
         .devices
         .iter()
@@ -1472,7 +1612,15 @@ async fn a_dead_node_is_removed_by_force_and_its_shards_are_rebuilt_elsewhere() 
     let document = admin::execute_forced_removal(&Connector::plain(), &plan)
         .await
         .expect("execute");
-    assert!(document.node(d_id).is_none());
+    assert_eq!(
+        document.node(d_id).map(|n| n.state),
+        Some(djbod_core::cluster::NodeState::Removed)
+    );
+    assert!(document
+        .devices
+        .iter()
+        .filter(|d| d.node == d_id)
+        .all(|d| d.state == DeviceState::Removed));
     for n in [&a, &b, &c] {
         assert_eq!(n.node.document().version, document.version);
     }

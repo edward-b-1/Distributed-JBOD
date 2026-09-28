@@ -168,7 +168,7 @@ fn listing_aligns_long_unicode_keys_large_numbers_and_orphan_shards() {
         "missing shards and records must still produce exit status 2"
     );
     assert!(
-        err.contains("4 version(s), 2 not recoverable, 0 problem(s)"),
+        err.contains("4 versions, 2 not recoverable, 0 problems"),
         "{err}"
     );
     assert!(out.contains("no record found; key unknown"), "{out}");
@@ -240,7 +240,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     assert_eq!(out.matches("4/4").count(), 3, "{out}");
     assert_eq!(out.matches("recoverable").count(), 3, "{out}");
     assert!(
-        err.contains("3 version(s), 0 not recoverable, 0 problem(s)"),
+        err.contains("3 versions, 0 not recoverable, 0 problems"),
         "{err}"
     );
 
@@ -320,7 +320,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     assert!(ok, "{err}");
     assert_eq!(std::fs::read(&repaired).expect("read"), newer);
     assert!(
-        err.contains("stripe 0: reconstructed around shard(s) [1]"),
+        err.contains("stripe 0: reconstructed around 1 shard [1]"),
         "{err}"
     );
 
@@ -346,7 +346,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     );
     assert!(!ok);
     assert!(
-        err.contains("stripe 0: only 2 usable block(s) of 3 needed; damaged shard(s) [1, 2]"),
+        err.contains("stripe 0: only 2 usable blocks of 3 needed; 2 damaged shards [1, 2]"),
         "{err}"
     );
     assert!(!failed.exists());
@@ -377,7 +377,7 @@ fn lists_and_extracts_from_device_directories_alone() {
     );
     assert!(!ok);
     assert!(
-        err.contains("only 2 intact shard(s) of 3+1 found; need at least 3"),
+        err.contains("only 2 intact shards of 3+1 found; need at least 3"),
         "{err}"
     );
     assert!(!refused.exists());

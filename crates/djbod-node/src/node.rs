@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use djbod_core::cluster::{
     ClusterDocument, ClusterDocumentError, DeviceEntry, DeviceState, IndependenceLevel, NodeEntry,
-    NodeId, Transport,
+    NodeId, NodeState, Transport,
 };
 use djbod_core::device::{Device, DeviceError};
 use djbod_core::keyhash::KeyHash;
@@ -70,7 +70,7 @@ pub enum NodeError {
     BadDocument { path: PathBuf, reason: String },
     #[error(transparent)]
     InvalidDocument(#[from] ClusterDocumentError),
-    #[error("this node {node} is not in the cluster document: it was removed (SPEC 18.2.1, 6.2.6.3); to reuse its devices, join again with --wipe-removed-device")]
+    #[error("this node {node} is not an active member of the cluster: it was removed or never joined (SPEC 18.2.1, 6.2.6.3); a machine that comes back joins with a new node id, and its devices with --wipe-removed-device")]
     NotAMember { node: NodeId },
     #[error("device {device} at {path} is not in the cluster document")]
     UnknownDevice { device: DeviceId, path: PathBuf },
@@ -252,6 +252,7 @@ impl Node {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],
                 label: None,
+                state: NodeState::Active,
             }],
             devices: devices
                 .iter()
@@ -339,7 +340,10 @@ impl Node {
             }
         }
         let node_id = NodeId(config.node_id);
-        if document.node(node_id).is_none() {
+        if !document
+            .node(node_id)
+            .is_some_and(|n| n.state == NodeState::Active)
+        {
             return Err(NodeError::NotAMember { node: node_id });
         }
         // A cluster may legitimately have fewer active devices than the
@@ -483,11 +487,15 @@ impl Node {
             devices = proposed.devices.len(),
             "cluster document changed"
         );
-        let still_listed = proposed.node(self.id()).is_some();
+        let still_active = proposed
+            .node(self.id())
+            .is_some_and(|n| n.state == NodeState::Active);
         *current = proposed;
         drop(current);
-        if !still_listed {
-            tracing::warn!("this node is not in the new cluster document: it has been removed and will stop serving");
+        if !still_active {
+            tracing::warn!(
+                "this node is removed in the new cluster document and will stop serving"
+            );
             self.removed.send_replace(true);
         }
         Ok(())
@@ -536,6 +544,7 @@ impl Node {
                 id: node_id,
                 addresses: vec![config.advertised_address().to_string()],
                 label: None,
+                state: NodeState::Active,
             });
         }
         for device in devices {

@@ -27,9 +27,10 @@
 //! | `POST /move-shard/{key}`             | `MoveShard`                         |
 //! | `POST /scrub`                        | `Scrub`, events streamed as NDJSON  |
 //! | `POST /devices/{id}/state`           | `djbod cluster set-state`           |
-//! | `POST /devices/{id}/label`           | `djbod cluster set-label`           |
+//! | `POST /devices/{id}/label`           | `djbod cluster set-device-label`           |
 //! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
+//! | `POST /inventory`                    | `djbod inventory`, events streamed as NDJSON; body `{"keys": "<state>"}` is `--keys` |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`; body `{"force": true}` is `--force` |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
 //! | `POST /nodes/{id}/label`             | `djbod cluster set-node-label`      |
@@ -78,8 +79,8 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{
-    ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction, RecordCopyFault, Request,
-    Response as Reply,
+    ErrorCode, ErrorDetail, InventoryQuery, ListQuery, MissingRecordCopy, ObjectState,
+    Reconstruction, RecordCopyFault, Request, Response as Reply,
 };
 
 /// The page, embedded so the binary is self-contained.
@@ -256,8 +257,8 @@ impl App {
         let mut notes = Vec::new();
         if !reconstructed.is_empty() {
             notes.push(format!(
-                "{} block(s) reconstructed from parity; the data was correct, the damage on disk is not repaired",
-                reconstructed.len()
+                "{} reconstructed from parity; the data was correct, the damage on disk is not repaired",
+                djbod_core::text::counted(reconstructed.len(), "block", "blocks")
             ));
         }
         for copy in missing_records {
@@ -345,6 +346,7 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
         .route("/verify/{*key}", post(verify_object))
         .route("/move-shard/{*key}", post(move_shard))
         .route("/scrub", post(scrub))
+        .route("/inventory", post(inventory))
         .route("/devices/{id}/state", post(set_device_state))
         .route("/devices/{id}/label", post(set_device_label))
         .route("/devices/{id}/drain", post(drain))
@@ -714,6 +716,7 @@ fn membership_status(e: &AdminError) -> (StatusCode, &'static str) {
         M::UnknownDevice(_) => (StatusCode::NOT_FOUND, "unknown_device"),
         M::UnknownDeviceName(_) => (StatusCode::NOT_FOUND, "unknown_device_name"),
         M::UnknownNode(_) => (StatusCode::NOT_FOUND, "unknown_node"),
+        M::NodeRemoved(_) => (StatusCode::CONFLICT, "node_removed"),
         M::UnknownNodeName(_) => (StatusCode::NOT_FOUND, "unknown_node_name"),
         M::VersionsDiffer(_) => (StatusCode::CONFLICT, "versions_differ"),
         M::StaleProposal { .. } => (StatusCode::CONFLICT, "stale_proposal"),
@@ -803,20 +806,37 @@ async fn cluster(State(app): State<Arc<App>>) -> ApiResult {
         admin::fetch_document(&target.connector, app.peer().await?, target.cluster).await?;
     app.learn(&document);
     let reports = admin::fetch_all(&target.connector, &document).await;
-    let nodes: Vec<Value> = reports
+    let mut nodes: Vec<Value> = reports
         .iter()
         .map(|r| {
             json!({
                 "node": r.node,
+                "state": "active",
                 "address": r.address,
-                // From the node's Hello; null for a node that was unreachable
-                // or runs a build from before builds were sent (SPEC 6.2.6.4).
+                // From the node's Hello (SPEC 6.2.6.4); null for a node
+                // that was unreachable.
                 "build": r.build,
                 "version": r.result.as_ref().ok().map(|d| d.version),
                 "error": r.result.as_ref().err(),
             })
         })
         .collect();
+    // Removed nodes (SPEC 6.2.2) are tombstones: listed from the document
+    // for the record, asked nothing, so the page can show or hide them.
+    for n in document
+        .nodes
+        .iter()
+        .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+    {
+        nodes.push(json!({
+            "node": n.id,
+            "state": "removed",
+            "address": n.addresses.first(),
+            "build": null,
+            "version": null,
+            "error": null,
+        }));
+    }
     Ok(Json(json!({ "document": document, "nodes": nodes })))
 }
 
@@ -1482,6 +1502,29 @@ async fn scrub(State(app): State<Arc<App>>, Json(body): Json<ScrubBody>) -> ApiR
         .await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
         let item = conn.next_scrub_event(id).await;
+        (conn, item)
+    }))
+}
+
+/// `djbod inventory [--keys STATE]` (SPEC 20.1.5): every object's state
+/// against the devices that can be read now, from records alone.
+#[derive(Deserialize, Default)]
+struct InventoryBody {
+    /// Stream one `object` event per version in this state, besides the
+    /// counts; absent for the counts alone.
+    #[serde(default)]
+    keys: Option<ObjectState>,
+}
+
+async fn inventory(
+    State(app): State<Arc<App>>,
+    body: Option<Json<InventoryBody>>,
+) -> ApiResult<Response> {
+    let keys = body.map(|Json(b)| b.keys).unwrap_or(None);
+    let mut conn = connect(&app).await?;
+    let id = conn.start_inventory(InventoryQuery { keys }).await?;
+    Ok(ndjson_stream(conn, id, |mut conn, id| async move {
+        let item = conn.next_inventory_event(id).await;
         (conn, item)
     }))
 }

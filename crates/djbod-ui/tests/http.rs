@@ -1362,3 +1362,63 @@ async fn the_brand_assets_are_served_for_the_tab_and_the_header() {
     assert!(text.contains(&format!(r#"src="/brand/{build}/lockup.svg""#)));
     assert!(!text.contains(r#""/brand/lockup.svg""#));
 }
+
+/// `POST /api/inventory` streams the inventory (SPEC 20.1.5): the counts
+/// alone with an empty body, and one `object` line per version of the
+/// state asked for with `keys`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn inventory_streams_counts_and_keys() {
+    let test = start_node(3, 2, 1).await;
+    for key in ["inv/a", "inv/b", "inv/c"] {
+        let (status, _) = put_object(&test, key, &pattern_bytes(2000, 5), None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, headers, out) = call(
+        &test,
+        Request::post("/api/inventory")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "application/x-ndjson");
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    let summary = lines
+        .iter()
+        .find(|l| l["event"] == "summary")
+        .expect("a summary");
+    assert_eq!(summary["versions_checked"], 3, "{summary}");
+    assert_eq!(summary["whole"], 3, "{summary}");
+    assert_eq!(summary["unreadable"], 0, "{summary}");
+    assert_eq!(summary["complete"], true, "{summary}");
+    assert!(lines.iter().all(|l| l["event"] != "object"), "{lines:?}");
+
+    let (status, _, out) = call(
+        &test,
+        Request::post("/api/inventory")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"keys": "whole"}"#))
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let lines: Vec<serde_json::Value> = String::from_utf8_lossy(&out)
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    let mut keys: Vec<&str> = lines
+        .iter()
+        .filter(|l| l["event"] == "object")
+        .map(|l| l["key"].as_str().unwrap())
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["inv/a", "inv/b", "inv/c"]);
+    let object = lines.iter().find(|l| l["event"] == "object").unwrap();
+    assert_eq!(object["state"], "whole");
+    assert_eq!(object["shards_available"], 3);
+    assert_eq!(object["shards_total"], 3);
+}

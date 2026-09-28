@@ -324,9 +324,12 @@ the key length limit `max_key_bytes` (9.1.5), the object size limit
 `max_object_bytes` (9.3.1), the user metadata limit
 `max_user_metadata_bytes` (9.4.2), the transport mode `transport` (19.1.6:
 `plain`, `tls-optional`, or `tls`), the node list (UUID, addresses,
-optional label), and the device list (UUID, owning node, state, optional
-label). Every field is required except the names and labels, whose
-absence means unnamed (19.1.5.2). `djbod cluster set-limits` and `djbod
+state, optional label), and the device list (UUID, owning node, state,
+optional label). A node's state is `active` or `removed`; a removed node
+is a tombstone (18.2.1): listed for the record, asked nothing, never
+revived. Every field is required except the names and labels, whose
+absence means unnamed (19.1.5.2); a document from before nodes had a
+state is refused until each node entry carries one. `djbod cluster set-limits` and `djbod
 cluster set-transport` change the limits and the transport. The document
 never holds key material (20.6).
 
@@ -353,7 +356,7 @@ no message grows with the number of objects.
 6.2.5.1 [D] **Device and node labels.** A device entry may carry a
 `label`, an administrator-chosen name of 1 to 128 bytes with no
 whitespace, unique among devices and not shaped like a UUID, set or
-cleared with `djbod cluster set-label` as a document change like any
+cleared with `djbod cluster set-device-label` as a document change like any
 other. `status` shows it beside the UUID, and every `djbod` command that
 takes a device accepts either the UUID or the label. Paths are still not
 recorded (5.2); the label is the administrator's name for the disk, for
@@ -370,8 +373,10 @@ of a forced removal (6.2.6.3) remains the UUID.
 6.2.5.2 [D] **Node addresses.** A node entry lists one or more addresses,
 each an IP address and port (19.1.6.1: certificates name IP addresses, so
 host names are not used). The list is never empty, and no address is
-listed for two nodes; the validator refuses a document that breaks either
-rule. Nodes and clients use the first address; the others are recorded
+listed for two active nodes; the validator refuses a document that breaks
+either rule. A removed node keeps its addresses and its label for the
+record, and neither counts against a new node, so a replacement machine
+may take both. Nodes and clients use the first address; the others are recorded
 for the operator and are not tried. `init-cluster` and `join` list the
 node's configured advertised address (`advertise`, or `listen` when it is
 not set). Afterwards the list changes in two ways:
@@ -403,7 +408,9 @@ and `cluster show` print `name (id)`, the web UI's header and title show
 the name first, the node's startup log line carries both, and a node
 refusing a client of another cluster says which cluster it serves. It is
 set with `djbod-node init-cluster --name` and set or cleared with `djbod
-cluster set-name`, a document change like any other. `Status` and `Hello`
+cluster set-name`, a document change like any other, and printed alone
+by `djbod cluster get-name`, which exits 1 when none is set, so a script
+can tell. `Status` and `Hello`
 carry it so a client need not fetch the document. An absent name means an
 unnamed cluster; documents written before the field are valid, and a node
 on a build from before it refuses a document that carries one (6.2.6.4).
@@ -422,7 +429,7 @@ it is not the one expected. The check of 19.1.5 then rests on the name being uni
 clusters rather than on the id, and names would have to be
 distinguishable from a UUID so `--cluster` could take either. This
 concerns only the check, not how a client finds a node, which stays
-`--node ip:port`. The alternatives and the reasons for deferring are in
+`--bootstrap-node ip:port`. The alternatives and the reasons for deferring are in
 `docs/proposals/cluster-name.md`, section 5.
 
 6.2.6 [D] **Changing the document without a master.** Any process holding
@@ -513,9 +520,10 @@ fetch within five seconds; `membership::plan_forced_removal` computes the
 cost from the other nodes' records (18.5) and `execute_forced_removal`
 proposes with the dead node skipped; the rebuild is one `RepairObject`
 per affected key, which relocates shards whose device has left the
-document (18.3). The node and its devices are dropped from the document
-together, so a device of a removed node is recognised at `join` by being
-initialised for the cluster yet unlisted.
+document (18.3). The node and its devices are marked `removed` together
+and stay in the document as tombstones (6.2.2), so a device of a removed
+node is recognised at `join` by its tombstone, and a machine that comes
+back joins with a new node id: a tombstoned id is refused.
 
 6.2.6.4 [D] **Mixed builds.** A node refuses a document that carries a
 field its build does not know, whether it arrives in `ApplyClusterConfig`
@@ -880,9 +888,9 @@ k, m                integers, the global values when written (6.3)
 block_size          integer, B when written
 shards              array of { index, device }, exactly k+m entries, one per
                     shard index, each device distinct
-revision            integer, the placement revision (18.8.1); 0 when the
-                    version is first written and then omitted from the
-                    file, incremented by every re-placement
+revision            integer, required, the placement revision (18.8.1);
+                    0 when the version is first written, incremented by
+                    every re-placement
 content_type        string, optional, at most 1 KiB
 user_metadata       opaque map, optional, reserved for clients and the
                     future translation layer; keys and values together at
@@ -1148,7 +1156,7 @@ be entirely out of view.
 
 ## 14. Delete
 
-14.1 [D] Deleting a key looks up its version(s), instructs the node of every listed device to
+14.1 [D] Deleting a key looks up its versions, instructs the node of every listed device to
 delete the shard file and metadata record, and reports success only when
 all have confirmed. Any unreachable node fails the delete.
 
@@ -1372,7 +1380,9 @@ to the client:
   and shards that remain suffice (9.4.4, 11.4) and report it, and are
   refused with `NodeUnreachable` when they do not; and except for
   `ListKeys`, which lists what the reachable devices hold, names the rest,
-  and says whether a key could be hidden (15.1.1).
+  and says whether a key could be hidden (15.1.1); and except for
+  `Inventory`, which counts what the reachable devices hold, names the
+  rest, and says whether an object could be hidden (20.1.5).
 - More than m of an object's shards cannot be read at all, whether
   missing, unreadable, or on a device or node that cannot be reached
   (11.4); fewer are reconstructed around, served, and reported.
@@ -1514,7 +1524,7 @@ inspected before the next is run:
   outcome for individual versions, so it cannot loop. The list cannot
   grow while it runs, because a `draining` device receives no new shards.
   It prints progress per version and is safe to interrupt and rerun; a
-  rerun is the administrator's decision, not the tool's. `--node <id>` drains every `draining` device of a node in turn.
+  rerun is the administrator's decision, not the tool's. `--node-id <id>` drains every `draining` device of a node in turn.
   A version the cluster cannot rebuild (more than m damaged shards) is
   reported and left. The operation is `Drain` (19.1.3), served by any
   node like the other administrative operations: the list of versions
@@ -1529,10 +1539,16 @@ inspected before the next is run:
   `removed`, so that a later attempt to add the same disk is recognised
   (6.2.6.3), and the administrator takes it out of the node's
   configuration at the next restart; a removed device is never written
-  to or cleaned again, and a shard or record copy on it is lost (18.3); `remove-node` drops the node and its
-  devices, and the node, having acknowledged a document that no longer
-  lists it, stops accepting connections and its process exits. Both scans
-  are `membership::scan_references` (18.5). Removing the last node is
+  to or cleaned again, and a shard or record copy on it is lost (18.3);
+  `remove-node` marks the node and every one of its devices `removed` in
+  the same way, so both removals leave tombstones (6.2.2) and nothing is
+  ever deleted from the document; the node, having acknowledged a
+  document that lists it as removed, stops accepting connections and its
+  process exits, and every broadcast, proposal and listing thereafter
+  visits active nodes only. A tombstone is never revived: a disk that
+  comes back is wiped and added as a new device, a machine that comes
+  back joins with a new node id. Both scans are
+  `membership::scan_references` (18.5). Removing the last active node is
   refused.
 - **`djbod contents [<device>...] [--node-id <node>]`** shows what each
   device holds (18.2.3), so that the state of a drain, and whether a
@@ -1798,10 +1814,12 @@ coordinator, and those nodes send to each other. Every response is either
   document version, coordinator node
   UUID, every node asked with whether it answered, the build it
   reported if so (6.2.6.4) and why not if not, and for every device in
-  the cluster: UUID, owning node, state, whether its node can read it
-  (5.6), total bytes, free bytes. Implemented by broadcasting
-  `LocalStatus`; a node that cannot be reached does not fail it, and its
-  devices are listed from the document as unavailable with no space.
+  the cluster document, removed ones included (18.2.1): UUID, owning
+  node, state, whether its node can read it (5.6), total bytes, free
+  bytes. Implemented by broadcasting `LocalStatus`; a node that cannot
+  be reached does not fail it, and its devices are listed from the
+  document as unavailable with no space. Whether to show removed devices
+  is the reader's choice, not the report's.
 
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
@@ -1868,6 +1886,14 @@ coordinator, and those nodes send to each other. Every response is either
   could not be scrubbed, then the cross-node findings of 20.1.2, then one
   `Repaired` or `RepairFailed` per damaged key if repair was asked for; the
   end-of-stream carries an error if any node failed or any repair failed.
+
+`Inventory`
+: Request: optionally one object state whose keys to list. Response:
+  `InventoryStarted`, then a stream of CBOR `InventoryEvent` data frames:
+  one `Object` per version in the requested state, a `Progress` every
+  10,000 versions, and one `Summary` at the end with the counts, the
+  devices that were not read, and whether the counts are complete; then
+  the end-of-stream. Section 20.1.5. Reads records only, never a shard.
 
 `PlaceObject` (client as coordinator, 17.2; deferred with it)
 : Request: key, size. Response: version id, key hash, and the ordered list
@@ -2008,10 +2034,10 @@ accepts that from a client only, never from a node, answers with its own
 build, and then closes the connection; nothing else is served to a
 client that did not name the cluster. Every other command still requires
 the id, so a client pointed at the wrong cluster still fails before it
-can act. `djbod get-cluster-id --node <address>` is the command, needing
+can act. `djbod get-cluster-id --bootstrap-node <address>` is the command, needing
 no `--cluster`; it prints the id alone so that `export
 DJBOD_CLUSTER=$(djbod get-cluster-id ...)` works, and with `--json` the
-name and build too. `djbod identity --node <address>` asks the same way
+name and build too. `djbod identity --bootstrap-node <address>` asks the same way
 and then, with the answer, fetches the document to say in words who is
 there: the cluster's name and id, the node's label, id, and addresses,
 its build, the document version it holds, and the transport. A node from
@@ -2196,9 +2222,11 @@ than the current revision lists devices, or copies that disagree, is
 `RecordsInconsistent`; a copy at a lower revision on a device the
 current revision no longer lists is `StaleCopy`; a listed device that
 has the record but not the shard file is `ShardMissingOnDevice`. A
-listed device that is no longer in the cluster document has no stream,
-so its copy is absent and the version shows as `RecordsInconsistent`,
-which is what it is; repair rebuilds the shard elsewhere (18.3). No
+listed device that is `removed` or no longer in the cluster document has
+no stream and is expected to hold nothing (18.2.1), so its absent copy
+is not counted against the version; each shard the record places on it
+is `ShardLost`, one finding per shard, and repair rebuilds it onto
+another device (18.3). No
 lookup and no probe is made,
 and no list of keys is held: the phase's memory is one page per device
 plus the current group, so it is proportional to the number of devices,
@@ -2215,6 +2243,46 @@ milliseconds a version costs, that is an event every minute or so; a
 time-based trigger as well was considered and dropped as a second
 mechanism for one feature.) A `--repair` run then repairs each damaged
 key as before.
+
+A device a node cannot read (5.6) has no record stream either, and the
+merge goes on without it: every version that lists the device is checked
+without expecting a copy from it, and nothing is asked about its shard,
+since nothing is known to be wrong with it and no repair can reach it.
+That is not damage, and the run ends as incomplete (20.1.2.3). What the
+device costs is reported instead, once, when the phase ends: for each
+unread device, how many of the versions checked have a shard on it; how
+many versions have any shard on an unread device, and so are readable
+only by going around it; how many of those have exactly m out, so that
+one further loss makes them unreadable; and how many have more than m
+out and are unreadable now. `djbod scrub` prints this as its last
+lines, as a warning that the data is at higher risk, with what to do:
+restore the device, or retire it (18.2.1.1) and run `scrub --repair`.
+The web UI shows the same in the scrub log. The exit code does not
+change for it: exposure is not damage, and the line says which.
+
+The run also ends, every time, with every version the phase checked
+counted by how many of its shards are available against how many it
+has, at its scheme: a shard is not available when its device is unread
+or removed, its file is missing, or the node's own scrub found it
+damaged. `djbod scrub` prints it as one line after the verdict, for
+example `shards available: 245756 objects with 2 of 3 (readable, none
+to spare)`, with whole objects first and unreadable ones last, so the
+state of the data is read in the scheme's own terms: how many shards
+each object has left, and how many it can still lose. With `--repair`
+the count is reported twice, before the repairs and after them, each
+version repaired counted as whole and each that could not be left where
+it was, so the two lines show what the run changed:
+
+```
+shards available before repair: 245756 objects with 2 of 3 (readable, none to spare)
+shards available after repair: 229839 objects with 3 of 3, 15917 with 2 of 3 (readable, none to spare)
+```
+ A version whose copies could not be trusted is not counted,
+its shards being unknown.
+This is the classification of every version against what is out (whole,
+degraded with so much to spare, at the limit, unreadable) computed in
+the one place that already reads every record; a scheduled scrub gets
+it for free.
 
 A node that cannot be reached, or that refuses or answers out of
 protocol, is not damage and is never reported as damage. In the first
@@ -2257,7 +2325,11 @@ contents were not checked and no repair can reach them; a stream that
 ends only because repairs failed is complete. Damage, codes 2 and 4,
 is what a checksum or a cross-node check found wrong in data that was
 read, which is what `--repair` acts on.
-The last line of the human output states the outcome in these words;
+The last line of the human output gives the count of findings, the
+objects they fall in, the count of each kind in words (shards on a
+removed device, shards missing from their device, stale record copies,
+and so on), the repairs and failures when `--repair` was given and
+nothing about repairs otherwise, and then the outcome in these words;
 `--json` prints the events alone, and the exit code carries the verdict.
 
 20.1.2.1 [D] A node refuses a second `PutShard` for a version and shard
@@ -2288,6 +2360,51 @@ with a size cap); and how it is shown (`djbod status`, a `djbod scrub
 --history` listing, the web UI's overview). The offline `djbod-node scrub`
 should record its results the same way, since a machine that scrubs while
 its node is down is still a machine that has been scrubbed.
+
+20.1.5 [D] **Inventory.** `djbod inventory` answers the question a scrub
+does not: with the devices that can be read *now*, which objects are
+whole, which are degraded, and which cannot be read at all. It is the
+cross-node merge of 20.1.2.2 alone, one `LocalRecords` stream per device
+of every active node, with no shard read and no check made, so it costs
+one pass over the records and finishes in minutes where a scrub takes
+days. Unlike the scrub it goes around a node it cannot reach: the devices
+of such a node, and any device its node reports unavailable (5.6), are
+*unread*, which is exactly what the inventory exists to describe rather
+than a reason to stop. A stream that fails part way makes its device
+unread from that point.
+
+Each version is judged from its record copies at the highest revision,
+which must agree and must all be present on the devices that were read
+(9.4.4, as `versions_of` applies it in the scrub); a shard is *out* when
+its device is unread, when its device holds no file for it (the
+`shard_present` of the stream), or when it is lost on a removed device
+(18.3). The states, from the count and position of the shards out:
+
+| State | Meaning |
+|---|---|
+| whole | no shard out |
+| degraded-parity | at most m out, all of them parity: reads are unaffected, the redundancy is reduced |
+| degraded-data | at most m out, at least one data shard: every read succeeds by decoding parity and pays for it (11.4) |
+| unreadable | more than m out: fewer than k remain, and the object cannot be read until a device returns |
+| inconsistent | the copies read do not agree, or a copy is missing from a device that was read: the scrub's territory (20.1.2.2), and the shards are not judged |
+
+The `Summary` gives the count in each state, the unread devices with
+their nodes, and `complete`: true while fewer than k+m devices are
+unread, since every version has a record copy on each of the k+m
+devices that hold its shards and so leaves a trace on at least one that
+was read; false once k+m or more are unread, when a version stored only
+on them is invisible and the counts are a lower bound. With `--keys
+<state>` the stream also carries one `Object` per version in that state,
+with its version id and shards available of shards total, which the CLI
+prints one per line on standard output; the summary and progress go to
+standard error, and `--json` prints the events alone. The exit codes are
+the scrub's (20.1.2.3) with "damage" read as "not whole": 0 complete
+and every object whole, 2 complete with some object not whole or
+inconsistent, 3 incomplete and every object seen whole, 4 incomplete
+with some object not whole. The inventory changes nothing and reports no
+finding: an object it calls degraded is repaired by the scrub once its
+device is back or retired (18.3), and one it calls inconsistent is the
+scrub's to examine.
 
 ### 20.2 Recovery tool
 
@@ -2421,13 +2538,41 @@ argument, as an environment variable, or in the configuration file, and
 they take precedence in that order: an argument overrides a variable,
 which overrides the file. Environment variables are named `DJBOD_` plus
 the setting in upper case. Existing settings are brought under this rule
-as they are touched; `djbod` already takes `--node` and `--cluster` from
-`DJBOD_NODE` and `DJBOD_CLUSTER`.
+as they are touched; `djbod` already takes `--bootstrap-node` and `--cluster` from
+`DJBOD_BOOTSTRAP_NODE` and `DJBOD_CLUSTER`.
 
 20.6.2 [D] Secrets never live in a configuration file or in the cluster
 document. A private key is its own file, with owner-only permissions, and
 the configuration or argument names its path. The same applies to any
 future credential.
+
+### 20.7 Versions and releases
+
+20.7.1 [D] **Numbering.** Versions follow Semantic Versioning. The
+workspace `version` in `Cargo.toml` is the only place the number is
+written: every crate inherits it and the Python package reads it through
+maturin. A build identifies itself as `<version>+<commit>` (6.2.6.4,
+19.1.5). While the major version is 0, a minor bump says the release is
+incompatible with the one before in something a running cluster depends
+on: the on-disk format, the protocol of 19.1, the cluster document, or the
+command line's output and exit codes. A patch bump says anything else.
+
+20.7.2 [D] **A release is a tag.** A release is a tag `vX.Y.Z` on `main`,
+on the commit that set the workspace version to X.Y.Z and named the
+changelog's section for it. Pull requests do not change the version; each
+adds its entries to `CHANGELOG.md` under `Unreleased`, and the release's
+own pull request renames that section. Between releases `main` keeps the
+last release's number, and the commit in the build id says which build it
+is. Pushing the tag builds and publishes the release: the binaries and
+the Python wheel (20.8.1) for x86_64 and aarch64 Linux, the Docker image
+(20.6), and a GitHub release whose notes are the changelog section. Every
+artifact carries the notices of 21.5. `docs/releasing.md` has the steps.
+
+20.7.3 [D] **What a release says about upgrading.** A release's changelog
+section says, before anything else, what an operator must know to
+upgrade: whether nodes of the previous release can stay in the cluster
+during a rolling upgrade, given the rule of 6.2.6.4, and anything on disk
+that must be rewritten.
 
 20.8 [D] **Client libraries.** Programs reach the store through the
 `djbod-client` crate (C.2), which the node, the command-line tool, and the
@@ -2448,8 +2593,8 @@ writer and hold one body chunk at a time (3.6); errors carry the node's
 detail of 16.2.
 A blocking facade runs the same client on a runtime of its own, for
 programs and language bindings that call from ordinary threads. The
-`djbod` command is itself built on the client: `--node` (or
-`DJBOD_NODE`) takes several addresses, comma-separated, tried in order.
+`djbod` command is itself built on the client: `--bootstrap-node` (or
+`DJBOD_BOOTSTRAP_NODE`) takes several addresses, comma-separated, tried in order.
 Administration is part of the library too: the document-change
 procedures of 6.2.6 and everything built on them live beside the object
 operations, so the command-line tool and the web UI depend on the client

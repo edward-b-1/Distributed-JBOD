@@ -78,9 +78,7 @@ pub struct MetadataRecord {
     /// Placement revision (SPEC 18.8.1): 0 when the version is first
     /// written, incremented by every re-placement of a shard. The version
     /// id identifies the body; the revision identifies where it lives.
-    /// Omitted from the JSON when 0, so records written before the field
-    /// existed still verify.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    /// Always written, so a record has one spelling.
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
@@ -164,10 +162,6 @@ fn write_canonical(value: &serde_json::Value, out: &mut String) {
         }
         other => out.push_str(&other.to_string()),
     }
-}
-
-fn is_zero(value: &u64) -> bool {
-    *value == 0
 }
 
 impl MetadataRecord {

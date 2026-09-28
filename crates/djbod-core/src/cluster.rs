@@ -38,6 +38,18 @@ impl std::fmt::Display for NodeId {
     }
 }
 
+/// SPEC 6.2.2: a node is a member until it is removed, and a removed
+/// node stays in the document as a tombstone (18.2.1, 6.2.6.3): asked
+/// nothing, serving nothing, never revived, so that "removed" is
+/// recorded and "not listed" means "never joined".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeState {
+    #[default]
+    Active,
+    Removed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeEntry {
@@ -47,6 +59,8 @@ pub struct NodeEntry {
     /// An administrator-chosen name shown beside the UUID (SPEC 6.2.5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Required, like every field but the names (6.2.2, 19.1.5.2).
+    pub state: NodeState,
 }
 
 /// How connections are made and accepted (SPEC 19.1.6.4).
@@ -276,7 +290,8 @@ impl ClusterDocument {
             node_ids.push(node.id);
         }
         // Addresses (6.2.5.2): one or more per node, each an IP address
-        // and port, none listed twice anywhere in the document.
+        // and port, none listed for two active nodes. A removed node keeps
+        // its addresses for the record; a new machine may take them.
         let mut addresses: Vec<&str> = Vec::new();
         for node in &self.nodes {
             if node.addresses.is_empty() {
@@ -289,6 +304,9 @@ impl ClusterDocument {
                         address: address.clone(),
                         reason: e.to_string(),
                     });
+                }
+                if node.state == NodeState::Removed {
+                    continue;
                 }
                 if addresses.contains(&address.as_str()) {
                     return Err(ClusterDocumentError::DuplicateAddress {
@@ -330,10 +348,15 @@ impl ClusterDocument {
         if let Some(name) = &self.name {
             validate_cluster_name(name)?;
         }
+        // A removed node keeps its label for display; the label is free
+        // for a new node, so uniqueness is among active nodes.
         let mut node_labels: Vec<&str> = Vec::new();
         for node in &self.nodes {
             if let Some(label) = &node.label {
                 validate_label(label)?;
+                if node.state == NodeState::Removed {
+                    continue;
+                }
                 if node_labels.contains(&label.as_str()) {
                     return Err(ClusterDocumentError::DuplicateLabel {
                         label: label.clone(),
@@ -357,14 +380,21 @@ impl ClusterDocument {
         Scheme::new(self.k, self.m)
     }
 
+    /// Any node entry, removed ones included (6.2.2).
     pub fn node(&self, id: NodeId) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// The node with this label, if any (node labels are unique).
+    /// The nodes that are members: asked, served, and proposed to. A
+    /// removed node is a tombstone and takes no part (18.2.1).
+    pub fn active_nodes(&self) -> impl Iterator<Item = &NodeEntry> {
+        self.nodes.iter().filter(|n| n.state == NodeState::Active)
+    }
+
+    /// The active node with this label, if any (labels are unique among
+    /// active nodes; a removed node's label may have been taken again).
     pub fn node_by_label(&self, label: &str) -> Option<&NodeEntry> {
-        self.nodes
-            .iter()
+        self.active_nodes()
             .find(|n| n.label.as_deref() == Some(label))
     }
 
@@ -437,11 +467,13 @@ mod tests {
                     id: node_a,
                     addresses: vec!["10.0.0.1:7000".to_string()],
                     label: Some("nas1".to_string()),
+                    state: NodeState::Active,
                 },
                 NodeEntry {
                     id: node_b,
                     addresses: vec!["10.0.0.2:7000".to_string()],
                     label: None,
+                    state: NodeState::Active,
                 },
             ],
             devices: vec![
@@ -717,5 +749,35 @@ mod tests {
         assert!(json.contains("\"independence_level\": \"device\""));
         let parsed: ClusterDocument = serde_json::from_str(&json).expect("parse");
         assert_eq!(parsed, doc);
+    }
+
+    /// SPEC 6.2.2, 6.2.5.2: a removed node is a tombstone. Its address and
+    /// label no longer count against a new node, and a document without
+    /// a node state is refused, the field being required.
+    #[test]
+    fn a_removed_node_frees_its_address_and_label() {
+        let mut doc = sample();
+        doc.nodes[0].state = NodeState::Removed;
+        doc.nodes[1].addresses = doc.nodes[0].addresses.clone();
+        doc.nodes[1].label = doc.nodes[0].label.clone();
+        doc.validate()
+            .expect("a tombstone's address and label are free");
+        assert_eq!(doc.active_nodes().count(), 1);
+        assert_eq!(
+            doc.node_by_label("nas1").map(|n| n.id),
+            Some(doc.nodes[1].id)
+        );
+        assert!(doc.node(doc.nodes[0].id).is_some(), "the tombstone stays");
+
+        let mut json = serde_json::to_value(sample()).expect("json");
+        for node in json["nodes"].as_array_mut().expect("nodes") {
+            node.as_object_mut().expect("node").remove("state");
+        }
+        assert!(
+            serde_json::from_value::<ClusterDocument>(json).is_err(),
+            "a node without a state is refused"
+        );
+        let written = serde_json::to_string(&sample()).expect("json");
+        assert!(written.contains("\"state\":\"active\""), "{written}");
     }
 }

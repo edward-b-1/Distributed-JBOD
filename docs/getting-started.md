@@ -92,8 +92,8 @@ grow, but it warns, and every `put` fails with `InsufficientDevices`
 until enough devices exist.
 
 You need the **cluster id** for the client. If you lose it, any running
-node repeats it: `djbod get-cluster-id --node 127.0.0.1:5263` needs no
-`--cluster`, and `djbod identity --node 127.0.0.1:5263` says in words who
+node repeats it: `djbod get-cluster-id --bootstrap-node 127.0.0.1:5263` needs no
+`--cluster`, and `djbod identity --bootstrap-node 127.0.0.1:5263` says in words who
 is there: cluster, node, build, and document version. The id is also in
 `/tmp/djbod/state/cluster.json`.
 
@@ -116,7 +116,7 @@ add `--log-format json`.
 In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=4e9a31f4-e921-4767-8477-250de7f1640f   # yours
 
 target/release/djbod status
@@ -129,8 +129,8 @@ answered  by node 15dd0194-...
 build     0.1.0+3c3fd58b0
 transport plain
 
-DEVICE                                NODE                                  STATE          TOTAL          FREE
-2bb98674-...                          15dd0194-...                          active      22.5 GiB      13.2 GiB
+LABEL  DEVICE        NODE LABEL  NODE          NODE BUILD       STATE      TOTAL      FREE
+-      2bb98674-...  -           15dd0194-...  0.1.0+3c3fd58b0  active  22.5 GiB  13.2 GiB
 ...
 ```
 
@@ -177,7 +177,7 @@ download, in a browser. It takes the same two settings as the client and
 serves on localhost:
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE (or the deprecated DJBOD_NODE) and DJBOD_CLUSTER as above
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER as above
 ```
 
 `--bootstrap-node` takes several addresses, comma-separated, tried in
@@ -288,6 +288,7 @@ tripped over; a scrub finds damage first:
 ```sh
 target/release/djbod scrub            # every node checks its own disks; then cross-node checks
 target/release/djbod scrub --repair   # and rebuild what was found
+target/release/djbod inventory        # which objects are whole, degraded or unreadable right now
 ```
 
 Each node reads every record and every block on its own devices against
@@ -322,14 +323,14 @@ matches (SPEC.md 9.4.5).
 label wherever a command takes a device:
 
 ```sh
-target/release/djbod cluster set-label <device-uuid> nas1-bay0
+target/release/djbod cluster set-device-label <device-uuid> nas1-bay0
 target/release/djbod status                       # LABEL column
 target/release/djbod cluster set-state nas1-bay0 draining
 ```
 
 Labels are unique, up to 128 characters with no spaces, and live in the
 cluster document, so they follow the disk if it moves to another machine.
-`set-label <label> --clear` removes one. Nodes take labels the same way:
+`set-device-label <label> --clear` removes one. Nodes take labels the same way:
 
 ```sh
 target/release/djbod cluster set-node-label <node-uuid> nas1
@@ -344,6 +345,7 @@ log:
 
 ```sh
 target/release/djbod cluster set-name home-nas
+target/release/djbod cluster get-name             # prints home-nas; exit 1 when unnamed
 target/release/djbod status                       # cluster   home-nas (2e79b3df-…)
 ```
 
@@ -545,7 +547,7 @@ devices; every existing node must accept it. Then:
 ```sh
 target/release/djbod cluster show          # every node and the document version it holds
 target/release/djbod put big/file some.bin  # shards now land on both nodes
-target/release/djbod --node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
+target/release/djbod --bootstrap-node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
 ```
 
 Stop one node and any request needing it fails naming the node, then
@@ -565,7 +567,8 @@ path>`, and restart the node.
 
 On real machines, `listen` is that machine's own address, or `0.0.0.0`
 with `advertise` set to the address the others should use, and
-`allow_shared_filesystem` is omitted.
+`allow_shared_filesystem` is omitted. [deployment.md](deployment.md) has
+systemd units, a Docker image, and a Compose stack for that.
 
 ## TLS
 

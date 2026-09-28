@@ -1611,7 +1611,7 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             other => panic!("{other:?}"),
         }
     }
-    assert!(pages >= 2, "{pages} page(s)");
+    assert!(pages >= 2, "{pages} pages");
     assert_eq!(seen.len(), count as usize);
     let mut sorted = seen.clone();
     sorted.sort();
@@ -1650,7 +1650,7 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             }
         }
         assert_eq!(walked, seen, "limit {limit}");
-        assert!(pages >= (count / limit.max(1)) as usize, "{pages} page(s)");
+        assert!(pages >= (count / limit.max(1)) as usize, "{pages} pages");
     }
 
     // The per-device record listing pages the same way.
@@ -1684,7 +1684,7 @@ async fn listings_are_paged_so_no_response_outgrows_a_frame() {
             other => panic!("{other:?}"),
         }
     }
-    assert!(pages >= 2, "{pages} page(s)");
+    assert!(pages >= 2, "{pages} pages");
     assert_eq!(records, count as usize);
 
     // Everything that walks the whole key space still sees all of it.
@@ -1851,6 +1851,7 @@ async fn status_reports_an_unreachable_node_instead_of_failing() {
         id: ghost,
         addresses: vec!["127.0.0.1:1".to_string()],
         label: Some("ghost".to_string()),
+        state: djbod_core::cluster::NodeState::Active,
     });
     next.devices.push(djbod_core::cluster::DeviceEntry {
         id: ghost_device,

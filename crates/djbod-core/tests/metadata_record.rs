@@ -69,9 +69,17 @@ fn json_round_trips_exactly() {
 }
 
 #[test]
-fn revision_is_omitted_when_zero_and_covered_by_the_checksum() {
+fn revision_is_always_written_and_covered_by_the_checksum() {
     let record = sample_record();
-    assert!(!record.to_json().contains("\"revision\""));
+    assert!(
+        record.to_json().contains("\"revision\": 0"),
+        "{}",
+        record.to_json()
+    );
+    // A record without the field is not a record (SPEC 9.4.2).
+    let without = record.to_json().replace("\"revision\": 0,\n", "");
+    assert!(!without.contains("revision"), "{without}");
+    assert!(MetadataRecord::from_json(&without).is_err());
 
     let mut moved = record.clone();
     moved.revision = 1;

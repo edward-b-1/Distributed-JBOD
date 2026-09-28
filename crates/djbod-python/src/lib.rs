@@ -20,6 +20,7 @@ use djbod_client::blocking::Client as Inner;
 use djbod_client::transport::Connector;
 use djbod_client::{ClientError, ClientOptions};
 use djbod_core::record::{DeviceId, MetadataRecord};
+use djbod_core::text::counted;
 use djbod_proto::message::{
     ErrorCode, KeyEntry as ProtoKeyEntry, ListQuery, MissingRecordCopy, ObjectRead, ObjectWrite,
     Reconstruction,
@@ -84,8 +85,8 @@ fn warn_if_placed_around(py: Python<'_>, key: &str, write: &ObjectWrite) -> PyRe
         return Ok(());
     }
     let message = format!(
-        "{key}: placed around {} unavailable device(s); the object is stored on the others, and the cluster needs attention",
-        write.unavailable.len()
+        "{key}: placed around {}; the object is stored on the others, and the cluster needs attention",
+        counted(write.unavailable.len(), "unavailable device", "unavailable devices")
     );
     let warning = py
         .import("djbod.errors")?
@@ -110,8 +111,8 @@ fn warn_if_degraded(py: Python<'_>, key: &str, read: &ObjectRead) -> PyResult<()
     let mut notes = Vec::new();
     if !read.reconstructed.is_empty() {
         notes.push(format!(
-            "{} block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until repair runs",
-            read.reconstructed.len()
+            "{} reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until repair runs",
+            counted(read.reconstructed.len(), "block", "blocks")
         ));
     }
     if !read.missing_records.is_empty() {
@@ -187,8 +188,8 @@ fn warn_if_incomplete(py: Python<'_>, page: &djbod_client::ListPage) -> PyResult
         return Ok(());
     }
     let message = format!(
-        "listed around {} device(s) the cluster cannot read, enough to hide a key: the listing may be incomplete",
-        page.unread.len()
+        "listed around {} the cluster cannot read, enough to hide a key: the listing may be incomplete",
+        counted(page.unread.len(), "device", "devices")
     );
     let warning = py
         .import("djbod.errors")?

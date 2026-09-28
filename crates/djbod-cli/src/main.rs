@@ -1,7 +1,7 @@
 //! `djbod`: the command-line client (SPEC C.2).
 //!
 //! ```text
-//! djbod --node 10.0.0.1:5263 --cluster <uuid> status
+//! djbod --bootstrap-node 10.0.0.1:5263 --cluster <uuid> status
 //! djbod ... put photos/cat.jpg ./cat.jpg
 //! djbod ... get photos/cat.jpg ./copy.jpg
 //! djbod ... head photos/cat.jpg
@@ -10,13 +10,14 @@
 //! djbod ... cluster-config
 //! ```
 //!
-//! `--node` and `--cluster` may also come from `DJBOD_NODE` and
+//! `--bootstrap-node` and `--cluster` may also come from `DJBOD_BOOTSTRAP_NODE` and
 //! `DJBOD_CLUSTER`. `init-cluster` prints the cluster id to use.
 //!
 //! Object bodies stream: `put` reads the file a chunk at a time, `get`
 //! writes as chunks arrive. A failed `get` leaves a partial output file
 //! and says so; it is removed when the output is a named file.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,11 +33,13 @@ use djbod_client::{Client, ClientOptions};
 use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::record::DeviceId;
 use djbod_core::stripe::FaultKind;
+use djbod_core::text::counted;
 use djbod_proto::message::{
-    DrainEvent, ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction,
-    RecordCopyFault,
+    DrainEvent, ErrorCode, ErrorDetail, InventoryEvent, InventoryQuery, ListQuery,
+    MissingRecordCopy, ObjectState, Reconstruction, RecordCopyFault,
 };
 
+mod names;
 mod tables;
 
 #[derive(Parser)]
@@ -45,8 +48,8 @@ struct Cli {
     /// Address of a node in the cluster; several, comma-separated, are
     /// tried in order, and a request moves to the next when one fails.
     #[arg(
-        long = "node",
-        env = "DJBOD_NODE",
+        long = "bootstrap-node",
+        env = "DJBOD_BOOTSTRAP_NODE",
         global = true,
         value_delimiter = ','
     )]
@@ -114,13 +117,13 @@ enum Command {
         #[arg(long)]
         node_id: Option<String>,
     },
-    /// Ask a node which cluster it serves. Needs --node only; prints the
+    /// Ask a node which cluster it serves. Needs --bootstrap-node only; prints the
     /// cluster id alone, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
     /// --json adds the name and the node's build.
     GetClusterId,
-    /// Who is at --node: the cluster's name and id, the node's label, id
+    /// Who is at --bootstrap-node: the cluster's name and id, the node's label, id
     /// and address, its build, the document version it holds, and the
-    /// transport. Needs --node only.
+    /// transport. Needs --bootstrap-node only.
     Identity,
     /// Store a file (or standard input with `-`) under a key.
     Put {
@@ -177,6 +180,14 @@ enum Command {
         #[arg(long)]
         repair: bool,
     },
+    /// Count every object by its state against the devices that can be
+    /// read now, from the records alone: no shard is read. Goes around a
+    /// node that is down, whose devices count as unread.
+    Inventory {
+        /// Also list every object in this state, one per line.
+        #[arg(long, value_name = "STATE")]
+        keys: Option<ObjectStateArg>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -190,7 +201,7 @@ enum ClusterCommand {
     SetState { device: String, state: StateArg },
     /// Give a device a short name shown beside its UUID, or clear it with
     /// --clear. Labels are unique within the cluster.
-    SetLabel {
+    SetDeviceLabel {
         /// The device, by UUID or current label.
         device: String,
         /// The new label: 1 to 128 characters, no whitespace.
@@ -209,6 +220,10 @@ enum ClusterCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Print the cluster's name alone, for scripts, as get-cluster-id
+    /// prints the id. Exits 1 with a message on standard error when no
+    /// name is set. --json gives the id and the name, null when none.
+    GetName,
     /// Give a node a short name shown beside its UUID, or clear it with
     /// --clear. Node labels are unique within the cluster.
     SetNodeLabel {
@@ -318,6 +333,33 @@ enum StateArg {
     Active,
 }
 
+/// An object state (SPEC 20.1.5) as `--keys` names it.
+#[derive(Clone, Copy, ValueEnum)]
+enum ObjectStateArg {
+    /// Every shard on a device that can be read.
+    Whole,
+    /// Within m shards out, all of them parity: reads unaffected.
+    DegradedParity,
+    /// Within m shards out, some of them data: every read decodes.
+    DegradedData,
+    /// More than m shards out: cannot be read until a device returns.
+    Unreadable,
+    /// The record copies read do not agree or one is missing.
+    Inconsistent,
+}
+
+impl From<ObjectStateArg> for ObjectState {
+    fn from(state: ObjectStateArg) -> ObjectState {
+        match state {
+            ObjectStateArg::Whole => ObjectState::Whole,
+            ObjectStateArg::DegradedParity => ObjectState::DegradedParity,
+            ObjectStateArg::DegradedData => ObjectState::DegradedData,
+            ObjectStateArg::Unreadable => ObjectState::Unreadable,
+            ObjectStateArg::Inconsistent => ObjectState::Inconsistent,
+        }
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceTransport {
     Plain,
@@ -342,7 +384,7 @@ async fn main() -> ExitCode {
 /// `get-cluster-id` requires.
 async fn connect(cli: &Cli) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let cluster = cli
         .cluster
@@ -352,11 +394,17 @@ async fn connect(cli: &Cli) -> anyhow::Result<Client> {
 
 async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
     options.cluster = cluster;
-    Client::connect(options).await.map_err(client_err)
+    let mut client = Client::connect(options).await.map_err(client_err)?;
+    // The document names devices and nodes for everything this command
+    // prints (6.2.5.1); without it, they are UUIDs, and nothing fails.
+    if let Ok(document) = client.cluster_document().await {
+        names::remember(document);
+    }
+    Ok(client)
 }
 
 /// A node that answers, and the cluster id, for the membership
@@ -370,7 +418,7 @@ async fn reachable_node(cli: &Cli) -> anyhow::Result<(SocketAddr, Uuid)> {
 /// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1).
 async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let connector = connector(cli)?;
     let mut attempts = Vec::new();
@@ -406,10 +454,10 @@ fn describe_error(e: &ConnectionError) -> String {
 fn describe_detail(detail: &ErrorDetail) -> String {
     let mut out = format!("{:?}: {}", detail.code, detail.message);
     if let Some(node) = detail.node {
-        out.push_str(&format!("\n  node:    {}", node.0));
+        out.push_str(&format!("\n  node:    {}", names::node_identity(node)));
     }
     if let Some(device) = detail.device {
-        out.push_str(&format!("\n  device:  {}", device.0));
+        out.push_str(&format!("\n  device:  {}", names::device_identity(device)));
     }
     if let Some(key) = &detail.key {
         out.push_str(&format!("\n  key:     {key}"));
@@ -453,6 +501,74 @@ fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failu
         (false, _) => 2,
         (true, false) => 3,
         (true, true) => 4,
+    }
+}
+
+/// An object state (20.1.5) as a key line prints it.
+fn object_state_word(state: ObjectState) -> &'static str {
+    match state {
+        ObjectState::Whole => "whole",
+        ObjectState::DegradedParity => "degraded-parity",
+        ObjectState::DegradedData => "degraded-data",
+        ObjectState::Unreadable => "unreadable",
+        ObjectState::Inconsistent => "inconsistent",
+    }
+}
+
+/// What a scrub finding is, in the words of the last line (20.1.2.3),
+/// singular and plural. A device that could not be read is not damage
+/// and has its own line.
+fn scrub_finding_words(
+    event: &djbod_proto::message::ScrubEvent,
+) -> Option<(&'static str, &'static str)> {
+    use djbod_core::scrub::Finding as F;
+    use djbod_proto::message::{ClusterFinding as C, ScrubEvent as E};
+    match event {
+        E::NodeFinding { finding, .. } => Some(match finding {
+            F::RecordCorrupt { .. } => ("corrupt record", "corrupt records"),
+            F::ShardUnreadable { .. } => ("unreadable shard", "unreadable shards"),
+            F::ShardMisplaced { .. } => ("misplaced shard", "misplaced shards"),
+            F::ShardBlocksCorrupt { .. } => {
+                ("shard with corrupt blocks", "shards with corrupt blocks")
+            }
+            F::ShardWithoutRecord { .. } => ("shard without a record", "shards without a record"),
+            F::RecordWithoutShard { .. } => {
+                ("record without its shard", "records without their shard")
+            }
+            F::RecordNotForThisDevice { .. } => {
+                ("record on the wrong device", "records on the wrong device")
+            }
+            F::StaleTemporary { .. } => ("stale temporary file", "stale temporary files"),
+            F::DeviceUnavailable { .. } => return None,
+        }),
+        E::ClusterFinding(finding) => Some(match finding {
+            C::RecordsInconsistent { .. } => (
+                "version with inconsistent record copies",
+                "versions with inconsistent record copies",
+            ),
+            C::ShardMissingOnDevice { .. } => (
+                "shard missing from its device",
+                "shards missing from their device",
+            ),
+            C::ShardLost { .. } => ("shard on a removed device", "shards on a removed device"),
+            C::StaleCopy { .. } => ("stale record copy", "stale record copies"),
+        }),
+        _ => None,
+    }
+}
+
+/// The object a scrub finding is about, when it is about one.
+fn scrub_finding_key(event: &djbod_proto::message::ScrubEvent) -> Option<&str> {
+    use djbod_proto::message::{ClusterFinding as C, ScrubEvent as E};
+    match event {
+        E::NodeFinding { finding, .. } => finding.repair_key(),
+        E::ClusterFinding(
+            C::RecordsInconsistent { key, .. }
+            | C::ShardMissingOnDevice { key, .. }
+            | C::ShardLost { key, .. }
+            | C::StaleCopy { key, .. },
+        ) => Some(key),
+        _ => None,
     }
 }
 
@@ -576,7 +692,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 print!("{}", tables::contents(&document, &rows));
                 let empty = rows.iter().filter(|c| c.versions == 0).count();
                 if empty > 0 {
-                    eprintln!("{empty} device(s) hold nothing and may be removed");
+                    eprintln!(
+                        "{} nothing and may be removed",
+                        counted(empty, "device holds", "devices hold")
+                    );
                 }
             }
         }
@@ -617,7 +736,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             None => println!("cluster   {cluster_id}"),
                         }
                         println!("document  version {document_version}");
-                        println!("answered  by node {}", coordinator.0);
+                        println!("answered  by node {}", names::node_identity(coordinator));
                         println!("build     {}", build_text(&build, djbod_client::BUILD));
                         println!("transport {transport}");
                         println!();
@@ -628,15 +747,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             .count();
                         if unavailable_count > 0 {
                             eprintln!(
-                                "{unavailable_count} device(s) unavailable: their node cannot read them (disk failed, not mounted, or destroyed) or cannot be reached"
+                                "{} unavailable: {}",
+                                counted(unavailable_count, "device is", "devices are"),
+                                if unavailable_count == 1 {
+                                    "its node cannot read it (disk failed, not mounted, or destroyed) or cannot be reached"
+                                } else {
+                                    "their nodes cannot read them (disk failed, not mounted, or destroyed) or cannot be reached"
+                                }
                             );
                         }
                         // A node that could not be asked (5.6, 19.1.3): its
                         // devices are the unavailable ones above.
-                        for n in nodes.iter().filter(|n| !n.reachable) {
+                        for n in nodes.iter().filter(|n| {
+                            !n.reachable && n.state == djbod_core::cluster::NodeState::Active
+                        }) {
                             eprintln!(
                                 "node {} unreachable: {}",
-                                n.node.0,
+                                names::node_identity(n.node),
                                 n.error.as_deref().unwrap_or("no answer")
                             );
                         }
@@ -692,11 +819,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let devices: Vec<String> = write
                     .unavailable
                     .iter()
-                    .map(|u| format!("{} on node {}", u.device.0, u.node.0))
+                    .map(|u| names::device_and_node(u.device))
                     .collect();
                 eprintln!(
-                    "{key}: placed around {} unavailable device(s): {}; run `djbod status`",
-                    devices.len(),
+                    "{key}: placed around {}: {}; run `djbod status`",
+                    counted(devices.len(), "unavailable device", "unavailable devices"),
                     devices.join(", ")
                 );
                 std::process::exit(2);
@@ -778,7 +905,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             println!("content-type  {ct}");
                         }
                         for shard in &record.shards {
-                            println!("shard {:<3}     device {}", shard.index, shard.device.0);
+                            println!(
+                                "shard {:<3}     {}",
+                                shard.index,
+                                names::device_and_node(shard.device)
+                            );
                         }
                     }
                 }
@@ -853,6 +984,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             let mut repairs = 0usize;
             let mut repair_failures = 0usize;
             let mut unavailable_devices = 0usize;
+            // For the last line (SPEC 20.1.2.3): what was found, by kind,
+            // and in how many objects.
+            let mut by_kind: BTreeMap<(&'static str, &'static str), usize> = BTreeMap::new();
+            let mut damaged_objects: BTreeSet<String> = BTreeSet::new();
+            // Printed after the last line: every version by its shards
+            // available, and then what the unavailable devices cost, so
+            // that is the last thing read (SPEC 20.1.2.2).
+            let mut availability_before: Option<ScrubEvent> = None;
+            let mut availability_after: Option<ScrubEvent> = None;
+            let mut exposure: Option<ScrubEvent> = None;
             let end = loop {
                 match run.next_event().await.map_err(client_err)? {
                     Ok(event) => {
@@ -866,7 +1007,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 ..
                             } => unavailable_devices += 1,
                             ScrubEvent::NodeFinding { .. } | ScrubEvent::ClusterFinding(_) => {
-                                findings += 1
+                                findings += 1;
+                                if let Some(words) = scrub_finding_words(&event) {
+                                    *by_kind.entry(words).or_default() += 1;
+                                }
+                                if let Some(key) = scrub_finding_key(&event) {
+                                    damaged_objects.insert(key.to_string());
+                                }
                             }
                             ScrubEvent::Repaired { .. } => repairs += 1,
                             ScrubEvent::RepairFailed { .. } => repair_failures += 1,
@@ -884,8 +1031,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                             } => {
                                 println!(
                                     "node {}  device {}\n  {}",
-                                    short(&node.0),
-                                    short(&device.0),
+                                    names::node(*node),
+                                    names::device(*device),
                                     describe_scrub_finding(finding)
                                 );
                             }
@@ -895,25 +1042,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 summary,
                             } => {
                                 eprintln!(
-                                    "node {}  device {}: {} records, {} shards, {} blocks, {} read, {} finding(s)",
-                                    short(&node.0),
-                                    short(&device.0),
+                                    "node {}  device {}: {} records, {} shards, {} blocks, {} read, {}",
+                                    names::node(*node),
+                                    names::device(*device),
                                     summary.records_checked,
                                     summary.shards_checked,
                                     summary.blocks_checked,
                                     human_bytes(summary.bytes_read),
-                                    summary.findings.len()
+                                    counted(summary.findings.len(), "finding", "findings")
                                 );
                             }
                             ScrubEvent::NodeFailed { node, detail } => {
                                 println!(
                                     "node {} could not be scrubbed: {}",
-                                    short(&node.0),
+                                    names::node_identity(*node),
                                     detail.message
                                 );
                             }
                             ScrubEvent::ClusterFinding(finding) => {
-                                println!("cluster check: {finding:?}");
+                                println!("cluster check: {}", describe_cluster_finding(finding));
                             }
                             ScrubEvent::CrossCheckStopped {
                                 node,
@@ -926,22 +1073,34 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                     None => "the rest not checked".to_string(),
                                 };
                                 println!(
-                                    "cross-node checks stopped at node {}: {}; {versions_checked} version(s) checked, {unchecked}",
-                                    short(&node.0),
-                                    detail.message
+                                    "cross-node checks stopped at node {}: {}; {} checked, {unchecked}",
+                                    names::node_identity(*node),
+                                    detail.message,
+                                    counted(*versions_checked as usize, "version", "versions")
                                 );
                             }
                             ScrubEvent::CrossCheckProgress {
                                 versions_checked, ..
                             } => {
                                 eprintln!(
-                                    "cross-node checks: {versions_checked} version(s) checked"
+                                    "cross-node checks: {} checked",
+                                    counted(*versions_checked as usize, "version", "versions")
                                 );
                             }
+                            ScrubEvent::CrossCheckAvailability {
+                                after_repair: true, ..
+                            } => availability_after = Some(event),
+                            ScrubEvent::CrossCheckAvailability { .. } => {
+                                availability_before = Some(event)
+                            }
+                            ScrubEvent::CrossCheckExposure { .. } => exposure = Some(event),
                             ScrubEvent::Repaired { key, report } => {
                                 let rewritten =
                                     report.shards.iter().filter(|s| s.rewritten).count();
-                                println!("repaired {key}: {rewritten} shard(s) rewritten");
+                                println!(
+                                    "repaired {key}: {} rewritten",
+                                    counted(rewritten, "shard", "shards")
+                                );
                             }
                             ScrubEvent::RepairFailed { key, detail } => {
                                 println!("repair of {key} failed: {}", describe_detail(detail));
@@ -961,19 +1120,168 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     .is_some_and(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed);
             let code = scrub_exit_code(*repair, incomplete, findings, repair_failures);
             if !cli.json {
-                eprintln!(
-                    "{findings} finding(s), {repairs} repair(s), {repair_failures} failed repair(s): {}",
+                let mut last = counted(findings, "finding", "findings");
+                if !damaged_objects.is_empty() {
+                    last.push_str(&format!(
+                        " in {}",
+                        counted(damaged_objects.len(), "object", "objects")
+                    ));
+                }
+                if !by_kind.is_empty() {
+                    let kinds: Vec<String> = by_kind
+                        .iter()
+                        .map(|((one, many), n)| counted(*n, one, many))
+                        .collect();
+                    last.push_str(&format!(": {}", kinds.join(", ")));
+                }
+                if *repair {
+                    last.push_str(&format!("; {repairs} repaired, {repair_failures} failed"));
+                }
+                last.push_str(&format!(
+                    "; {}",
                     scrub_outcome(*repair, incomplete, findings, repair_failures)
-                );
+                ));
+                eprintln!("{last}");
                 if unavailable_devices > 0 {
                     eprintln!(
-                        "{unavailable_devices} device(s) unavailable, not checked: restore or retire them, then run again"
+                        "{} unavailable, not checked: restore or retire them, then run again",
+                        counted(unavailable_devices, "device", "devices")
                     );
                 }
-                if let Some(error) = &end.error {
+                // A stream that ended only because repairs failed is a
+                // complete run (20.1.2.3), and the verdict has the count.
+                if let Some(error) = end
+                    .error
+                    .as_ref()
+                    .filter(|e| e.code != djbod_proto::message::ErrorCode::WriteFailed)
+                {
                     eprintln!("scrub incomplete: {}", describe_detail(error));
                 }
+                // One line without --repair; with it, before and after,
+                // so the two show what the run changed.
+                for (event, label) in [
+                    (
+                        &availability_before,
+                        if *repair {
+                            "shards available before repair"
+                        } else {
+                            "shards available"
+                        },
+                    ),
+                    (&availability_after, "shards available after repair"),
+                ] {
+                    if let Some(ScrubEvent::CrossCheckAvailability { versions, .. }) = event {
+                        eprintln!("{}", describe_availability(versions, label));
+                    }
+                }
+                if let Some(ScrubEvent::CrossCheckExposure {
+                    unread,
+                    versions_checked,
+                    versions_with_shards_out,
+                    versions_at_the_limit,
+                    versions_unreadable,
+                }) = &exposure
+                {
+                    eprintln!(
+                        "{}",
+                        describe_exposure(
+                            unread,
+                            *versions_checked,
+                            *versions_with_shards_out,
+                            *versions_at_the_limit,
+                            *versions_unreadable
+                        )
+                    );
+                }
             }
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Command::Inventory { keys } => {
+            let mut client = connect(&cli).await?;
+            let query = InventoryQuery {
+                keys: keys.map(ObjectState::from),
+            };
+            let mut run = client.inventory(query).await.map_err(client_err)?;
+            let mut summary: Option<InventoryEvent> = None;
+            let end = loop {
+                match run.next_event().await.map_err(client_err)? {
+                    Ok(event) => {
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&event)?);
+                        }
+                        match &event {
+                            InventoryEvent::Object {
+                                key,
+                                version,
+                                state,
+                                shards_available,
+                                shards_total,
+                            } if !cli.json => {
+                                println!(
+                                    "{key}  {}  {}  {shards_available} of {shards_total} shards",
+                                    version.to_text(),
+                                    object_state_word(*state)
+                                );
+                            }
+                            InventoryEvent::Progress { versions_checked } if !cli.json => {
+                                eprintln!(
+                                    "inventory: {} checked",
+                                    counted(*versions_checked as usize, "object", "objects")
+                                );
+                            }
+                            InventoryEvent::Summary { .. } => summary = Some(event),
+                            _ => {}
+                        }
+                    }
+                    Err(end) => break end,
+                }
+            };
+            if let Some(error) = &end.error {
+                bail!("inventory failed: {}", describe_detail(error));
+            }
+            let Some(InventoryEvent::Summary {
+                versions_checked,
+                whole,
+                degraded_parity,
+                degraded_data,
+                unreadable,
+                inconsistent,
+                unread,
+                complete,
+            }) = &summary
+            else {
+                bail!("inventory ended without a summary");
+            };
+            let not_whole = versions_checked - whole;
+            if !cli.json {
+                eprintln!(
+                    "{}: {whole} whole, {degraded_parity} degraded (parity out, reads unaffected), \
+                     {degraded_data} degraded (data out, every read decodes), {unreadable} unreadable, \
+                     {inconsistent} inconsistent",
+                    counted(*versions_checked as usize, "object", "objects")
+                );
+                if !unread.is_empty() {
+                    let devices: Vec<String> = unread
+                        .iter()
+                        .map(|u| names::device_and_node(u.device))
+                        .collect();
+                    eprintln!(
+                        "{} unread: {}",
+                        counted(unread.len(), "device", "devices"),
+                        devices.join(", ")
+                    );
+                }
+                if !complete {
+                    eprintln!(
+                        "inventory incomplete: with {} unread an object stored only on them leaves \
+                         no trace, so the counts are a lower bound",
+                        counted(unread.len(), "device", "devices")
+                    );
+                }
+            }
+            let code = scrub_exit_code(false, !complete, not_whole as usize, 0);
             if code != 0 {
                 std::process::exit(code);
             }
@@ -1012,11 +1320,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         let destination = record
                             .device_for(djbod_core::erasure::ShardIndex(*shard_index))
-                            .map(|d| d.0.to_string())
+                            .map(names::device_and_node)
                             .unwrap_or_default();
                         println!(
                             "moved shard {shard_index} of {key} from {} to {destination} ({}); record now revision {}{}",
-                            source.0,
+                            names::device_and_node(source),
                             if rebuilt { "rebuilt from the other shards" } else { "copied" },
                             record.revision,
                             if source_cleaned { "" } else { "; source copy not removed, scrub will report it as stale" }
@@ -1051,17 +1359,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 }
                             };
                             let outcome = match (&shard.relocated_to, shard.rewritten) {
-                                (Some(device), _) => format!("  -> rebuilt on {}", device.0),
+                                (Some(device), _) => {
+                                    format!("  -> rebuilt on {}", names::device_and_node(*device))
+                                }
                                 (None, true) => "  -> rewritten".to_string(),
                                 (None, false) => String::new(),
                             };
                             println!(
-                                "shard {:<3}  device {}  {condition}{outcome}",
-                                shard.index, shard.device.0
+                                "shard {:<3}  {}  {condition}{outcome}",
+                                shard.index,
+                                names::device_and_node(shard.device)
                             );
                         }
                         let count = report.shards.iter().filter(|s| s.rewritten).count();
-                        println!("{count} shard(s) rewritten");
+                        println!("{} rewritten", counted(count, "shard", "shards"));
                     }
                 }
             }
@@ -1077,12 +1388,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     let reports =
                         djbod_client::admin::fetch_all(&connector(&cli)?, &document).await;
                     if cli.json {
-                        let rows: Vec<serde_json::Value> = reports
+                        let mut rows: Vec<serde_json::Value> = reports
                             .iter()
                             .map(|r| {
                                 serde_json::json!({
                                     "node": r.node,
                                     "label": r.label,
+                                    "state": "active",
                                     "address": r.address,
                                     "addresses": document.node(r.node).map(|n| &n.addresses),
                                     "build": r.build,
@@ -1091,6 +1403,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 })
                             })
                             .collect();
+                        // Tombstones (6.2.2), from the document, not asked.
+                        for n in document
+                            .nodes
+                            .iter()
+                            .filter(|n| n.state == djbod_core::cluster::NodeState::Removed)
+                        {
+                            rows.push(serde_json::json!({
+                                "node": n.id,
+                                "label": n.label,
+                                "state": "removed",
+                                "address": n.addresses.first(),
+                                "addresses": n.addresses,
+                                "build": null,
+                                "version": null,
+                                "error": null,
+                            }));
+                        }
                         println!("{}", serde_json::to_string_pretty(&rows)?);
                     } else {
                         println!("cluster   {}", document.title());
@@ -1128,12 +1457,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if changed {
                         println!(
                             "device {} is now {state_name} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     } else {
                         println!(
                             "device {} was already {state_name}; nothing changed",
-                            device_id.0
+                            names::device_identity(device_id)
                         );
                     }
                 }
@@ -1142,16 +1472,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     node_id,
                     partial,
                 } => {
+                    // Fetched once: every line of the drain names devices
+                    // and nodes by their labels where they have one (6.2.5.1).
+                    let document =
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let devices: Vec<Uuid> = match (device, node_id) {
                         (Some(device), _) => vec![resolve_device(&cli, device).await?.0],
                         (None, Some(node_id)) => {
-                            let document = djbod_client::admin::fetch_document(
-                                &connector(&cli)?,
-                                node,
-                                cluster,
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{e}"))?;
                             let wanted =
                                 document
                                     .node_by_name(node_id)
@@ -1218,9 +1547,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 document.k, document.m, document.block_size
                             );
                         }
-                        if behind > 0 {
+                        if behind == 1 {
                             println!(
-                                "{behind} object(s) are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them"
+                                "1 object is stored at another scheme and stays readable as it is; `djbod cluster reencode` rewrites it"
+                            );
+                        } else if behind > 1 {
+                            println!(
+                                "{behind} objects are stored at another scheme and stay readable as they are; `djbod cluster reencode` rewrites them"
                             );
                         } else {
                             println!("every object is at this scheme");
@@ -1309,7 +1642,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         std::process::exit(2);
                     }
                 }
-                ClusterCommand::SetLabel {
+                ClusterCommand::SetDeviceLabel {
                     device,
                     label,
                     clear: _,
@@ -1337,14 +1670,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if !changed {
                         println!("nothing changed");
                     } else if let Some(label) = label {
+                        // The identity before the change: the old label, if
+                        // any, beside the UUID, then what it is called now.
                         println!(
                             "device {} is now labelled {label} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     } else {
                         println!(
                             "label cleared from device {} (document version {})",
-                            device_id.0, document.version
+                            names::device_identity(device_id),
+                            document.version
                         );
                     }
                 }
@@ -1381,6 +1718,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     }
                 }
+                ClusterCommand::GetName => {
+                    let document =
+                        djbod_client::admin::fetch_document(&connector(&cli)?, node, cluster)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    if cli.json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "cluster_id": cluster,
+                                "cluster_name": document.name,
+                            }))?
+                        );
+                    } else if let Some(name) = &document.name {
+                        println!("{name}");
+                    } else {
+                        eprintln!("the cluster has no name; set one with `djbod cluster set-name`");
+                        std::process::exit(1);
+                    }
+                }
                 ClusterCommand::SetNodeLabel {
                     node_id,
                     label,
@@ -1411,12 +1768,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else if let Some(label) = label {
                         println!(
                             "node {} is now labelled {label} (document version {})",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     } else {
                         println!(
                             "label cleared from node {} (document version {})",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     }
                 }
@@ -1446,7 +1805,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!(
                             "node {} is now reached at {} (document version {})",
-                            id.0,
+                            names::node_identity(id),
                             addresses.join(", "),
                             document.version
                         );
@@ -1485,11 +1844,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         );
                     } else if changed {
                         println!(
-                            "device {device} removed (document version {}); take it out of its node's configuration and restart that node",
+                            "device {} removed (document version {}); take it out of its node's configuration and restart that node",
+                            names::device_identity(device_id),
                             document.version
                         );
                     } else {
-                        println!("device {device} was already removed; nothing changed");
+                        println!(
+                            "device {} was already removed; nothing changed",
+                            names::device_identity(device_id)
+                        );
                     }
                 }
                 ClusterCommand::RemoveNode {
@@ -1513,7 +1876,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!(
                             "node {} removed (document version {}); its process stops on its own, and its devices can be reused with `djbod-node join --wipe-removed-device`",
-                            id.0, document.version
+                            names::node_identity(id),
+                            document.version
                         );
                     }
                 }
@@ -1542,13 +1906,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     } else {
                         println!("highest version  {}", report.highest_version);
                         for n in &report.updated {
-                            println!("updated          {}", n.0);
+                            println!("updated          {}", names::node_identity(*n));
                         }
                         for n in &report.already_current {
-                            println!("already current  {}", n.0);
+                            println!("already current  {}", names::node_identity(*n));
                         }
                         for (n, reason) in &report.unreachable {
-                            println!("unreachable      {}  {reason}", n.0);
+                            println!("unreachable      {}  {reason}", names::node_identity(*n));
                         }
                         if !report.unreachable.is_empty() {
                             std::process::exit(2);
@@ -1591,13 +1955,88 @@ async fn all_keys(cli: &Cli) -> anyhow::Result<Vec<String>> {
     Ok(listing.keys.into_iter().map(|e| e.key).collect())
 }
 
+/// What the devices a scrub could not read cost (SPEC 20.1.2.2): the
+/// data is at higher risk, and this says how much and what to do. Not
+/// damage, which the findings and the exit code already carry.
+fn describe_exposure(
+    unread: &[djbod_proto::message::DeviceExposure],
+    versions_checked: u64,
+    with_shards_out: u64,
+    at_the_limit: u64,
+    unreadable: u64,
+) -> String {
+    let mut lines = vec![format!(
+        "WARNING: data at higher risk: versions with a shard on an unavailable device: {with_shards_out} of {versions_checked}"
+    )];
+    for entry in unread {
+        lines.push(format!(
+            "  {}: {}",
+            names::device_and_node(entry.device),
+            counted(entry.versions as usize, "version", "versions")
+        ));
+    }
+    if at_the_limit > 0 {
+        lines.push(format!(
+            "  {} can lose no further shard: one more device out makes {} unreadable",
+            counted(at_the_limit as usize, "version", "versions"),
+            if at_the_limit == 1 { "it" } else { "them" }
+        ));
+    }
+    lines.push(match unreadable {
+        0 => "  no version is unreadable now".to_string(),
+        1 => "  1 version is unreadable now: more than m shards out".to_string(),
+        n => format!("  {n} versions are unreadable now: more than m shards out"),
+    });
+    lines.push(
+        "restore the device, or retire it with `djbod cluster remove-device --force` and run `djbod scrub --repair` to rebuild what it held".to_string(),
+    );
+    lines.join("\n")
+}
+
+/// Every version checked by how many of its shards are available (SPEC
+/// 20.1.2.2), against its scheme: whole, readable with so many to
+/// spare, or unreadable.
+fn describe_availability(
+    versions: &[djbod_proto::message::ShardAvailability],
+    label: &str,
+) -> String {
+    if versions.is_empty() {
+        return format!("{label}: no version checked");
+    }
+    let parts: Vec<String> = versions
+        .iter()
+        .map(|v| {
+            let state = if v.shards_available == v.shards_total {
+                String::new()
+            } else if v.shards_available >= v.k {
+                match v.shards_available - v.k {
+                    0 => " (readable, none to spare)".to_string(),
+                    spare => format!(
+                        " (readable, {} to spare)",
+                        counted(spare as usize, "shard", "shards")
+                    ),
+                }
+            } else {
+                " (unreadable)".to_string()
+            };
+            format!(
+                "{} with {} of {}{state}",
+                counted(v.versions as usize, "object", "objects"),
+                v.shards_available,
+                v.shards_total
+            )
+        })
+        .collect();
+    format!("{label}: {}", parts.join(", "))
+}
+
 /// The devices a listing went without (SPEC 15.1) and what that means
 /// for the keys shown.
 fn describe_unread(page: &djbod_client::ListPage) -> String {
     let devices: Vec<String> = page
         .unread
         .iter()
-        .map(|u| format!("{} on node {}", u.device.0, u.node.0))
+        .map(|u| names::device_and_node(u.device))
         .collect();
     let consequence = if page.complete {
         "every key is still listed, since fewer than k+m devices are out"
@@ -1605,8 +2044,8 @@ fn describe_unread(page: &djbod_client::ListPage) -> String {
         "keys stored only on those devices cannot be seen, so the listing may be incomplete"
     };
     format!(
-        "listed around {} device(s) the cluster cannot read: {}; {consequence}; run `djbod status`",
-        page.unread.len(),
+        "listed around {} the cluster cannot read: {}; {consequence}; run `djbod status`",
+        counted(page.unread.len(), "device", "devices"),
         devices.join(", ")
     )
 }
@@ -1684,7 +2123,10 @@ async fn reencode_all(
         }
     }
     if !cli.json {
-        eprintln!("{examined} object(s) examined, {reencoded} re-encoded, {failures} failed");
+        eprintln!(
+            "{} examined, {reencoded} re-encoded, {failures} failed",
+            counted(examined, "object", "objects")
+        );
     }
     Ok(failures)
 }
@@ -1772,8 +2214,8 @@ async fn force_remove_device(
     } else {
         println!(
             "device {} on node {} is {}{}",
-            device_id.0,
-            entry.node.0,
+            names::device_identity(device_id),
+            names::node_identity(entry.node),
             format!("{:?}", entry.state).to_lowercase(),
             if readable {
                 " and its node can still read it"
@@ -1786,7 +2228,8 @@ async fn force_remove_device(
         );
         if remaining < needed {
             println!(
-                "warning: {remaining} active device(s) would remain and every version needs {needed}; nothing can be rebuilt until a device is added"
+                "warning: {} would remain and every version needs {needed}; nothing can be rebuilt until a device is added",
+                counted(remaining as usize, "active device", "active devices")
             );
         }
     }
@@ -1814,12 +2257,13 @@ async fn force_remove_device(
     } else if changed {
         println!(
             "device {} removed (document version {}); run `djbod scrub --repair` to rebuild what it held, then take it out of its node's configuration and restart that node",
-            device_id.0, document.version
+            names::device_identity(device_id),
+            document.version
         );
     } else {
         println!(
             "device {} was already removed; nothing changed",
-            device_id.0
+            names::device_identity(device_id)
         );
     }
     Ok(())
@@ -1855,12 +2299,14 @@ async fn force_remove_node(
     } else {
         println!(
             "node {} at {} does not answer: {}",
-            node_id.0, plan.address, plan.unreachable_because
+            names::node_identity(node_id),
+            plan.address,
+            plan.unreachable_because
         );
         println!(
-            "it holds {} device(s); {} version(s) have shards there",
-            plan.devices.len(),
-            plan.affected.len()
+            "it holds {}; {} shards there",
+            counted(plan.devices.len(), "device", "devices"),
+            counted(plan.affected.len(), "version has", "versions have")
         );
         if unrecoverable.is_empty() {
             println!("every one of them can be rebuilt from the other shards (at most m = {m} on the dead node)");
@@ -1887,10 +2333,10 @@ async fn force_remove_node(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if !cli.json {
         println!(
-            "node {} removed (document version {}); rebuilding {} version(s)",
-            node_id.0,
+            "node {} removed (document version {}); rebuilding {}",
+            names::node_identity(node_id),
             document.version,
-            plan.affected.len()
+            counted(plan.affected.len(), "version", "versions")
         );
     }
     // Step 3: rebuild, one repair per affected key, through a live node.
@@ -1908,8 +2354,9 @@ async fn force_remove_node(
                         .filter(|s| s.relocated_to.is_some())
                         .count();
                     println!(
-                        "rebuilt  {}  {relocated} shard(s) placed on other devices",
-                        reference.key
+                        "rebuilt  {}  {} placed on other devices",
+                        reference.key,
+                        counted(relocated, "shard", "shards")
                     );
                 }
             }
@@ -1928,14 +2375,22 @@ async fn force_remove_node(
     Ok(())
 }
 
-/// Run one drain and print its progress. Returns whether every version
-/// was moved.
+/// Run one drain and print it: names where the document has them, the
+/// full identity where it matters (SPEC 6.2.5.1), and the source beside
+/// every destination so each line says where a shard went from and to.
+/// Returns whether every version was moved.
 async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Result<bool> {
+    let source = names::device_and_node(device);
     let mut client = connect(cli).await?;
     let mut run = client.drain(device, partial).await.map_err(client_err)?;
     let mut moved = 0usize;
     let mut deleted = 0usize;
     let mut skipped: Vec<(String, String)> = Vec::new();
+    // Progress against the estimate, every DRAIN_PROGRESS_EVERY versions:
+    // counted from the events the drain already sends, so it costs the
+    // node nothing.
+    let started = std::time::Instant::now();
+    let mut progress = DrainProgress::default();
     let end = loop {
         match run.next_event().await.map_err(client_err)? {
             Ok(event) => {
@@ -1960,12 +2415,16 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         active_devices,
                         required_devices,
                     } => {
+                        progress.versions_total = versions;
+                        progress.bytes_total = shard_bytes;
                         println!(
-                            "draining {} on node {}: {versions} version(s), {} to move; {} free on {active_devices} active device(s), {required_devices} needed per version",
-                            device.0,
-                            short(&node.0),
+                            "draining {} on node {}: {}, {} to move; {} free on {}, {required_devices} needed per version",
+                            names::device_identity(device),
+                            names::node_identity(node),
+                            counted(versions as usize, "version", "versions"),
                             human_bytes(shard_bytes),
-                            human_bytes(target_free_bytes)
+                            human_bytes(target_free_bytes),
+                            counted(active_devices as usize, "active device", "active devices")
                         );
                     }
                     DrainEvent::Moved {
@@ -1973,12 +2432,14 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         shard_index,
                         destination,
                         rebuilt,
+                        shard_bytes,
                         ..
                     } => {
                         moved += 1;
+                        progress.bytes_moved += shard_bytes;
                         println!(
-                            "moved    {key}  shard {shard_index} -> {}{}",
-                            destination.0,
+                            "moved    {key}  shard {shard_index}  {source} -> {}{}",
+                            names::device_and_node(destination),
                             if rebuilt { " (rebuilt)" } else { "" }
                         );
                     }
@@ -1990,6 +2451,11 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
                         deleted += 1;
                         println!("deleted  {key}  (removed since the pass began; nothing to move)");
                     }
+                }
+                progress.versions_done = (moved + skipped.len() + deleted) as u64;
+                if progress.versions_done > 0 && progress.versions_done % DRAIN_PROGRESS_EVERY == 0
+                {
+                    eprintln!("{}", progress.describe(started.elapsed()));
                 }
             }
             Err(end) => break end,
@@ -2004,7 +2470,7 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     if let Some(error) = &end.error {
         eprintln!(
             "drain of {} incomplete: {}",
-            device.0,
+            names::device_identity(device),
             describe_detail(error)
         );
         return Ok(false);
@@ -2012,8 +2478,98 @@ async fn drain_device(cli: &Cli, device: DeviceId, partial: bool) -> anyhow::Res
     Ok(true)
 }
 
-fn short(id: &Uuid) -> String {
-    id.to_string()[..8].to_string()
+/// How often the drain says where it is, in versions handled.
+const DRAIN_PROGRESS_EVERY: u64 = 1_000;
+
+/// Where a drain has got to against its estimate.
+#[derive(Default)]
+struct DrainProgress {
+    versions_total: u64,
+    versions_done: u64,
+    bytes_total: u64,
+    bytes_moved: u64,
+}
+
+impl DrainProgress {
+    /// One line: versions and bytes done of the estimate, the time so
+    /// far, and, from the rate so far, roughly how long remains.
+    fn describe(&self, elapsed: std::time::Duration) -> String {
+        let percent = (self.versions_done * 100)
+            .checked_div(self.versions_total)
+            .unwrap_or(100);
+        let remaining = if self.versions_done == 0 || self.versions_done >= self.versions_total {
+            None
+        } else {
+            let per_version = elapsed.as_secs_f64() / self.versions_done as f64;
+            Some(per_version * (self.versions_total - self.versions_done) as f64)
+        };
+        let mut line = format!(
+            "progress  {} of {} versions ({percent}%), {} of {} moved, {} elapsed",
+            self.versions_done,
+            self.versions_total,
+            human_bytes(self.bytes_moved),
+            human_bytes(self.bytes_total),
+            human_duration(elapsed.as_secs_f64())
+        );
+        if let Some(seconds) = remaining {
+            line.push_str(&format!(", about {} left", human_duration(seconds)));
+        }
+        line
+    }
+}
+
+/// Seconds as a person would say them: "45s", "3m 20s", "2h 05m".
+fn human_duration(seconds: f64) -> String {
+    let total = seconds.round() as u64;
+    match (total / 3600, (total % 3600) / 60, total % 60) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, s) => format!("{m}m {s:02}s"),
+        (h, m, _) => format!("{h}h {m:02}m"),
+    }
+}
+
+/// A cross-node finding (20.1.2.2) in words, with the object first and
+/// the devices by name, rather than the Debug form of the event.
+fn describe_cluster_finding(finding: &djbod_proto::message::ClusterFinding) -> String {
+    use djbod_proto::message::ClusterFinding as C;
+    match finding {
+        C::RecordsInconsistent {
+            key,
+            version,
+            detail,
+        } => match version {
+            Some(version) => format!("{key}  version {version}  record copies inconsistent: {detail}"),
+            None => format!("{key}  record copies inconsistent: {detail}"),
+        },
+        C::ShardMissingOnDevice {
+            key,
+            version,
+            device,
+            shard_index,
+        } => format!(
+            "{key}  version {version}  shard {shard_index} missing from {}",
+            names::device_and_node(*device)
+        ),
+        C::ShardLost {
+            key,
+            version,
+            device,
+            shard_index,
+        } => format!(
+            "{key}  version {version}  shard {shard_index} lost with removed {}; repair rebuilds it elsewhere",
+            names::device_and_node(*device)
+        ),
+        C::StaleCopy {
+            key,
+            version,
+            device,
+            revision,
+            current_revision,
+        } => format!(
+            "{key}  version {version}  stale record copy at revision {revision} (current {current_revision}) on {}",
+            names::device_and_node(*device)
+        ),
+    }
 }
 
 /// The record copies a read went without (SPEC 9.4.4): the record was
@@ -2039,7 +2595,10 @@ fn describe_missing_records(
                 format!("unavailable, perhaps for now: {reason}")
             }
         };
-        lines.push(format!("  record copy  device {}  {fault}", copy.device.0));
+        lines.push(format!(
+            "  record copy  {}  {fault}",
+            names::device_and_node(copy.device)
+        ));
     }
     lines.join("\n")
 }
@@ -2049,8 +2608,8 @@ fn describe_missing_records(
 /// until it is.
 fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> String {
     let mut lines = vec![format!(
-        "{key}: {} block(s) reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair {key}` runs",
-        reconstructed.len()
+        "{key}: {} reconstructed from parity; the data is correct, the damage on disk is not repaired, and every read pays again until `djbod repair {key}` runs",
+        counted(reconstructed.len(), "block", "blocks")
     )];
     for r in reconstructed {
         let fault = match &r.fault {
@@ -2074,8 +2633,9 @@ fn describe_reconstruction(key: &str, reconstructed: &[Reconstruction]) -> Strin
             )
         };
         lines.push(format!(
-            "  {where_}  shard {}  device {}  {fault}",
-            r.shard_index, r.device.0
+            "  {where_}  shard {}  {}  {fault}",
+            r.shard_index,
+            names::device_and_node(r.device)
         ));
     }
     lines.join("\n")
@@ -2141,6 +2701,35 @@ mod tests {
     }
 
     /// SPEC 20.1.2.3: the four outcomes and their codes, for both forms.
+    #[test]
+    fn drain_progress_reads_as_a_share_of_the_estimate() {
+        let progress = DrainProgress {
+            versions_total: 245_756,
+            versions_done: 12_000,
+            bytes_total: 25_000_000_000,
+            bytes_moved: 1_200_000_000,
+        };
+        let line = progress.describe(std::time::Duration::from_secs(80));
+        assert!(
+            line.starts_with("progress  12000 of 245756 versions (4%), "),
+            "{line}"
+        );
+        assert!(line.contains("1m 20s elapsed, about "), "{line}");
+        assert!(line.ends_with(" left"), "{line}");
+        let done = DrainProgress {
+            versions_total: 10,
+            versions_done: 10,
+            bytes_total: 1,
+            bytes_moved: 1,
+        };
+        assert!(done
+            .describe(std::time::Duration::from_secs(5))
+            .ends_with("(100%), 1 B of 1 B moved, 5s elapsed"));
+        assert_eq!(human_duration(45.0), "45s");
+        assert_eq!(human_duration(200.0), "3m 20s");
+        assert_eq!(human_duration(7500.0), "2h 05m");
+    }
+
     #[test]
     fn scrub_exit_codes_follow_the_four_outcomes() {
         // (repair, incomplete, findings, repair_failures) -> code

@@ -52,7 +52,7 @@ target/release/djbod-node run --config /tmp/djbod/node.toml
 shard, so any one of the four devices may be lost. In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=$(target/release/djbod get-cluster-id)   # or paste what init-cluster printed
 
 target/release/djbod put photos/cat.jpg cat.jpg --content-type image/jpeg
@@ -64,10 +64,23 @@ target/release/djbod status
 For the web interface, `target/release/djbod-ui` with the same two
 variables set, then open http://127.0.0.1:5264/.
 
-[docs/getting-started.md](docs/getting-started.md) continues from here:
-breaking things on purpose and repairing them, naming, draining, and
-removing disks, adding a second machine, changing the scheme, recovering
-objects with no cluster running, and turning on TLS.
+[docs/guide/README.md](docs/guide/README.md) is the user guide: setup,
+deployments, every command, and what to do when a disk or a machine
+fails. [docs/getting-started.md](docs/getting-started.md) is an earlier
+walkthrough of a one-machine cluster.
+
+[docs/deployment.md](docs/deployment.md) covers running it for real:
+systemd units for a node per machine, a Docker image configured entirely
+by environment variables, and a Docker Compose stack of three nodes and
+the web UI for trying it on one computer.
+
+[docs/releasing.md](docs/releasing.md) says what a version number
+promises and how a release is cut: a tag `vX.Y.Z` builds the binaries,
+the Python wheel and the Docker image and publishes them as a GitHub
+release.
+
+The [detailed user guide](docs/user-guide.md) covers deployment,
+configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
 
 ## What you get
 
@@ -185,7 +198,10 @@ out, at the moment you would want to. `djbod status` and the web UI
 show the same facts on demand. `djbod scrub`, run by hand or from cron,
 checks every disk and every object and exits non-zero when it finds
 damage, so a scheduled scrub is one line of crontab and its exit code
-is the whole integration.
+is the whole integration. `djbod inventory` answers the quicker
+question, in minutes rather than days: with the disks readable right
+now, which objects are whole, which are degraded, and which cannot be
+read at all.
 
 Repair is a command, not a background process. `djbod repair <key>`
 rebuilds one object; `djbod scrub --repair` rebuilds everything the
@@ -284,7 +300,7 @@ djbod-node run --config /etc/djbod/node.toml
 ```
 
 `init-cluster` prints the cluster id, and any running node repeats it to
-`djbod get-cluster-id --node <address>`. `4+2` puts six shards of
+`djbod get-cluster-id --bootstrap-node <address>`. `4+2` puts six shards of
 every object on six different disks and survives any two of them
 failing, for 50% overhead; `3+1` costs 33% and survives one. Nine disks
 is comfortably more than the six a `4+2` write needs, and the choice can
@@ -310,16 +326,16 @@ was off while the cluster changed catches up on its own.
 request, so point the client at whichever is nearest:
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263   # tried in order; one that answers is used
 export DJBOD_CLUSTER=$(djbod get-cluster-id)   # any node tells you
-djbod identity              # who is at DJBOD_NODE: cluster, node, build, document version
+djbod identity              # who is at DJBOD_BOOTSTRAP_NODE: cluster, node, build, document version
 djbod cluster show          # three nodes, one document version, each node's build
 djbod status                # nine disks, their labels, state, and free space
 djbod put backups/2026-09.tar backup.tar
 ```
 
 Give the disks and machines names once, so `status` reads as your
-hardware does: `djbod cluster set-label <device-uuid> nas1-disk0` and
+hardware does: `djbod cluster set-device-label <device-uuid> nas1-disk0` and
 `djbod cluster set-node-label <node-uuid> nas1`. For the web UI, run
 `djbod-ui` on one machine with the same two variables; it binds to
 localhost, so reach it over an SSH tunnel or put it behind something

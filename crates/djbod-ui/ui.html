@@ -208,6 +208,7 @@
   .health .mark::before { margin: 0; }
   .health.bad .mark { background: var(--critical-soft); } .health.bad .mark::before { background: var(--critical); border-radius: .12em; }
   .health.warn .mark { background: var(--warning-soft); } .health.warn .mark::before { background: var(--warning); border-radius: 0; clip-path: polygon(50% 0, 100% 100%, 0 100%); width: .78em; height: .7em; }
+  .health.unk .mark { background: var(--line); } .health.unk .mark::before { background: var(--muted); border-radius: .12em; }
   .health .title { font-weight: 600; font-size: 15px; }
   .health .sub { color: var(--text-2); font-size: 13px; margin-top: 2px; }
   .health .actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -277,6 +278,14 @@
   pre { font-family: var(--mono); font-size: 12px; overflow: auto; }
   .empty { color: var(--muted); padding: 12px; }
   .hint { color: var(--muted); font-size: 12.5px; margin: 4px 0; }
+  /* A table's heading with a viewing toggle beside it and, at the right,
+     how many rows the toggle is hiding, so nothing is concealed. */
+  .section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
+  .section-head h2 { margin: 0; }
+  .section-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+  .section-head label input { margin: 0; }
+  .section-head .hidden-note { margin-left: auto; font-size: 12.5px; color: var(--muted); }
+  tr.removed td { color: var(--muted); }
   tr.selected td { background: var(--accent-track); }
   tr.clickable { cursor: pointer; }
 </style>
@@ -312,11 +321,14 @@
 
 <section id="tab-overview">
   <div id="health" role="status"></div>
+  <div id="object-health" role="status"></div>
   <div class="tiles" id="tiles"></div>
 </section>
 
 <section id="tab-nodes" hidden>
-  <h2>Nodes</h2>
+  <div class="section-head"><h2>Nodes</h2>
+    <label title="a removed node stays in the cluster document as a tombstone, for the record; nothing is checked or done for it"><input type="checkbox" id="show-removed-nodes"> Show removed</label>
+    <span class="hidden-note" id="nodes-hidden"></span></div>
   <table>
     <thead><tr><th>Node</th><th>Address</th><th>Document version · build</th><th class="num">Devices</th><th></th></tr></thead>
     <tbody id="nodes"></tbody>
@@ -325,7 +337,9 @@
     <button id="sync">Sync documents</button>
     <span class="hint">Brings every reachable node up to the highest document version any holds. Removing a dead node needs the command line: <code>djbod cluster remove-node &lt;id&gt; --force</code>.</span>
   </div>
-  <h2>Devices</h2>
+  <div class="section-head"><h2>Devices</h2>
+    <label title="a removed device stays in the cluster document as a tombstone, for the record; it holds nothing and takes nothing"><input type="checkbox" id="show-removed-devices"> Show removed</label>
+    <span class="hidden-note" id="devices-hidden"></span></div>
   <table>
     <thead><tr><th>Device</th><th>Node</th><th>State</th><th>Used</th><th class="num">Free</th><th class="num">Total</th><th></th></tr></thead>
     <tbody id="devices"></tbody>
@@ -352,6 +366,14 @@
       <label class="grow">Prefix <input id="prefix" placeholder="photos/"></label>
       <button id="list-go" class="primary">List</button>
       <button id="list-clear" title="empty the prefix and list every key">Clear</button>
+      <label title="list only the objects in one state, as the inventory judges them now (djbod inventory --keys)">Health <select id="health-filter">
+        <option value="">all</option>
+        <option value="whole">whole</option>
+        <option value="degraded_parity">degraded, parity out</option>
+        <option value="degraded_data">degraded, data out</option>
+        <option value="unreadable">unreadable</option>
+        <option value="inconsistent">inconsistent</option>
+      </select></label>
     </div>
     <div class="filter-spacer"></div>
     <div class="list-column">
@@ -399,6 +421,10 @@
       <span id="drain-summary" class="hint"></span>
     </div>
     <p class="hint">One pass over every version on a draining device, moving each shard to another device. Mark the device draining on the Overview tab first. Rerun after fixing whatever was skipped, then remove the device.</p>
+    <div class="row" id="drain-progress" hidden>
+      <div class="meter" style="flex:1;min-width:200px"><div class="track"><div class="fill working" id="drain-fill" style="width:0%"></div></div></div>
+      <span class="hint" id="drain-progress-text"></span>
+    </div>
     <div class="log" id="drain-log" hidden></div>
   </div>
 </section>
@@ -439,7 +465,10 @@ const PAGE_SIZE = 100;
 // The listing is paged through the node's own cursor (SPEC 15.2.1): page
 // n starts after the last key of page n-1, and `after` remembers each
 // page's starting key so Previous can go back the same way.
-const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null] }, selectedKey: null, failures: {} };
+const state = { status: null, cluster: null, unreachable: null, listing: { prefix: '', keys: [], truncated: false, unread: [], complete: true, page: 1, after: [null], mode: 'keys', total: null }, selectedKey: null, failures: {},
+  // The last inventory (SPEC 20.1.5): its summary and when it was taken.
+  // Computed on demand, since it is a pass over every record.
+  inventory: { running: false, checked: 0, summary: null, at: null } };
 
 // ------------------------------------------------------------ helpers
 
@@ -670,7 +699,7 @@ async function refresh() {
     const [status, cluster, failures] = await Promise.all([api('/status'), api('/cluster'), api('/read-failures')]);
     state.status = status; state.cluster = cluster;
     state.failures = Object.fromEntries(failures.failures.map((f) => [f.key, f]));
-    renderHeader(); renderBanners(); renderOverview(); renderSettings(); renderDrainDevices(); renderListing();
+    renderHeader(); renderBanners(); renderOverview(); renderObjectHealth(); renderSettings(); renderDrainDevices(); renderListing();
   } catch (e) { fail('refresh', e); }
 }
 // The health card: do all nodes hold the same configuration? Consistent
@@ -681,7 +710,9 @@ async function refresh() {
 // document change may be refused by the older node.
 function renderHealth() {
   const { status, cluster } = state;
-  const nodes = cluster.nodes;
+  // Removed nodes (SPEC 6.2.2) are tombstones: listed, not asked, and no
+  // part of the cluster's health.
+  const nodes = cluster.nodes.filter((n) => n.state !== 'removed');
   const unreachable = nodes.filter((n) => n.error);
   const behind = nodes.filter((n) => !n.error && n.version !== status.document_version);
   const builds = new Set(nodes.filter((n) => !n.error).map((n) => n.build));
@@ -690,7 +721,7 @@ function renderHealth() {
   const actions = [];
   if (unreachable.length) {
     cls = 'bad';
-    title = `${unreachable.length} of ${nodes.length} node(s) unreachable`;
+    title = `${unreachable.length} of ${plural(nodes.length, 'node')} unreachable`;
     sub = unreachable.map((n) => `${nodeText(n.node)} at ${n.address}: ${n.error}`).join('; ');
   } else if (behind.length) {
     cls = 'bad';
@@ -703,12 +734,91 @@ function renderHealth() {
     sub = `nodes run ${builds.size} different builds (${[...builds].join(', ')}); upgrade before the next change to the cluster document`;
   } else {
     title = 'Cluster consistent';
-    sub = `${nodes.length} node(s) hold document version ${status.document_version}`;
+    sub = `${plural(nodes.length, 'node holds', 'nodes hold')} document version ${status.document_version}`;
   }
   $('health').replaceChildren(el('div', { class: 'health ' + cls },
     el('div', { class: 'mark', 'aria-hidden': 'true' }),
     el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
     el('div', { class: 'actions' }, ...actions.map(([text, go]) => el('a', { text, onclick: go, role: 'button', tabindex: '0' })))));
+}
+// The object health card (SPEC 20.1.5, issue #218): every object counted
+// by how many of its shards can be read now, from records alone. Beside
+// the cluster health card: that one says whether the cluster is healthy,
+// this one whether the data is. Computed on demand, since it is one pass
+// over every record, and it says when it was last computed.
+const STATE_WORDS = { whole: 'whole', degraded_parity: 'degraded, parity out', degraded_data: 'degraded, data out', unreadable: 'unreadable', inconsistent: 'inconsistent' };
+function renderObjectHealth() {
+  const inv = state.inventory;
+  const s = inv.summary;
+  let cls = 'unk', title, sub;
+  const actions = [];
+  if (inv.running) {
+    title = 'Counting objects…';
+    sub = `${inv.checked.toLocaleString()} versions checked so far; records only, no shard is read.`;
+    actions.push({ button: 'Counting…', disabled: true });
+  } else if (!s) {
+    title = 'Object health not computed';
+    sub = 'Counts every object by how many of its shards can be read now, from records alone. One pass over every record; a minute or so at hundreds of thousands of objects.';
+    actions.push({ button: 'Compute', go: runInventory });
+  } else {
+    const degraded = s.degraded_parity + s.degraded_data;
+    const n = s.versions_checked;
+    if (s.unreadable > 0) {
+      cls = 'bad';
+      title = `${plural(s.unreadable, 'object')} unreadable`;
+      sub = `${s.whole.toLocaleString()} whole, ${degraded.toLocaleString()} degraded, ${s.inconsistent.toLocaleString()} inconsistent; fewer than k shards of each unreadable object can be reached until a device returns.`;
+      actions.push(['Unreadable keys →', () => showObjects('unreadable')]);
+    } else if (degraded > 0) {
+      cls = 'warn';
+      title = `${plural(degraded, 'object')} degraded`;
+      sub = `every object can be read; ${s.degraded_parity.toLocaleString()} with parity out (reads unaffected), ${s.degraded_data.toLocaleString()} with data out (every read decodes); ${s.whole.toLocaleString()} whole` + (s.inconsistent ? `, ${s.inconsistent.toLocaleString()} inconsistent.` : '.');
+      actions.push(['Degraded keys →', () => showObjects(s.degraded_data > 0 ? 'degraded_data' : 'degraded_parity')]);
+    } else if (s.inconsistent > 0) {
+      cls = 'warn';
+      title = `${plural(s.inconsistent, 'object')} inconsistent`;
+      sub = `${s.whole.toLocaleString()} whole; the record copies of the rest disagree or one is missing, which a scrub sorts out.`;
+      actions.push(['Inconsistent keys →', () => showObjects('inconsistent')]);
+    } else {
+      cls = 'ok';
+      title = `All ${plural(n, 'object')} whole`;
+      sub = 'every shard of every object is on a device that can be read.';
+    }
+    if (s.unread.length) {
+      const devices = s.unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
+      sub += s.complete
+        ? ` Counted around ${plural(s.unread.length, 'unread device')} (${devices}); complete, since fewer than k+m devices are out.`
+        : ` Counted around ${plural(s.unread.length, 'unread device')} (${devices}); incomplete: objects stored only on them leave no trace, so these counts are a lower bound.`;
+      if (!s.complete) cls = 'bad';
+    }
+    sub += ` Computed at ${inv.at.toLocaleTimeString()}.`;
+    actions.push({ button: 'Recompute', go: runInventory });
+  }
+  // The links lead somewhere; the one thing that does work here is a button.
+  $('object-health').replaceChildren(el('div', { class: 'health ' + cls },
+    el('div', { class: 'mark', 'aria-hidden': 'true' }),
+    el('div', {}, el('div', { class: 'title', text: title }), el('div', { class: 'sub', text: sub })),
+    el('div', { class: 'actions' }, ...actions.map((a) => Array.isArray(a)
+      ? el('a', { text: a[0], onclick: a[1], role: 'button', tabindex: '0' })
+      : el('button', { text: a.button, class: 'primary', onclick: a.go, disabled: a.disabled ? '' : null, title: 'one pass over every record, no shard read' })))));
+}
+async function runInventory() {
+  const inv = state.inventory;
+  if (inv.running) return;
+  inv.running = true; inv.checked = 0; renderObjectHealth();
+  try {
+    await streamLines('/inventory', {}, (e) => {
+      if (e.event === 'progress') { inv.checked = e.versions_checked; renderObjectHealth(); }
+      else if (e.event === 'summary') { inv.summary = e; inv.at = new Date(); }
+    });
+  } catch (e) { fail('inventory', e); }
+  inv.running = false;
+  renderObjectHealth();
+}
+// From the card to the keys: the Objects page, filtered to one state.
+function showObjects(objectState) {
+  $('health-filter').value = objectState;
+  document.querySelector('nav [data-tab="objects"]').click();
+  list();
 }
 function renderHeader() {
   const { status, cluster } = state;
@@ -786,10 +896,35 @@ function nodeBuild(n) {
 }
 // The distinct builds among the reachable nodes.
 function nodeBuilds(cluster) {
-  return new Set(cluster.nodes.filter((n) => !n.error).map(nodeBuild));
+  return new Set(cluster.nodes.filter((n) => !n.error && n.state !== 'removed').map(nodeBuild));
 }
 function nodeAddress(nodeId) {
   return state.cluster.document.nodes.find((n) => n.id === nodeId)?.addresses?.[0] || '';
+}
+// Whether removed nodes and devices (tombstones, SPEC 6.2.2 and 18.2.1)
+// are listed. A viewing preference, remembered per browser; it changes
+// which rows are drawn and nothing the page computes.
+const view = { removedNodes: false, removedDevices: false };
+try {
+  view.removedNodes = localStorage.getItem('show-removed-nodes') === '1';
+  view.removedDevices = localStorage.getItem('show-removed-devices') === '1';
+} catch (_) { /* defaults */ }
+$('show-removed-nodes').checked = view.removedNodes;
+$('show-removed-devices').checked = view.removedDevices;
+$('show-removed-nodes').addEventListener('change', (e) => {
+  view.removedNodes = e.target.checked;
+  try { localStorage.setItem('show-removed-nodes', view.removedNodes ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+$('show-removed-devices').addEventListener('change', (e) => {
+  view.removedDevices = e.target.checked;
+  try { localStorage.setItem('show-removed-devices', view.removedDevices ? '1' : ''); } catch (_) { /* per-browser convenience only */ }
+  if (state.status) renderOverview();
+});
+// The note beside a table: how many removed entries exist and whether
+// they are hidden, so the toggle never conceals that there are any.
+function hiddenNote(id, removed, shown) {
+  $(id).textContent = removed === 0 ? '' : shown ? `${removed} removed shown` : `${removed} removed, hidden`;
 }
 function renderOverview() {
   const { status, cluster } = state;
@@ -799,10 +934,11 @@ function renderOverview() {
   let total = 0, free = 0;
   let unavailable = 0;
   for (const d of devices) { counts[d.state]++; if (d.available === false) unavailable++; if (d.state !== 'removed') { total += d.total_bytes; free += d.free_bytes; } }
-  const unreachable = cluster.nodes.filter((n) => n.error).length;
-  const behind = cluster.nodes.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
+  const members = cluster.nodes.filter((n) => n.state !== 'removed');
+  const unreachable = members.filter((n) => n.error).length;
+  const behind = members.filter((n) => n.version !== null && n.version !== undefined && n.version !== doc.version).length;
   const tiles = [
-    ['Nodes', cluster.nodes.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
+    ['Nodes', members.length, unreachable ? `${unreachable} unreachable` : behind ? `${behind} at another version` : nodeBuilds(cluster).size > 1 ? `${nodeBuilds(cluster).size} different builds` : 'all answering', 'nodes'],
     ['Devices', counts.active + counts.draining, `${counts.active} active, ${counts.draining} draining, ${counts.removed} removed${unavailable ? `, ${unavailable} unavailable` : ''}`, 'nodes'],
     ['Used', human(total - free), `of ${human(total)}`],
     ['Free', human(free), `headroom ${(doc.headroom * 100).toFixed(0)}% kept`],
@@ -814,8 +950,9 @@ function renderOverview() {
     }[status.transport || 'plain'] || ''],
   ];
   $('count-overview').textContent = '';
-  const off = cluster.nodes.filter((n) => n.error || n.version !== doc.version).length;
-  $('count-nodes').textContent = off ? `${off} off` : `${cluster.nodes.length}`;
+  const membersHere = cluster.nodes.filter((n) => n.state !== 'removed');
+  const off = membersHere.filter((n) => n.error || n.version !== doc.version).length;
+  $('count-nodes').textContent = off ? `${off} off` : `${membersHere.length}`;
   $('count-nodes').classList.toggle('bad', off > 0);
   const damaged = Object.keys(state.failures || {}).length;
   $('count-maintenance').textContent = damaged ? `${damaged} damaged` : counts.draining ? `${counts.draining} draining` : '';
@@ -837,8 +974,25 @@ function renderOverview() {
   const mixed = nodeBuilds(cluster).size > 1;
   $('nodes').parentElement.querySelector('thead').replaceChildren(el('tr', {},
     ...['Node', 'Addresses', 'Reachable', 'Document', 'Build', 'TLS', 'Devices', 'State', ''].map((h) => el('th', { text: h }))));
-  $('nodes').replaceChildren(...cluster.nodes.map((n) => {
+  const removedNodes = cluster.nodes.filter((n) => n.state === 'removed').length;
+  hiddenNote('nodes-hidden', removedNodes, view.removedNodes);
+  $('nodes').replaceChildren(...cluster.nodes.filter((n) => view.removedNodes || n.state !== 'removed').map((n) => {
     const entry = doc.nodes.find((d) => d.id === n.node) || {};
+    if (n.state === 'removed') {
+      // A tombstone (SPEC 6.2.2): for the record, with nothing to check
+      // and nothing to do.
+      const own = devices.filter((d) => d.node === n.node);
+      return el('tr', { class: 'removed' },
+        el('td', {}, nodeCell(n.node)),
+        el('td', { class: 'id', text: (entry.addresses || [n.address]).join(', ') }),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: '0' })),
+        el('td', {}, own.length ? el('span', { class: 'hint', text: `${own.length} removed` }) : el('span', { class: 'hint', text: '\u2014' })),
+        el('td', {}, el('span', { class: 'hint', text: 'removed' })));
+    }
     const reachable = !n.error;
     const atVersion = reachable && n.version === doc.version;
     const own = devices.filter((d) => d.node === n.node);
@@ -863,11 +1017,12 @@ function renderOverview() {
       el('td', {}, byState.length ? el('span', { class: unavailableHere ? 'bad' : draining ? 'warn' : '', text: byState.map(([st, k]) => `${k} ${st}`).join(', '), title: unavailableHere ? 'nothing can be read from an unavailable device' : draining ? 'a drain is in progress or pending' : null }) : el('span', { class: 'hint', text: '\u2014' })),
       el('td', {}, el('div', { class: 'actions' },
         el('button', { text: nodeLabel(n.node) ? 'Rename' : 'Label', title: 'give the node a short name shown beside its UUID', onclick: () => setNodeLabel(n.node, nodeLabel(n.node)) }),
-        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.length === 1 ? '' : null,
+        el('button', { class: 'danger', text: 'Remove node', onclick: () => removeNode(n.node), disabled: deviceCount > 0 || cluster.nodes.filter((m) => m.state !== 'removed').length === 1 ? '' : null,
           title: deviceCount > 0 ? 'drain and remove its devices first' : 'drop the node from the cluster; its process then exits' }))));
   }));
 
-  $('devices').replaceChildren(...devices.map((d) => {
+  hiddenNote('devices-hidden', counts.removed, view.removedDevices);
+  $('devices').replaceChildren(...devices.filter((d) => view.removedDevices || d.state !== 'removed').map((d) => {
     const used = d.total_bytes - d.free_bytes;
     const fraction = d.total_bytes ? used / d.total_bytes : 0;
     const freeFraction = d.total_bytes ? d.free_bytes / d.total_bytes : 0;
@@ -888,7 +1043,7 @@ function renderOverview() {
       if (!unavailable) actions.append(el('button', { class: 'danger', text: 'Remove', onclick: () => removeDevice(d.device), title: 'refused while any object still has a shard here' }));
     }
     actions.append(el('button', { text: d.label ? 'Rename' : 'Label', title: 'give the device a short name shown beside its UUID', onclick: () => setLabel(d.device, d.label) }));
-    return el('tr', {}, el('td', {}, deviceCell(d.device)),
+    return el('tr', { class: d.state === 'removed' ? 'removed' : null }, el('td', {}, deviceCell(d.device)),
       el('td', {}, nodeCell(d.node), ' ', el('span', { class: 'hint', text: nodeAddress(d.node) })),
       el('td', {}, stateCell(d)),
       el('td', {}, d.state === 'removed' || d.available === false ? el('span', { class: 'hint', text: '—' }) : meter),
@@ -980,9 +1135,15 @@ $('refresh').addEventListener('click', refresh);
 
 // ------------------------------------------------------------ objects
 
+// At most this many keys of one state are fetched for the page; the
+// inventory's count says how many there are in all.
+const STATE_LIST_LIMIT = 1000;
 async function list(page = 1) {
+  const objectState = $('health-filter').value;
+  if (objectState) return listByState(objectState);
   const prefix = $('prefix').value;
   const listing = state.listing;
+  listing.mode = 'keys'; listing.total = null;
   if (prefix !== listing.prefix || page === 1) { listing.prefix = prefix; listing.after = [null]; page = 1; }
   const startAfter = listing.after[page - 1];
   if (page > 1 && startAfter === undefined) return;
@@ -998,31 +1159,81 @@ async function list(page = 1) {
     document.querySelector('.scroll').scrollTop = 0;
   } catch (e) { fail('list', e); }
 }
+// The objects in one state (djbod inventory --keys STATE): the inventory
+// streams every version in that state, so the page reads the first
+// STATE_LIST_LIMIT that match the prefix and stops the stream. The
+// summary at the end of a full run says how many there are in all.
+async function listByState(objectState) {
+  const prefix = $('prefix').value;
+  const listing = state.listing;
+  listing.mode = 'health'; listing.prefix = prefix; listing.page = 1; listing.after = [null];
+  listing.keys = []; listing.truncated = false; listing.unread = []; listing.complete = true; listing.total = null;
+  listing.objectState = objectState;
+  $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: `finding ${STATE_WORDS[objectState]} objects…` })));
+  try {
+    const response = await fetch('/api/inventory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys: objectState }) });
+    if (!response.ok) throw Object.assign(JSON.parse(await response.text()), { status: response.status });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = '', stopped = false;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffered.indexOf('\n')) >= 0) {
+        const line = buffered.slice(0, cut); buffered = buffered.slice(cut + 1);
+        if (!line.trim()) continue;
+        const e = JSON.parse(line);
+        if (e.event === 'object') {
+          if (prefix && !e.key.startsWith(prefix)) continue;
+          if (listing.keys.length < STATE_LIST_LIMIT) listing.keys.push({ key: e.key, version: e.version, state: e.state, shards_available: e.shards_available, shards_total: e.shards_total });
+          else { listing.truncated = true; stopped = true; break; }
+        } else if (e.event === 'summary') {
+          listing.unread = e.unread || []; listing.complete = e.complete !== false;
+          listing.total = e[objectState];
+          state.inventory.summary = e; state.inventory.at = new Date(); renderObjectHealth();
+        }
+      }
+      if (stopped) { await reader.cancel(); break; }
+    }
+    renderListing();
+    document.querySelector('.scroll').scrollTop = 0;
+  } catch (e) { fail('list', e); }
+}
 function renderListing() {
-  const { keys, truncated } = state.listing;
+  const { keys, truncated, mode } = state.listing;
+  const health = mode === 'health';
+  const stateMark = (st) => st === 'whole' ? 'ok' : st === 'unreadable' || st === 'inconsistent' ? 'bad' : 'warn';
+  document.querySelector('#tab-objects thead th.num').textContent = health ? 'Shards' : 'Size';
   $('objects').replaceChildren(...keys.map((k) => el('tr', { class: 'clickable' + (k.key === state.selectedKey ? ' selected' : ''), onclick: () => select(k.key) },
-    el('td', {}, state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
+    el('td', {}, health ? el('span', { class: stateMark(k.state), title: STATE_WORDS[k.state] })
+      : state.failures[k.key] ? el('span', { class: 'bad', title: 'a recent read of this object met damage on disk; open it for details' }) : null),
     el('td', { class: 'key', text: k.key }),
-    el('td', { class: 'num', text: human(k.size) }), el('td', { class: 'id', text: k.version }))));
-  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: 'no objects' })));
-  const { page, after } = state.listing;
+    health ? el('td', { class: 'num', text: `${k.shards_available} of ${k.shards_total}`, title: `${k.shards_available} of ${k.shards_total} shards on devices that can be read` }) : el('td', { class: 'num', text: human(k.size) }),
+    el('td', { class: 'id', text: k.version }))));
+  if (keys.length === 0) $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: health ? `no ${STATE_WORDS[state.listing.objectState]} objects` : 'no objects' })));
+  const { page, after, total } = state.listing;
   $('count-objects').textContent = keys.length ? `${keys.length}${truncated || page > 1 ? '+' : ''}` : '';
-  $('list-prev').disabled = page <= 1;
-  $('list-next').disabled = !truncated;
-  $('list-page').textContent = `Page ${page}`;
-  const cursor = after[page - 1];
-  $('list-count').textContent = `${keys.length} key(s) on this page`;
+  $('list-prev').disabled = health || page <= 1;
+  $('list-next').disabled = health || !truncated;
+  $('list-page').textContent = health ? `Filtered: ${STATE_WORDS[state.listing.objectState]}` : `Page ${page}`;
+  const cursor = health ? null : after[page - 1];
+  $('list-count').textContent = health
+    ? (truncated ? `first ${keys.length.toLocaleString()} shown` : `${plural(keys.length, 'key')}`) + (total !== null && total !== undefined ? ` of ${total.toLocaleString()} in this state` : '') + (state.listing.prefix ? ' under the prefix' : '')
+    : `${plural(keys.length, 'key')} on this page`;
   $('list-cursor').replaceChildren(cursor ? el('span', {}, 'Current pagination key: ', el('span', { class: 'cursor', text: cursor, title: 'the key this page starts after, the node\'s paging cursor' })) : '');
   // The listing went around devices the cluster cannot read (SPEC 15.1):
   // complete while fewer than k+m are out, possibly short once that many are.
   const { unread, complete } = state.listing;
   const devices = unread.map((u) => `${deviceText(u.device)} on ${nodeText(u.node)}`).join(', ');
   $('list-note').replaceChildren(unread.length === 0 ? '' : complete
-    ? el('span', {}, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
-    : el('span', { class: 'bad' }, `Listed around ${unread.length} device(s) the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
+    ? el('span', {}, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); every key is still listed, since fewer than k+m devices are out.`)
+    : el('span', { class: 'bad' }, `Listed around ${plural(unread.length, 'device')} the cluster cannot read (${devices}); keys stored only on them cannot be seen, so this listing may be incomplete.`));
 }
 $('list-go').addEventListener('click', () => list());
-$('list-clear').addEventListener('click', () => { $('prefix').value = ''; list(); });
+$('list-clear').addEventListener('click', () => { $('prefix').value = ''; $('health-filter').value = ''; list(); });
+$('health-filter').addEventListener('change', () => list());
 $('prefix').addEventListener('keydown', (e) => { if (e.key === 'Enter') list(); });
 $('list-prev').addEventListener('click', () => list(state.listing.page - 1));
 $('list-next').addEventListener('click', () => list(state.listing.page + 1));
@@ -1177,7 +1388,7 @@ async function repair(key) {
       return `shard ${s.index} on ${deviceText(s.device)}: ${c}${s.relocated_to ? ` -> rebuilt on ${deviceText(s.relocated_to)}` : s.rewritten ? ' -> rewritten' : ''}`;
     });
     const rewritten = r.shards.filter((s) => s.rewritten).length;
-    toast(`repair of ${key}: ${rewritten} shard(s) rewritten`, lines.join('\n'));
+    toast(`repair of ${key}: ${plural(rewritten, 'shard')} rewritten`, lines.join('\n'));
     refreshFailures();
     select(key);
   } catch (e) { fail('repair', e); }
@@ -1221,7 +1432,7 @@ $('upload-go').addEventListener('click', async () => {
     }
     if (!check.fits) {
       toast(`no room for ${file.name} (${human(file.size)})`,
-        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${check.active_devices} active device(s) have that much` +
+        `each of its ${check.required_devices} shards needs ${human(check.shard_bytes)} free within headroom; ${check.devices_with_room} of ${plural(check.active_devices, 'active device')} have that much` +
         (check.active_devices >= check.required_devices ? `, and the ${check.required_devices}${ordinal(check.required_devices)} emptiest has ${human(check.room_bytes)}` : '') +
         '\ndevices sharing one filesystem count the same space more than once, so a write may still fail', true);
       return;
@@ -1282,6 +1493,7 @@ $('upload-cancel').addEventListener('click', () => {
 
 // ------------------------------------------------------------ maintenance
 
+function plural(n, one, many = one + 's') { return `${n.toLocaleString()} ${n === 1 ? one : many}`; }
 function describeFinding(f) {
   const skip = new Set(['kind', 'event']);
   return `${f.kind}: ${Object.entries(f).filter(([k]) => !skip.has(k)).map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`).join('  ')}`;
@@ -1318,24 +1530,37 @@ $('scrub-go').addEventListener('click', async () => {
       if (e.event === 'node_summary') { devicesDone++; bytesRead += e.summary.bytes_read || 0; }
       if (e.event === 'node_failed') devicesDone++;
       if (e.event === 'cluster_finding' || e.event === 'cross_check_stopped' || e.event === 'cross_check_progress' || e.event === 'repaired' || e.event === 'repair_failed' || devicesDone >= devicesToScrub) phase = 'cross';
-      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${devicesDone} device(s), ${human(bytesRead)} read`; }
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${plural(devicesDone, 'device')}, ${human(bytesRead)} read`; }
       else showProgress();
       switch (e.event) {
         case 'node_finding': findings++; logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}  ${describeFinding(e.finding)}`, 'finding'); break;
-        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${e.summary.findings.length} finding(s)`, 'muted'); break;
+        case 'node_summary': logLine(log, `node ${nodeText(e.node)}  device ${deviceText(e.device)}: ${e.summary.records_checked} records, ${e.summary.shards_checked} shards, ${e.summary.blocks_checked} blocks, ${human(e.summary.bytes_read)} read, ${plural(e.summary.findings.length, 'finding')}`, 'muted'); break;
         case 'node_failed': findings++; logLine(log, `node ${nodeText(e.node)} could not be scrubbed: ${e.detail.message}`, 'finding'); break;
         case 'cluster_finding': findings++; logLine(log, `cluster check: ${describeFinding(e)}`, 'finding'); break;
-        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${e.versions_checked} version(s) checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
+        case 'cross_check_stopped': logLine(log, `cross-node checks stopped at node ${nodeText(e.node)}: ${e.detail.message}; ${plural(e.versions_checked, 'version')} checked, ${e.versions_unchecked === null ? 'the rest not checked' : `${e.versions_unchecked} not checked`}`, 'finding'); break;
         case 'cross_check_progress': crossChecked = e.versions_checked; break;
-        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${e.report.shards.filter((s) => s.rewritten).length} shard(s) rewritten`, 'repaired'); break;
+        case 'cross_check_availability': {
+          const parts = e.versions.map((v) => `${plural(v.versions, 'object')} with ${v.shards_available} of ${v.shards_total}${v.shards_available === v.shards_total ? '' : v.shards_available >= v.k ? ` (readable, ${v.shards_available - v.k ? plural(v.shards_available - v.k, 'shard') + ' to spare' : 'none to spare'})` : ' (unreadable)'}`);
+          logLine(log, `${e.after_repair ? 'shards available after repair' : repairing ? 'shards available before repair' : 'shards available'}: ${parts.length ? parts.join(', ') : 'no version checked'}`, e.versions.some((v) => v.shards_available < v.shards_total) ? 'finding' : 'muted');
+          break;
+        }
+        case 'cross_check_exposure': {
+          // Not damage: exposure (SPEC 20.1.2.2). Said loudly, last.
+          const perDevice = e.unread.map((u) => `${deviceText(u.device)}: ${plural(u.versions, 'version')}`).join('; ');
+          const limit = e.versions_at_the_limit ? ` ${plural(e.versions_at_the_limit, 'version')} can lose no further shard.` : '';
+          const unreadable = e.versions_unreadable ? ` ${plural(e.versions_unreadable, 'version is', 'versions are')} unreadable now.` : '';
+          logLine(log, `WARNING: data at higher risk: versions with a shard on an unavailable device: ${e.versions_with_shards_out.toLocaleString()} of ${e.versions_checked.toLocaleString()} (${perDevice}).${limit}${unreadable} Restore the device, or force-remove it and run a repairing scrub.`, 'finding');
+          break;
+        }
+        case 'repaired': repairs++; logLine(log, `repaired ${e.key}: ${plural(e.report.shards.filter((s) => s.rewritten).length, 'shard')} rewritten`, 'repaired'); break;
         case 'repair_failed': logLine(log, `repair of ${e.key} failed: ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'end':
           if (e.error) logLine(log, `scrub incomplete: ${e.error.code}: ${e.error.message}`, 'finding');
-          else logLine(log, `scrub finished: ${findings} finding(s), ${repairs} repair(s)`, findings && !repairing ? 'finding' : 'repaired');
+          else logLine(log, `scrub finished: ${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`, findings && !repairing ? 'finding' : 'repaired');
           break;
         default: logLine(log, JSON.stringify(e));
       }
-      $('scrub-summary').textContent = `${findings} finding(s), ${repairs} repair(s)`;
+      $('scrub-summary').textContent = `${plural(findings, 'finding')}${repairing ? `, ${plural(repairs, 'repair')}` : ''}`;
     });
   } catch (e) { fail('scrub', e); fill.classList.remove('working'); $('scrub-progress').hidden = true; }
   finally { $('scrub-go').disabled = false; refresh(); }
@@ -1361,12 +1586,27 @@ $('drain-go').addEventListener('click', async () => {
   if (!device) return;
   const log = $('drain-log'); log.replaceChildren(); log.hidden = false;
   $('drain-go').disabled = true;
-  let moved = 0, skipped = 0, deleted = 0;
+  let moved = 0, skipped = 0, deleted = 0, movedBytes = 0, total = 0, totalBytes = 0;
+  const fill = $('drain-fill'), text = $('drain-progress-text'), started = performance.now();
+  // Progress against the estimate, from the events the drain sends
+  // anyway: one per version, so the bar advances by versions handled.
+  const showProgress = () => {
+    const done = moved + skipped + deleted;
+    const share = total ? done / total : 0;
+    fill.style.width = `${Math.round(share * 100)}%`;
+    const elapsed = (performance.now() - started) / 1000;
+    const left = done && done < total ? ` about ${humanTime(elapsed / done * (total - done))} left` : '';
+    text.textContent = total ? `${done.toLocaleString()} of ${total.toLocaleString()} versions (${Math.round(share * 100)}%), ${human(movedBytes)} of ${human(totalBytes)} moved, ${humanTime(elapsed)} elapsed${left}` : 'estimating…';
+  };
+  $('drain-progress').hidden = false; fill.classList.add('working'); showProgress();
   $('drain-summary').textContent = 'running…';
   try {
     await streamLines(`/devices/${device}/drain`, { partial: $('drain-partial').checked }, (e) => {
+      if (e.event === 'estimate') { total = e.versions; totalBytes = e.shard_bytes; }
+      if (e.event === 'moved') movedBytes += e.shard_bytes || 0;
+      if (e.event === 'end') { fill.classList.remove('working'); fill.style.width = '100%'; text.textContent = e.error ? `stopped: ${e.error.message}` : `finished in ${humanTime((performance.now() - started) / 1000)}: ${moved} moved, ${human(movedBytes)}`; }
       switch (e.event) {
-        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${e.versions} version(s), ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${e.active_devices} active device(s), ${e.required_devices} needed per version`, 'muted'); break;
+        case 'estimate': logLine(log, `draining ${deviceText(e.device)} on node ${nodeText(e.node)}: ${plural(e.versions, 'version')}, ${human(e.shard_bytes)} to move; ${human(e.target_free_bytes)} free on ${plural(e.active_devices, 'active device')}, ${e.required_devices} needed per version`, 'muted'); break;
         case 'moved': moved++; logLine(log, `moved    ${e.key}  shard ${e.shard_index} -> ${deviceText(e.destination)}${e.rebuilt ? ' (rebuilt)' : ''}`); break;
         case 'skipped': skipped++; logLine(log, `skipped  ${e.key}  ${e.detail.code}: ${e.detail.message}`, 'finding'); break;
         case 'deleted': deleted++; logLine(log, `deleted  ${e.key}  (removed since the pass began)`, 'muted'); break;
@@ -1376,6 +1616,7 @@ $('drain-go').addEventListener('click', async () => {
           break;
         default: logLine(log, JSON.stringify(e));
       }
+      if (e.event !== 'end') showProgress();
       $('drain-summary').textContent = `${moved} moved, ${skipped} skipped`;
     });
   } catch (e) { fail('drain', e); }
