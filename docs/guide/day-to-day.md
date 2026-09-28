@@ -118,11 +118,12 @@ djbod move-shard photos/cat.jpg 2 --to nas1-bay3
 ```
 
 The destination, when you omit `--to`, is chosen the way a write chooses
-a device. The command prints whether the shard was copied or rebuilt
-from the others, and the record's new revision. If the old device could
-not be reached to delete its copy, the line says the source copy was
-not removed and that scrub will report it as stale. `djbod scrub
---repair` deletes that stale copy.
+a device. The command names both ends as `node <name> device <name>`,
+by label where the document has one, and says whether the shard was
+copied or rebuilt from the others, and the record's new revision. If
+the old device could not be reached to delete its copy, the line says
+the source copy was not removed and that scrub will report it as stale.
+`djbod scrub --repair` deletes that stale copy.
 
 ## The web UI
 

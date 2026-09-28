@@ -306,10 +306,12 @@ With exactly `k + m` devices, marking one `draining` and running drain
 exits 2 without moving anything:
 
 ```text
-draining <uuid> on node <node>: 1 version, 13.8 KiB to move; <free> free on 2 active devices, 3 needed per version
+draining nas1-bay0 (<uuid>) on node nas1 (<node>): 1 version, 13.8 KiB to move; <free> free on 2 active devices, 3 needed per version
 0 moved, 0 skipped, 0 deleted meanwhile
-drain of <uuid> incomplete: InsufficientDevices: 2 active devices, but every version needs 3; no version has a legal target; add capacity, or pass --partial to move what fits
+drain of nas1-bay0 (<uuid>) incomplete: InsufficientDevices: 2 active devices, but every version needs 3; no version has a legal target; add capacity, or pass --partial to move what fits
 ```
+
+With no label, the identity is the UUID alone.
 
 The device stays `draining`. Put it back if you are not ready:
 
@@ -328,12 +330,18 @@ djbod contents nas1-bay0
 ```
 
 `set-state` moves nothing. `status` should show `draining`. `drain`
-prints an estimate, then one line per version:
+prints an estimate, then one line per version. Each moved line names
+the source and the destination, `node <name> device <name>`, by label
+where the document has one:
 
 ```text
-moved    archive/a.bin  shard 1 -> <new-device-uuid>
+moved    archive/a.bin  shard 1  node nas1 device nas1-bay0 -> node nas1 device nas1-bay4
 2 moved, 0 skipped, 0 deleted meanwhile
 ```
+
+Every 1,000 versions the command prints where it is against the
+estimate: versions and bytes done, time elapsed, and about how long
+remains. A short drain never reaches that line.
 
 Exit 0 means every version moved. Exit 2 means some were skipped. The
 skipped lines say why. Fix that and run `drain` again. The device keeps
