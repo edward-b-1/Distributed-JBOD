@@ -350,15 +350,24 @@ impl Worker {
         Ok(Reply::Operations(self.event_operations(run, sequence)))
     }
 
-    pub fn handle(&mut self, controller: &str, request: Request) -> Result<Reply> {
+    pub fn handle(&mut self, certificate: Option<&str>, request: Request) -> Result<Reply> {
         self.journal.check_writable()?;
         ensure!(
-            self.config
-                .allowed_controllers
-                .iter()
-                .any(|f| f.eq_ignore_ascii_case(controller)),
+            self.config.transport != djbod_core::cluster::Transport::Tls || certificate.is_some(),
+            "TlsRequired: worker transport tls requires a TLS connection with a client certificate"
+        );
+        ensure!(
+            self.config.allowed_controllers.is_empty()
+                || certificate.is_some_and(|controller| self
+                    .config
+                    .allowed_controllers
+                    .iter()
+                    .any(|f| f.eq_ignore_ascii_case(controller))),
             "controller certificate is not allowed"
         );
+        // Plain and anonymous TLS clients have no authenticated identity.
+        // They share this label; run IDs and session tokens still fence retries.
+        let controller = certificate.unwrap_or("anonymous");
         match request {
             Request::Describe => Ok(Reply::Description(self.description())),
             Request::Probe {

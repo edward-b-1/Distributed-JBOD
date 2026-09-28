@@ -7,6 +7,7 @@ use djbod_bitrotter::{
 };
 use djbod_client::{transport::TlsPaths, Client, ClientOptions};
 use djbod_core::{
+    cluster::Transport,
     erasure::ShardIndex,
     layout::{object_directory, shard_file_name},
     record::{DeviceId, MetadataRecord},
@@ -57,12 +58,16 @@ pub struct WorkerProcess {
 
 impl WorkerProcess {
     fn start(&mut self) -> Result<()> {
+        self.start_with(|_| {})
+    }
+    fn start_with(&mut self, configure: impl FnOnce(&mut Command)) -> Result<()> {
+        fs::write(&self.config_path, toml::to_string(&self.config)?)?;
         let log = fs::File::create(&self.log_path)?;
+        let mut command = isolated_command(WORKER_BINARY);
+        command.arg("--config").arg(&self.config_path);
+        configure(&mut command);
         self.process = Some(
-            Command::new(WORKER_BINARY)
-                .arg("--config")
-                .arg(&self.config_path)
-                .env("TOKIO_WORKER_THREADS", "2")
+            command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(log)
@@ -79,6 +84,15 @@ impl WorkerProcess {
     pub async fn restart(&mut self, rpc: &RpcClient) -> Result<()> {
         self.stop();
         self.start()?;
+        self.ready(rpc).await
+    }
+    pub async fn restart_with(
+        &mut self,
+        rpc: &RpcClient,
+        configure: impl FnOnce(&mut Command),
+    ) -> Result<()> {
+        self.stop();
+        self.start_with(configure)?;
         self.ready(rpc).await
     }
     async fn ready(&mut self, rpc: &RpcClient) -> Result<()> {
@@ -119,6 +133,9 @@ pub struct Cluster {
 
 impl Cluster {
     pub async fn new() -> Result<Self> {
+        Self::with_transport(Transport::Tls).await
+    }
+    pub async fn with_transport(transport: Transport) -> Result<Self> {
         let dir = tempfile::tempdir()?;
         let mut ca_params = CertificateParams::new(Vec::<String>::new())?;
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -144,7 +161,8 @@ impl Cluster {
         let tls = identity("controller")?;
         let rogue_tls = identity("unlisted-controller")?;
         let fingerprint = certificate_fingerprint(&tls.cert)?;
-        let rpc = RpcClient::new(&tls)?;
+        let client_tls = (transport != Transport::Plain).then(|| tls.clone().into());
+        let rpc = RpcClient::new(client_tls.as_ref())?;
         let mut nodes: Vec<ProductNode> = Vec::new();
         let mut workers = Vec::new();
         let mut roots = BTreeMap::new();
@@ -202,8 +220,17 @@ impl Cluster {
                 listen: worker_address,
                 devices: config.devices.clone(),
                 journal: dir.path().join(format!("worker{i}.jsonl")),
-                tls: identity(&format!("worker{i}"))?,
-                allowed_controllers: vec![fingerprint.clone()],
+                transport,
+                tls: if transport == Transport::Plain {
+                    None
+                } else {
+                    Some(identity(&format!("worker{i}"))?)
+                },
+                allowed_controllers: if transport == Transport::Tls {
+                    vec![fingerprint.clone()]
+                } else {
+                    Vec::new()
+                },
             };
             let config_path = dir.path().join(format!("worker{i}.toml"));
             fs::write(&config_path, toml::to_string(&worker_config)?)?;
@@ -227,7 +254,7 @@ impl Cluster {
         Ok(Self {
             bootstrap: nodes[0].config.listen,
             config: CoordinatorConfig {
-                tls,
+                tls: client_tls,
                 product_tls: None,
                 workers: workers.iter().map(|w| w.endpoint.clone()).collect(),
             },
@@ -312,7 +339,16 @@ pub fn body(length: usize) -> Vec<u8> {
 }
 
 pub fn cli() -> Command {
-    let mut command = Command::new(BINARY);
+    isolated_command(BINARY)
+}
+
+pub fn isolated_command(binary: &str) -> Command {
+    let mut command = Command::new(binary);
+    for (key, _) in std::env::vars() {
+        if key.starts_with("DJBOD_") {
+            command.env_remove(key);
+        }
+    }
     command
         .env("TOKIO_WORKER_THREADS", "2")
         .stdin(Stdio::null());

@@ -29,50 +29,23 @@ Install each explicitly where it is needed. Nothing starts automatically.
 Tests create their own temporary clusters, launch three separate worker
 executables, and require localhost networking.
 
-## Workers and certificates
+## Workers
 
 Run one worker per storage node, with access to that node's selected
 device roots. The default listener is **TCP `0.0.0.0:6666`**. Workers have
-their own configuration, TLS protocol, and journals. They do not change
+their own configuration, protocol, and journals. They do not change
 the node protocol, cluster document, or shard format.
 
-Every connection requires mutual TLS and an explicitly allowed controller
-certificate. Use a dedicated testing CA. The repository's existing PKI
-helper can issue the certificates, without changing the production setup:
-
-```sh
-scripts/djbod-pki.sh --dir ./bitrot-pki init-ca --name bitrot-testing
-scripts/djbod-pki.sh --dir ./bitrot-pki node worker-a 10.0.0.1
-scripts/djbod-pki.sh --dir ./bitrot-pki node worker-b 10.0.0.2
-scripts/djbod-pki.sh --dir ./bitrot-pki node worker-c 10.0.0.3
-scripts/djbod-pki.sh --dir ./bitrot-pki client controller
-target/release/djbod-bitrotter fingerprint ./bitrot-pki/controller.crt
-```
-
-Keep the CA private key on the issuing machine. Install the CA certificate
-and each worker's own certificate/key on its node, and the controller's
-certificate/key on the coordinator. Private keys must have restrictive
-permissions, such as `0600`. The worker certificate must cover its endpoint
-IP, or the `server_name` configured by the coordinator. Workers check the
-SHA-256 fingerprint of the controller's leaf certificate, in addition to
-verifying its certificate chain. Restart workers after changing an allowlist.
-
-Example `worker.toml` on node A; replace IDs with the product's actual
-node and cluster UUIDs, paths with its test device roots, and the fingerprint
-with the command's output:
+TLS is optional. This minimal `worker.toml` uses plaintext TCP and needs
+no certificates. Replace IDs with the product's actual node and cluster
+UUIDs, and paths with its test device roots:
 
 ```toml
-node = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+node_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 cluster = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
 listen = "0.0.0.0:6666"
 devices = ["/mnt/test-disk1", "/mnt/test-disk2"]
 journal = "/var/lib/djbod-bitrotter/worker.jsonl"
-allowed_controllers = ["REPLACE_WITH_64_HEX_DIGIT_CONTROLLER_FINGERPRINT"]
-
-[tls]
-ca = "/etc/djbod-bitrotter/ca.crt"
-cert = "/etc/djbod-bitrotter/worker-a.crt"
-key = "/etc/djbod-bitrotter/worker-a.key"
 ```
 
 Create the journal's parent directory first, outside every device root.
@@ -83,10 +56,88 @@ test devices and its journal:
 djbod-bitrotter-worker --config /etc/djbod-bitrotter/worker.toml
 ```
 
+Arguments override environment variables, which override the TOML file,
+following `djbod-node` (SPEC 20.6). The old `node` TOML key remains an alias
+for `node_id`. Omit the file if node ID, cluster ID, devices, and journal
+are supplied through arguments or environment variables.
+
+| Argument | Environment variable | TOML key |
+| --- | --- | --- |
+| `--config` | `DJBOD_CONFIG` | — |
+| `--node-id` | `DJBOD_NODE_ID` | `node_id` |
+| `--cluster` | `DJBOD_CLUSTER` | `cluster` |
+| `--listen` | `DJBOD_LISTEN` | `listen` |
+| `--device` | `DJBOD_DEVICES` | `devices` |
+| `--journal` | `DJBOD_BITROTTER_JOURNAL` | `journal` |
+| `--transport` | `DJBOD_TRANSPORT` | `transport` |
+| `--allowed-controller` | `DJBOD_BITROTTER_ALLOWED_CONTROLLERS` | `allowed_controllers` |
+| `--tls-ca` | `DJBOD_TLS_CA` | `tls.ca` |
+| `--tls-cert` | `DJBOD_TLS_CERT` | `tls.cert` |
+| `--tls-key` | `DJBOD_TLS_KEY` | `tls.key` |
+
+Devices and allowed controllers accept repeated arguments or comma-separated
+lists, replacing the file's list. Worker TLS arguments/environment must
+supply all three paths together, replacing the complete `[tls]` table.
 Paths in either TOML configuration are relative to its containing directory
-unless absolute. Device and journal paths must not traverse symlinks or `..`.
+unless absolute; paths from arguments/environment are relative to the working
+directory. Device and journal paths must not traverse symlinks or `..`.
 No two workers may open the same device. Starting a worker displays the
 testing warning but does not authorize any corruption.
+
+## Optional TLS
+
+Workers follow the product's transport modes (SPEC 19.1.6.4):
+
+| Worker `transport` | Required server material | Accepted connections |
+| --- | --- | --- |
+| `plain` (default) | None | Plaintext; also anonymous or mutual TLS when material is supplied |
+| `tls-optional` | `ca`, `cert`, and `key` | Plaintext, anonymous TLS, or mutual TLS |
+| `tls` | `ca`, `cert`, and `key` | Mutual TLS only; plaintext receives `TlsRequired` |
+
+These are worker settings, independent of the product cluster's transport.
+TLS verifies the server name and certificate chain. A presented client
+certificate must verify even in optional modes. A failed TLS connection
+never falls back to plaintext.
+
+An optional `allowed_controllers` list restricts access further to the
+SHA-256 fingerprints of listed client certificates. A nonempty list rejects
+plaintext and anonymous TLS, even in `plain` or `tls-optional` mode. With no
+list, `tls` accepts any client signed by the configured CA. Plaintext and
+anonymous TLS do not authenticate controllers; use them on a trusted test
+network. Lease tokens still fence stale sessions but are not an identity
+mechanism. Transport choice does not change damage warnings or confirmations.
+
+For TLS, the existing PKI helper can issue certificates under a testing CA:
+
+```sh
+scripts/djbod-pki.sh --dir ./bitrot-pki init-ca --name bitrot-testing
+scripts/djbod-pki.sh --dir ./bitrot-pki node worker-a 10.0.0.1
+scripts/djbod-pki.sh --dir ./bitrot-pki node worker-b 10.0.0.2
+scripts/djbod-pki.sh --dir ./bitrot-pki node worker-c 10.0.0.3
+scripts/djbod-pki.sh --dir ./bitrot-pki client controller
+djbod-bitrotter fingerprint ./bitrot-pki/controller.crt
+```
+
+Keep the CA private key on the issuing machine. Install the CA certificate
+and each worker's own certificate/key on its node, and the controller's
+certificate/key on the coordinator if using mutual TLS. Private keys must
+have restrictive permissions, such as `0600`. Worker certificates must
+cover their endpoint IP or the coordinator's configured `server_name`.
+
+To require mutual TLS, add these settings to `worker.toml` (the first two
+are top-level keys; the allowlist is optional):
+
+```toml
+transport = "tls"
+allowed_controllers = ["REPLACE_WITH_64_HEX_DIGIT_CONTROLLER_FINGERPRINT"]
+
+[tls]
+ca = "/etc/djbod-bitrotter/ca.crt"
+cert = "/etc/djbod-bitrotter/worker-a.crt"
+key = "/etc/djbod-bitrotter/worker-a.key"
+```
+
+Restart workers after changing transport, certificates, or allowlists.
 
 ## Plan centrally
 
@@ -94,11 +145,6 @@ Create `workers.toml` on the coordinator. List each participating product
 node's actual UUID and worker endpoint:
 
 ```toml
-[tls]
-ca = "bitrot-pki/ca.crt"
-cert = "bitrot-pki/controller.crt"
-key = "bitrot-pki/controller.key"
-
 [[workers]]
 node = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 address = "10.0.0.1:6666"
@@ -112,9 +158,30 @@ node = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
 address = "10.0.0.3:6666"
 ```
 
-An optional `[product_tls]` table with `ca`, `cert`, and `key` configures
-read-only discovery through a TLS-enabled product cluster. It is separate
-from mandatory worker TLS. Optional `server_name` on a worker overrides
+Omitting `[tls]` uses plaintext worker connections. For anonymous TLS,
+add `[tls]` with just `ca`. For mutual TLS, include `cert` and `key` as well:
+
+```toml
+[tls]
+ca = "bitrot-pki/ca.crt"
+cert = "bitrot-pki/controller.crt"
+key = "bitrot-pki/controller.key"
+```
+
+Like `djbod`, the controller accepts global `--tls-ca`, `--tls-cert`, and
+`--tls-key` arguments and their `DJBOD_TLS_*` environment variables.
+Arguments override environment variables, which override the worker TLS
+table. CA alone enables anonymous TLS; a certificate requires its key and
+CA. Overrides replace the whole table, without filling missing paths from
+the file. `--cluster`/`DJBOD_CLUSTER` optionally checks the expected cluster
+UUID. `--bootstrap-node`/`DJBOD_BOOTSTRAP_NODE` accepts repeated arguments or
+a comma-separated list; `--workers` also accepts `DJBOD_BITROTTER_WORKERS`.
+
+An independent `[product_tls]` table configures read-only discovery through
+the product cluster: omit it for plaintext, specify `ca` for anonymous TLS,
+or `ca`, `cert`, and `key` for mutual TLS. The controller TLS arguments and
+environment variables apply to **worker connections**, leaving this product
+connection setting independent. Optional `server_name` on a worker overrides
 the TLS name derived from its endpoint. A hostname without a port uses 6666;
 use `[IPv6-address]:6666` for IPv6 endpoints.
 
@@ -138,12 +205,16 @@ there must be at least `n` distinct valid indices for every selected version.
 For example, `--shards 2 --shard-index 0 --shard-index 4` pins those indices
 for every compatible object. `n` must be between 1 and that version's `k+m`.
 
-The saved JSON pins cluster identity, worker endpoints, worker journal
+The saved JSON pins cluster identity, worker endpoints, TLS settings, worker journal
 identities, device roots, object versions, placement revisions, each scheme,
 and exactly `n` distinct indices per object version. Its content hash is the
 plan ID. Identical inputs and seed yield identical selection and event order.
 Formatting changes to JSON are harmless; changes to plan contents require
 a new ID and fresh confirmation. Plan output files must not already exist.
+`run` uses the saved TLS settings; any TLS arguments/environment supplied
+at execution must match the saved paths and mode. Create a new plan to
+change credential paths or transport. Existing mutual TLS plans and journals
+retain their format and can still be resumed.
 
 ## Confirm and run
 

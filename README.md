@@ -374,8 +374,10 @@ certificate listing using temporary certificates; it requires `openssl`.
 
 The separate [bitrotter testing tool](crates/djbod-bitrotter/README.md)
 coordinates deliberate shard corruption across worker processes on port
-6666. Build it explicitly with `cargo build -p djbod-bitrotter`; it is
-excluded from default product builds and release images. Use it only with
+6666. Build the `djbod-bitrotter` controller and `djbod-bitrotter-worker`
+executables with `cargo build -p djbod-bitrotter`; they are excluded from
+default product builds and release images. Workers support the same
+`plain`, `tls-optional`, and `tls` modes as the product. Use them only with
 disposable test data.
 
 ## Status

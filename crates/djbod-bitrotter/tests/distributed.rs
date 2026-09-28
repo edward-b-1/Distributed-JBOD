@@ -1,4 +1,5 @@
 mod common;
+mod transport;
 
 use anyhow::Result;
 use common::{body, cli, consent, Cluster, BLOCK};
@@ -249,7 +250,7 @@ async fn invalid_plans_authentication_and_fencing_never_mutate() -> Result<()> {
     assert!(duplicate.validate().is_err());
     let mut altered = plan.clone();
     altered.n = 3;
-    let rpc = RpcClient::new(&cluster.config.tls)?;
+    let rpc = RpcClient::new(cluster.config.tls.as_ref())?;
     let selected_node = plan.owner(
         record
             .device_for(ShardIndex(plan.objects[0].selected[0]))
@@ -267,7 +268,7 @@ async fn invalid_plans_authentication_and_fencing_never_mutate() -> Result<()> {
         )
         .await
         .is_err());
-    let rogue = RpcClient::new(&cluster.rogue_tls)?;
+    let rogue = RpcClient::new(Some(&cluster.rogue_tls.clone().into()))?;
     assert!(rogue.request(endpoint, Request::Describe).await.is_err());
     // A trusted server certificate alone is insufficient: mutual TLS must
     // reject clients that supply no certificate at all.
@@ -275,7 +276,7 @@ async fn invalid_plans_authentication_and_fencing_never_mutate() -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let tls = rustls::ClientConfig::builder()
             .with_root_certificates(djbod_client::transport::read_authorities(
-                &cluster.config.tls.ca,
+                &cluster.config.tls.as_ref().unwrap().ca,
             )?)
             .with_no_client_auth();
         let tcp = tokio::net::TcpStream::connect(&endpoint.address).await?;
@@ -402,7 +403,7 @@ async fn worker_and_coordinator_restarts_reconcile_without_replaying_a_bit() -> 
         .position(|l| l.contains("apply_decided"))
         .unwrap();
     fs::write(&journal, format!("{}\n", lines[..=decision].join("\n")))?;
-    let rpc = RpcClient::new(&cluster.config.tls)?;
+    let rpc = RpcClient::new(cluster.config.tls.as_ref())?;
     let mut recovered_intent = false;
     for worker in &mut cluster.workers {
         worker.stop();
@@ -490,7 +491,7 @@ async fn network_partition_leaves_an_honest_partial_event_on_original_targets() 
     assert!(error.to_string().contains("partial or uncertain"));
     let first_path = cluster.shard(&record, selected[0]);
     let first_bytes = fs::read(&first_path)?;
-    let rpc = RpcClient::new(&cluster.config.tls)?;
+    let rpc = RpcClient::new(cluster.config.tls.as_ref())?;
     cluster.workers[offline].restart(&rpc).await?;
     let observed: Vec<_> = coordinator
         .probe(&record, 0)
@@ -662,7 +663,7 @@ async fn stale_placement_and_independent_bitrot_are_not_silently_retargeted() ->
     // prepare. The exact-count check must not claim this as a successful n=2.
     let fresh = cluster.plan(&record.key, 2, vec![0, 1]).await?;
     // Restarting ends the failed run's short-lived lease, without clearing its audit trail.
-    let rpc = RpcClient::new(&cluster.config.tls)?;
+    let rpc = RpcClient::new(cluster.config.tls.as_ref())?;
     let mut cluster = cluster;
     for worker in &mut cluster.workers {
         worker.restart(&rpc).await?;

@@ -9,7 +9,7 @@ default-run = "djbod-bitrotter"
 
 [dependencies]
 anyhow.workspace = true
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "env"] }
 djbod-core.workspace = true
 djbod-client.workspace = true
 futures-util.workspace = true

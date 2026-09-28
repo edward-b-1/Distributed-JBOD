@@ -1,13 +1,14 @@
 use crate::{
-    config::{WorkerAddress, WorkerConfig},
+    config::{ClientTls, WorkerAddress, WorkerConfig},
     model::{digest, Reply, Request, FORMAT},
     worker::Worker,
     Stop,
 };
 use anyhow::{bail, ensure, Context, Result};
 use djbod_client::transport::{
-    check_key_permissions, read_authorities, read_certificates, read_key, TlsPaths,
+    check_key_permissions, read_authorities, read_certificates, read_key, Stream,
 };
+use djbod_core::cluster::Transport;
 use rustls::{pki_types::ServerName, server::WebPkiClientVerifier, ClientConfig, ServerConfig};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
@@ -20,7 +21,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinSet,
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 
 pub const MAX_FRAME: usize = 8 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,16 +66,27 @@ async fn write_frame<T: Serialize>(
 
 #[derive(Clone)]
 pub struct RpcClient {
-    tls: Arc<ClientConfig>,
+    tls: Option<Arc<ClientConfig>>,
 }
 
 impl RpcClient {
-    pub fn new(paths: &TlsPaths) -> Result<Self> {
-        check_key_permissions(&paths.key)?;
-        let tls = ClientConfig::builder()
-            .with_root_certificates(read_authorities(&paths.ca)?)
-            .with_client_auth_cert(read_certificates(&paths.cert)?, read_key(&paths.key)?)?;
-        Ok(Self { tls: Arc::new(tls) })
+    pub fn new(paths: Option<&ClientTls>) -> Result<Self> {
+        let tls = paths
+            .map(|paths| -> Result<_> {
+                paths.validate()?;
+                let builder =
+                    ClientConfig::builder().with_root_certificates(read_authorities(&paths.ca)?);
+                let tls = match (&paths.cert, &paths.key) {
+                    (Some(cert), Some(key)) => {
+                        check_key_permissions(key)?;
+                        builder.with_client_auth_cert(read_certificates(cert)?, read_key(key)?)?
+                    }
+                    _ => builder.with_no_client_auth(),
+                };
+                Ok(Arc::new(tls))
+            })
+            .transpose()?;
+        Ok(Self { tls })
     }
     pub async fn request(&self, worker: &WorkerAddress, request: Request) -> Result<Reply> {
         let envelope = Envelope {
@@ -100,16 +112,23 @@ impl RpcClient {
                         .map_or(address.clone(), |(host, _)| host.to_owned())
                 }
             });
-            let name = ServerName::try_from(host).context("invalid worker TLS server name")?;
             let tcp = TcpStream::connect(&address)
                 .await
                 .with_context(|| format!("connecting to worker {address}"))?;
             tcp.set_nodelay(true)?;
-            let mut tls = TlsConnector::from(self.tls.clone())
-                .connect(name, tcp)
-                .await?;
-            write_frame(&mut tls, &envelope).await?;
-            match read_frame::<Reply>(&mut tls).await? {
+            let mut stream = match &self.tls {
+                Some(config) => {
+                    let name =
+                        ServerName::try_from(host).context("invalid worker TLS server name")?;
+                    let tls = TlsConnector::from(config.clone())
+                        .connect(name, tcp)
+                        .await?;
+                    Stream::Tls(Box::new(TlsStream::Client(tls)))
+                }
+                None => Stream::Plain(tcp),
+            };
+            write_frame(&mut stream, &envelope).await?;
+            match read_frame::<Reply>(&mut stream).await? {
                 Reply::Error(message) => bail!("worker {}: {message}", worker.node),
                 reply => Ok(reply),
             }
@@ -121,16 +140,24 @@ impl RpcClient {
 }
 
 pub async fn serve(config: WorkerConfig, listener: TcpListener, stop: Stop) -> Result<()> {
-    check_key_permissions(&config.tls.key)?;
-    let verifier =
-        WebPkiClientVerifier::builder(Arc::new(read_authorities(&config.tls.ca)?)).build()?;
-    let tls = ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(
-            read_certificates(&config.tls.cert)?,
-            read_key(&config.tls.key)?,
-        )?;
-    let acceptor = TlsAcceptor::from(Arc::new(tls));
+    config.validate()?;
+    let acceptor = config
+        .tls
+        .as_ref()
+        .map(|paths| -> Result<_> {
+            check_key_permissions(&paths.key)?;
+            let verifier = WebPkiClientVerifier::builder(Arc::new(read_authorities(&paths.ca)?));
+            let verifier = if config.transport == Transport::Tls {
+                verifier
+            } else {
+                verifier.allow_unauthenticated()
+            };
+            let tls = ServerConfig::builder()
+                .with_client_cert_verifier(verifier.build()?)
+                .with_single_cert(read_certificates(&paths.cert)?, read_key(&paths.key)?)?;
+            Ok(TlsAcceptor::from(Arc::new(tls)))
+        })
+        .transpose()?;
     let worker = Arc::new(Mutex::new(Worker::open(config)?));
     let mut tasks = JoinSet::new();
     loop {
@@ -147,18 +174,28 @@ pub async fn serve(config: WorkerConfig, listener: TcpListener, stop: Stop) -> R
                 tasks.spawn(async move {
                     let operation = async {
                         tcp.set_nodelay(true)?;
-                        let mut tls = acceptor.accept(tcp).await?;
-                        let cert = tls.get_ref().1.peer_certificates()
-                            .and_then(|certs| certs.first()).context("client certificate is required")?;
-                        let controller = digest(cert.as_ref());
-                        let envelope: Envelope = read_frame(&mut tls).await?;
+                        // As in djbod-node, sniff the first TLS handshake byte.
+                        // Our bounded u32 frame length always starts with zero,
+                        // so it cannot be confused with TLS record type 0x16.
+                        let mut first = [0];
+                        let looks_like_tls = tcp.peek(&mut first).await? == 1 && first[0] == 0x16;
+                        let (mut stream, controller) = if looks_like_tls {
+                            let acceptor = acceptor.context("peer began TLS but this worker has no TLS material")?;
+                            let tls = acceptor.accept(tcp).await?;
+                            let controller = tls.get_ref().1.peer_certificates()
+                                .and_then(|certs| certs.first()).map(|cert| digest(cert.as_ref()));
+                            (Stream::Tls(Box::new(TlsStream::Server(tls))), controller)
+                        } else {
+                            (Stream::Plain(tcp), None)
+                        };
+                        let envelope: Envelope = read_frame(&mut stream).await?;
                         ensure!(envelope.format == FORMAT, "unsupported worker protocol");
                         let result = tokio::task::spawn_blocking(move || -> Result<Reply> {
                             worker.lock().map_err(|_| anyhow::anyhow!("worker lock poisoned"))?
-                                .handle(&controller, envelope.request)
+                                .handle(controller.as_deref(), envelope.request)
                         }).await?;
                         let reply = result.unwrap_or_else(|error| Reply::Error(format!("{error:#}")));
-                        write_frame(&mut tls, &reply).await?;
+                        write_frame(&mut stream, &reply).await?;
                         Ok::<_, anyhow::Error>(())
                     };
                     // If the connection times out after an intent was written,

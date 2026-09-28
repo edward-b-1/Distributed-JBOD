@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use djbod_bitrotter::{
-    config::CoordinatorConfig,
+    config::{ClientTls, CoordinatorConfig},
     coordinator::{self, Limits, Selection},
     model::{Consent, Plan},
     network, signals, Stop, LOSS_WARNING, TEST_WARNING,
@@ -16,10 +16,22 @@ use std::{
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = djbod_client::BUILD,
     about = "Deliberate corruption of disposable test data; never a production service"
 )]
 struct Cli {
+    /// PEM authority for worker connections; alone, enables anonymous TLS.
+    #[arg(long, env = "DJBOD_TLS_CA", global = true)]
+    tls_ca: Option<PathBuf>,
+    /// Controller PEM certificate; requires --tls-key and --tls-ca.
+    #[arg(long, env = "DJBOD_TLS_CERT", global = true, requires_all = ["tls_key", "tls_ca"])]
+    tls_cert: Option<PathBuf>,
+    /// Controller PEM private key, readable only by its owner.
+    #[arg(long, env = "DJBOD_TLS_KEY", global = true, requires_all = ["tls_cert", "tls_ca"])]
+    tls_key: Option<PathBuf>,
+    /// Expected product cluster UUID.
+    #[arg(long, env = "DJBOD_CLUSTER", global = true)]
+    cluster: Option<uuid::Uuid>,
     #[command(subcommand)]
     command: Command,
 }
@@ -36,9 +48,14 @@ enum Command {
 
 #[derive(Args)]
 struct PlanArgs {
-    #[arg(long, required = true)]
+    #[arg(
+        long,
+        env = "DJBOD_BOOTSTRAP_NODE",
+        required = true,
+        value_delimiter = ','
+    )]
     bootstrap_node: Vec<String>,
-    #[arg(long)]
+    #[arg(long, env = "DJBOD_BITROTTER_WORKERS")]
     workers: PathBuf,
     #[arg(long)]
     key: Vec<String>,
@@ -227,9 +244,27 @@ async fn execute(cli: Cli) -> Result<ExitCode> {
     }
     let stop = Stop::default();
     tokio::spawn(signals(stop.clone()));
+    let tls_override = cli
+        .tls_ca
+        .as_ref()
+        .map(|ca| {
+            let mut tls = ClientTls {
+                ca: ca.clone(),
+                cert: cli.tls_cert.clone(),
+                key: cli.tls_key.clone(),
+            };
+            tls.resolve(&std::env::current_dir()?);
+            tls.validate()?;
+            Ok::<_, anyhow::Error>(tls)
+        })
+        .transpose()?;
     match cli.command {
         Command::Plan(args) => {
-            let config = CoordinatorConfig::load(&args.workers)?;
+            let mut config = CoordinatorConfig::read(&args.workers)?;
+            if let Some(tls) = tls_override {
+                config.tls = Some(tls);
+            }
+            config.validate()?;
             let mut bootstrap: Vec<SocketAddr> = Vec::new();
             for address in args.bootstrap_node {
                 bootstrap.extend(
@@ -250,6 +285,11 @@ async fn execute(cli: Cli) -> Result<ExitCode> {
                 },
             )
             .await?;
+            ensure!(
+                cli.cluster
+                    .is_none_or(|cluster| cluster == plan.document.cluster_id),
+                "cluster differs from --cluster/DJBOD_CLUSTER"
+            );
             show_plan(&plan);
             coordinator::save_plan(&args.out, &plan)?;
             if args.json {
@@ -260,6 +300,13 @@ async fn execute(cli: Cli) -> Result<ExitCode> {
         }
         Command::Run(args) => {
             let plan = coordinator::load_plan(&args.plan)?;
+            ensure!(
+                cli.cluster
+                    .is_none_or(|cluster| cluster == plan.document.cluster_id),
+                "cluster differs from --cluster/DJBOD_CLUSTER"
+            );
+            ensure!(tls_override.as_ref().is_none_or(|tls| plan.config.tls.as_ref() == Some(tls)),
+                "TLS options differ from the saved plan; create a new plan to change worker transport or credentials");
             let limits = if args.resume {
                 ensure!(
                     args.events.is_none()

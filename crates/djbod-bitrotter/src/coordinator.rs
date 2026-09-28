@@ -32,9 +32,7 @@ async fn product(
     cluster: Option<Uuid>,
 ) -> Result<Client> {
     let connector = match &config.product_tls {
-        Some(tls) => {
-            Connector::from_client_options(Some(&tls.ca), Some(&tls.cert), Some(&tls.key))?
-        }
+        Some(tls) => tls.connector()?,
         None => Connector::plain(),
     };
     let mut options = ClientOptions::new(bootstrap.to_vec()).connector(connector);
@@ -135,7 +133,7 @@ pub async fn assemble_plan(
             selected,
         });
     }
-    let rpc = RpcClient::new(&config.tls)?;
+    let rpc = RpcClient::new(config.tls.as_ref())?;
     let mut workers: Vec<Description> = Vec::new();
     for node in needed {
         let endpoint = config
@@ -187,7 +185,7 @@ impl<'a> Coordinator<'a> {
         plan.validate()?;
         Ok(Self {
             plan,
-            rpc: RpcClient::new(&plan.config.tls)?,
+            rpc: RpcClient::new(plan.config.tls.as_ref())?,
         })
     }
     fn validate_operations(
