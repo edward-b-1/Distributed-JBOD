@@ -27,6 +27,7 @@ afterwards; none of those versions was published.
 
 ### Added
 
+- Separate `djbod-bitrotter` controller and `djbod-bitrotter-worker` executables in the testing crate, sharing its library; storage nodes run `djbod-bitrotter-worker --config ...` (#135, #275).
 - `djbod-bitrotter`, a separate testing crate with a coordinator and mutually authenticated TLS workers on port 6666. Plans select exactly `n` distinct shard indices per object version across nodes and damage one payload bit in the same stripe of each selected shard, using the existing shard format (SPEC 9.3). Every run requires a testing-damage acknowledgement, with an additional explicit acknowledgement of certain data loss when `n > m`; the warning also covers independent bitrot when `n <= m`. Durable journals, session fencing, and resume reconcile partial events without repeating a bit flip. Includes disposable multi-node tests for reconstruction without read repair, scrub, and explicit repair (SPEC 11.4, 18.3, 20.1.2), plus setup instructions. The tool is excluded from default product builds and release images (#135).
 
 ## [0.3.0] - 2026-09-28

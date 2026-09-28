@@ -22,10 +22,12 @@ cargo build --release --locked -p djbod-bitrotter
 cargo test --locked -p djbod-bitrotter
 ```
 
-The binary is `target/release/djbod-bitrotter`. Install it explicitly on
-each participating storage node and on the coordinator machine. Nothing
-starts it automatically. Tests create their own temporary clusters, use
-three separate worker processes, and require localhost networking.
+The package builds two executables sharing the same library:
+`target/release/djbod-bitrotter` for the coordinator machine, and
+`target/release/djbod-bitrotter-worker` for participating storage nodes.
+Install each explicitly where it is needed. Nothing starts automatically.
+Tests create their own temporary clusters, launch three separate worker
+executables, and require localhost networking.
 
 ## Workers and certificates
 
@@ -78,7 +80,7 @@ Start the worker under an account that can read and write only the intended
 test devices and its journal:
 
 ```sh
-djbod-bitrotter worker --config /etc/djbod-bitrotter/worker.toml
+djbod-bitrotter-worker --config /etc/djbod-bitrotter/worker.toml
 ```
 
 Paths in either TOML configuration are relative to its containing directory

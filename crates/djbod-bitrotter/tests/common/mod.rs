@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 pub const BLOCK: u64 = 64 * 1024;
 pub const BINARY: &str = env!("CARGO_BIN_EXE_djbod-bitrotter");
+pub const WORKER_BINARY: &str = env!("CARGO_BIN_EXE_djbod-bitrotter-worker");
 
 struct ProductNode {
     config: NodeConfig,
@@ -58,8 +59,8 @@ impl WorkerProcess {
     fn start(&mut self) -> Result<()> {
         let log = fs::File::create(&self.log_path)?;
         self.process = Some(
-            Command::new(BINARY)
-                .args(["worker", "--config"])
+            Command::new(WORKER_BINARY)
+                .arg("--config")
                 .arg(&self.config_path)
                 .env("TOKIO_WORKER_THREADS", "2")
                 .stdin(Stdio::null())

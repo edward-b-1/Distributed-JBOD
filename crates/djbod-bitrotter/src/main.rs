@@ -1,10 +1,10 @@
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use djbod_bitrotter::{
-    config::{CoordinatorConfig, WorkerConfig},
+    config::CoordinatorConfig,
     coordinator::{self, Limits, Selection},
     model::{Consent, Plan},
-    network, Stop, LOSS_WARNING, TEST_WARNING,
+    network, signals, Stop, LOSS_WARNING, TEST_WARNING,
 };
 use std::{
     io::{IsTerminal, Write},
@@ -26,11 +26,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Serve explicitly allowed local devices over authenticated TLS (port 6666).
-    Worker {
-        #[arg(long)]
-        config: PathBuf,
-    },
     /// Read cluster placement and save a deterministic plan without damaging data.
     Plan(PlanArgs),
     /// Confirm and execute a saved plan, or reconcile an interrupted run.
@@ -226,24 +221,6 @@ async fn confirm(plan: &Plan, args: &RunArgs, stop: &Stop) -> Result<Consent> {
     Ok(consent)
 }
 
-async fn signals(stop: Stop) {
-    #[cfg(unix)]
-    {
-        if let Ok(mut term) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-        } else {
-            let _ = tokio::signal::ctrl_c().await;
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
-    stop.stop();
-}
-
 async fn execute(cli: Cli) -> Result<ExitCode> {
     if !matches!(&cli.command, Command::Fingerprint { .. }) {
         eprintln!("WARNING: {TEST_WARNING}");
@@ -251,16 +228,6 @@ async fn execute(cli: Cli) -> Result<ExitCode> {
     let stop = Stop::default();
     tokio::spawn(signals(stop.clone()));
     match cli.command {
-        Command::Worker { config } => {
-            let config = WorkerConfig::load(&config)?;
-            let listener = tokio::net::TcpListener::bind(config.listen).await?;
-            eprintln!(
-                "bitrotter worker {} listening on {} (mutual TLS)",
-                config.node,
-                listener.local_addr()?
-            );
-            network::serve(config, listener, stop).await?;
-        }
         Command::Plan(args) => {
             let config = CoordinatorConfig::load(&args.workers)?;
             let mut bootstrap: Vec<SocketAddr> = Vec::new();
