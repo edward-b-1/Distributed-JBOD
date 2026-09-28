@@ -25,6 +25,10 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/releasing.md` no longer tells the first release to make the Docker image public by hand: 0.3.0's image could be pulled anonymously as soon as the workflow pushed it (#284).
+
 ## [0.3.0] - 2026-09-28
 
 The first published release: binaries, the Python wheel and the Docker image,

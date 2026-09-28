@@ -72,11 +72,10 @@ tests, the Python client's tests, the PKI helper's tests, and
    - creates the GitHub release `X.Y.Z` with the changelog section as its
      notes and the archives, the wheels and `SHA256SUMS` attached.
 
-   Every artifact reports `X.Y.Z+<commit>`.
-
-4. **The first release only**: GHCR creates the package private. Make it
-   public once under the package's settings, Danger Zone, Change
-   visibility.
+   Every artifact reports `X.Y.Z+<commit>`. The image is public from its
+   first push, since GHCR links it to this public repository through its
+   `org.opencontainers.image.source` label; nothing needs changing in the
+   package's settings.
 
 ## When the workflow fails
 
