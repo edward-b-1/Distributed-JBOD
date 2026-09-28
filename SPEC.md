@@ -1571,11 +1571,12 @@ inspected before the next is run:
 whether a device is empty: `statvfs` counts the whole filesystem, and a
 disk with nothing of djbod's on it still has a filesystem. The count that
 matters is of versions with a shard on the device, and every such version
-leaves a record copy there (9.4), so the coordinator fetches the device's
-records from its node, as the drain's estimate does, and reports the
-number of versions, of distinct keys, of blocks, and the shard bytes,
-computed from the records' sizes and schemes; no shard is read. This is
-the `DeviceContents` operation (19.1.3), `djbod contents` at the command
+leaves a record copy there (9.4), so the coordinator asks the device's
+node to count them (`LocalDeviceContents`), which walks the device's
+records once and answers with the number of versions, of distinct keys,
+of blocks, and the shard bytes, computed from the records' sizes and
+schemes; no shard is read and no record crosses the network. This is the
+`DeviceContents` operation (19.1.3), `djbod contents` at the command
 line, and `Client::device_contents` in the library. Zero versions means
 the device holds nothing and `remove-device` will not find it referenced.
 
@@ -1824,8 +1825,8 @@ coordinator, and those nodes send to each other. Every response is either
 `DeviceContents`
 : Request: device UUID. Response: the device, its node and state, and
   the number of versions with a shard on it, of distinct keys, of blocks,
-  and the shard bytes (18.2.3). Counted from the device's record copies,
-  fetched from its node with `LocalRecords`; no data is read.
+  and the shard bytes (18.2.3). Counted by the device's node from its
+  record copies with `LocalDeviceContents`; no data is read.
 
 `PutObject`
 : Request: key, size, optional content type, optional user metadata.
@@ -1946,8 +1947,14 @@ coordinator, and those nodes send to each other. Every response is either
   as the page is built), in pages of at most 8 MiB of encoded records
   with a flag saying more follow (15.2.2). A page begins at the cursor's
   directory and reads only what it returns. The drain's and the removal
-  scan's list of versions (18.2.1, 18.5), the count behind `contents`
-  (18.2.3), and the streams the cluster-wide scrub merges (20.1.2).
+  scan's list of versions (18.2.1, 18.5), and the streams the
+  cluster-wide scrub merges (20.1.2).
+
+`LocalDeviceContents`
+: Request: device UUID. Response: the number of versions with a shard on
+  the device, of distinct keys, of blocks, and the shard bytes, from one
+  walk of the device's record copies (18.2.3). A record that cannot be
+  read is skipped and not counted, as `LocalRecords` skips it.
 
 `LocalScrub`
 : Request: rate limit. Response: `LocalScrubStarted`, then a stream of

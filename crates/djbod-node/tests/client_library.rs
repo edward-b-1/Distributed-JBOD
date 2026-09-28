@@ -282,6 +282,23 @@ async fn device_contents_count_versions_keys_blocks_and_bytes() {
         .await
         .expect_err("unknown device");
     assert!(unknown.is_not_found(), "{unknown}");
+
+    // A record copy that cannot be read is skipped and not counted (SPEC
+    // 18.2.3), on the one device where it is damaged.
+    let other = client.head("other").await.expect("head").record;
+    let device = a.node.device(device_a).expect("device a");
+    let record_path = device
+        .object_directory(&other.key_hash)
+        .join(djbod_core::layout::record_file_name(&other.version));
+    std::fs::write(&record_path, b"not a record").expect("damage record");
+    let contents = client.device_contents(device_a).await.expect("contents");
+    assert_eq!(
+        (contents.versions, contents.keys, contents.blocks),
+        (1, 1, 3),
+        "{contents:?}"
+    );
+    let contents = client.device_contents(device_b).await.expect("contents");
+    assert_eq!((contents.versions, contents.keys), (2, 2), "{contents:?}");
 }
 
 /// One node with `count` devices, for operations that need spare devices.
