@@ -9,37 +9,115 @@ and every crate inherits it. A build identifies itself as `<version>+<git
 commit>`, which `djbod --version`, `djbod identity`, `djbod status` and `djbod
 cluster show` print.
 
-Nothing before 0.2.0 was tagged: the workspace carried version 0.1.0 from the
-first commit on 16 September 2026, no build was published, and tags and version
-increments start at 0.2.0. Each section below the first tag is therefore one
-commit on `main`, headed by its short hash in place of a release tag. From 0.2.0
-on, a section is a tagged release. Each pull request adds its entries under
-`Unreleased` as part of the change, since it cannot know its merge commit; the
-next change to this file moves them under that commit's hash and date.
+A release is a tag `vX.Y.Z` on `main`, built and published by
+`.github/workflows/release.yml`; [docs/releasing.md](docs/releasing.md) has the
+steps. Each pull request adds its entries under `Unreleased` and leaves the
+version alone; the release's own pull request sets the version and renames
+`Unreleased` to `[X.Y.Z]` with the date.
+
+Before that process, from the first commit on 16 September 2026 until it began
+on 28 September 2026, each section is one commit on `main`. A commit that set a
+new version is headed by that version, with its short hash beside it, as
+`## [0.2.1] - 2026-09-25 ([2d88af6])`; every other commit is headed by its
+short hash alone and runs the version of the nearest version heading below it, or
+0.1.0 below 0.2.0. The tags `v0.2.0` to `v0.2.22` were put on those commits
+afterwards; none of those versions was published.
 
 ## [Unreleased]
 
-Pull request: The record's revision is required
+### Added
+
+- `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
+- `docs/releasing.md`: what a minor and a patch bump promise, what every pull request does, the steps of a release, and what to do when the workflow fails (#172).
+- The Docker image carries `LICENSE` and `THIRD-PARTY-NOTICES` in `/usr/share/doc/djbod/`, and the Python wheel both beside the module (SPEC 21.5) (#165, #169).
+
+### Changed
+
+- A pull request no longer sets a new version, and `CHANGELOG.md` collects every pull request's entries under `Unreleased` until a release names them, instead of one section per commit. The version headings from 0.2.0 to 0.2.22 link to their tags, and the changelog, SPEC 20.7 and `docs/releasing.md` say what a version promises (#172).
+
+## [af3ad27] - 2026-09-28
+
+Pull request #271: CHANGELOG.md: the entry for #268
+
+### Fixed
+
+- #268, the object health card and the health filter, merged without an entry; it has one now, under its commit. The entries of #269 and #272 are moved under their commits.
+
+## [0.2.22] - 2026-09-28 ([89c3120])
+
+Pull request #272: PutShard releases its write guard before it answers
+
+### Fixed
+
+- A `MoveShard` whose copy from the source failed on a damaged block could be refused its rebuild with "this shard is already being written on this device by another request": the node answered the abandoned `PutShard` before dropping the one-writer-per-shard guard of 20.1.2.1, and the coordinator, reading the answer, began the rebuild's `PutShard` for the same shard on the same device at once. The guard is now released before the answer is sent, on the abandoned path and on the finished one, so a coordinator that reads the answer can write the shard again. Seen as an intermittent failure of `move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged` in CI (#271).
+
+## [ff4b104] - 2026-09-28
+
+Pull request #269: CI: formatting, lints and every test on each pull request and push to main
+
+### Added
+
+- `.github/workflows/ci.yml`, the project's first CI, on GitHub Actions for every pull request and every push to `main`, on the Dockerfile's toolchain (Rust 1.98.1): `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace`, both `--locked`; the Python client's tests against a node with `scripts/python-tests.sh`; the PKI helper's tests; and a check that `THIRD-PARTY-NOTICES` is what `scripts/third-party-notices.py` writes from `Cargo.lock` (SPEC 21.5). A new push to a pull request cancels the run it replaces (#172).
+
+## [f7bd47b] - 2026-09-27
+
+Pull request #268: Web UI: the object health card and a health filter on the Objects page
+
+### Added
+
+- `POST /api/inventory` streams the inventory (SPEC 20.1.5) as NDJSON, as the scrub and drain routes do; a body `{"keys": "<state>"}` is `djbod inventory --keys` and adds one `object` line per version in that state before the summary (#218).
+- The object health card on the Overview, under the cluster health card: computed on demand with a Compute button, since the inventory is one pass over every record, it counts every object as whole, degraded with parity out, degraded with data out, unreadable or inconsistent, reads by the worst state present, names the unread devices, says whether the counts are complete and when they were taken, and links to the keys of the worst state (#218).
+- A Health filter beside the prefix on the Objects page: one state lists the first thousand objects in it under the prefix, the mark carries the state and the Size column becomes Shards, "2 of 3", with the count of objects in that state in all; Clear resets it (#218).
+
+## [1f5c440] - 2026-09-27
+
+Pull request #267: CHANGELOG.md: a version's section is headed by its version
+
+### Changed
+
+- A section whose commit set a new workspace version is headed by that version, with the commit's hash beside it and a link to the commit, from 0.2.0 to 0.2.21; a section whose commit did not keeps its hash heading. The "Version 0.2.x." entries those sections carried are gone, and the preamble says what the headings mean and that no release is tagged yet (#172, #266).
+
+### Fixed
+
+- Every section heading has a link reference: the eight sections from `d42a7dc` to `b36dbea` had none, and `[Unreleased]` compared from `4e127a6` (#266).
+- `52c4f52`, which set 0.2.16, is listed below `15798b3`, which merged after it; it had been above.
+
+## [0.2.21] - 2026-09-27 ([fa0dca9])
+
+Pull request #265: An inventory of every object's state without reading a shard
+
+### Added
+
+- `djbod inventory`: every object's state against the devices that can be read now, from one pass over the record streams of every active node with no shard read and no check made, so it finishes in minutes where a scrub takes days. Each version is whole, degraded with only parity out (reads unaffected), degraded with a data shard out (every read decodes), unreadable (more than m out), or inconsistent (the copies read disagree or one is missing, which is the scrub's territory). Unlike the scrub it goes around a node that is down: that node's devices are unread, and the summary names them and says whether the counts are complete, which they are while fewer than k+m devices are unread. `--keys <state>` lists that state's objects one per line with their shards available; `--json` prints the events alone; the exit codes are the scrub's with "not whole" for damage (SPEC 20.1.5, 19.1.3, 16.1) (#218).
+- On the wire, `Request::Inventory` with an `InventoryQuery`, `Response::InventoryStarted`, and a stream of `InventoryEvent` frames (`Object`, `Progress`, `Summary`) with `ObjectState`; `Connection::start_inventory`, `Client::inventory` and its blocking wrapper.
+
+## [0.2.20] - 2026-09-26 ([b36dbea])
+
+Pull request #157: The record's revision is required
 
 ### Changed
 
 - `MetadataRecord.revision` is always written and required on read. It had been omitted when 0 and defaulted when absent so that records from before 18.8.1 still verified; nothing is released, so nothing is kept for compatibility (SPEC 9.4.2, 19.1.5.2). A record without the field no longer parses, and a record's checksum now covers `"revision": 0`, so every record written by an earlier build must be rewritten once (#155, #260).
-- Version 0.2.20.
 
-Pull request: djbod takes --bootstrap-node and DJBOD_BOOTSTRAP_NODE, as the web UI does
+## [0.2.19] - 2026-09-26 ([b1a9a3c])
+
+Pull request #263: djbod takes --bootstrap-node and DJBOD_BOOTSTRAP_NODE, as the web UI does
 
 ### Changed
 
 - `djbod --node` and `DJBOD_NODE` are `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE`, the names `djbod-ui` already uses (#207): one setting, one name across both tools, and one variable in `/etc/djbod/client.env` for the UI, the scrub timer and the command line. Nothing is kept for the old name (SPEC 19.1.5.2). `DJBOD_NODE_ID`, the node's own identity, is unrelated and unchanged. The README, SPEC, the guides, the deployment files and the tests follow (#262).
-- Version 0.2.19.
 
-Pull request: Ship a systemd unit for djbod-ui
+## [2fdbba1] - 2026-09-26
+
+Pull request #259: Ship a systemd unit for djbod-ui
 
 ### Added
 
 - `deploy/systemd/djbod-ui.service`, a systemd unit for the web UI: it runs as the `djbod` user, reads `DJBOD_BOOTSTRAP_NODE`, `DJBOD_CLUSTER` and the TLS paths from `/etc/djbod/client.env`, which `deploy/systemd/client.env.example` shows and the `djbod` command line reads too, listens on localhost, and says how to serve the LAN instead. It does not wait for the local node, since the UI tries every listed node. The deployment guide points to it (#258).
 
-Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
+## [0.2.18] - 2026-09-26 ([ea18734])
+
+Pull request #73: Deployment: Dockerfile, Compose stack, systemd units, and a guide
 
 ### Added
 
@@ -47,28 +125,45 @@ Pull request: Deployment: Dockerfile, Compose stack, systemd units, and a guide
 - `deploy/docker-compose.node.yml` and `deploy/docker/node.env.example`: one node on a real machine, bind mounts, host network, one env file per machine. `deploy/docker-compose.yml`: a three-node trial on volumes with the web UI, which asks node 1 for the cluster id; no id appears in either file.
 - `deploy/systemd/`: `djbod-node.service` (runs as `djbod`, restarts on failure, `StateDirectory=` and `ProtectSystem=full` so it names no site paths and an unmounted disk leaves the node running with that device unavailable, as SPEC 5.6 has it), `djbod-scrub.service` and `djbod-scrub.timer` (weekly, randomised, rate-limited, report-only, exit 2 not a failure), and `node.env.example`. The web UI's unit and `client.env.example` come with #259.
 - `docs/deployment.md`: the three ways step by step, with TLS and upgrade notes; the README and the guides point to it (#73).
-- Version 0.2.18.
 
-Pull request: Remove the UI's deprecated --node and DJBOD_NODE
+## [0.2.17] - 2026-09-26 ([57746ff])
+
+Pull request #261: Remove the UI's deprecated --node and DJBOD_NODE
 
 ### Removed
 
 - `djbod-ui --node` and `DJBOD_NODE`, the deprecated spelling of `--bootstrap-node` and `DJBOD_BOOTSTRAP_NODE` kept by #207 and accepted with a warning at every start. Nothing is released, so nothing is kept for compatibility (SPEC 19.1.5.2). `djbod` itself keeps `--node`, which is that tool's own name for the setting (#260).
-- Version 0.2.17.
 
-Pull request: Removed nodes stay in the cluster document as tombstones
+## [15798b3] - 2026-09-26
+
+Pull request #256: Web UI: toggles to show or hide removed nodes and devices
+
+### Added
+
+- The web UI's overview can show or hide removed nodes and devices, which `status` now reports (#147).
+
+## [0.2.16] - 2026-09-26 ([52c4f52])
+
+Pull request #255: Removed nodes stay in the cluster document as tombstones
 
 ### Changed
 
 - `remove-node`, plain and `--force`, marks the node and every one of its devices `removed` instead of deleting them, so both removals leave tombstones and nothing is ever deleted from the document. A removed node is asked nothing, proposed to nothing, and takes no part in any broadcast, listing or scrub; `status` and `cluster show` list it as `removed`, with its devices, for the record. A tombstone is never revived: a machine that comes back joins with a new node id, and its devices with `--wipe-removed-device`. A removed node's addresses and label no longer count against a new node (SPEC 6.2.2, 6.2.5.2, 6.2.6.3, 18.2.1) (#147).
 - `add-device` and `join` recognise a removed device by its tombstone, so a disk retired with `remove-device` can be wiped and added again, which the old check refused as "already in the document".
-- Version 0.2.16.
 
 ### Added
 
 - `state` on node entries in the cluster document, `active` or `removed`, required like every field but the names: a `cluster.json` from before this change is refused until each node entry carries `"state": "active"`. `state` on `NodeStatus`, required (SPEC 19.1.5.2).
 
-## [4e127a6] - 2026-09-26
+## [d42a7dc] - 2026-09-26
+
+Pull request #138: docs: add detailed user guide
+
+### Added
+
+- `docs/user-guide.md`, a step-by-step guide to running and using a cluster, linked from the README.
+
+## [0.2.15] - 2026-09-26 ([4e127a6])
 
 Pull request #253: djbod cluster get-name prints the cluster's name alone
 
@@ -76,20 +171,15 @@ Pull request #253: djbod cluster get-name prints the cluster's name alone
 
 - `djbod cluster get-name` prints the cluster's name and nothing else, as `get-cluster-id` prints the id; with no name set it prints nothing, says so on standard error and exits 1, so a script can tell. `--json` gives `cluster_id` and `cluster_name`. Documented beside `set-name` in the command reference, the getting-started guide and SPEC 6.2.5.3 (#251).
 
-### Changed
-
-- Version 0.2.15.
-
-## [5ce1b6c] - 2026-09-26
+## [0.2.14] - 2026-09-26 ([5ce1b6c])
 
 Pull request #250: Rename set-label to set-device-label
 
 ### Changed
 
 - `djbod cluster set-label` is `set-device-label`, beside `set-node-label` and `set-name`, with the same arguments, validation and `--clear`; the tests, README, SPEC 6.2.5.1, the guides and the web UI's command mapping follow. No alias is kept, nothing being released (SPEC 19.1.5.2) (#122).
-- Version 0.2.14.
 
-## [81ca3d5] - 2026-09-26
+## [0.2.13] - 2026-09-26 ([81ca3d5])
 
 Pull request #249: Drain shows its progress against the estimate
 
@@ -98,47 +188,39 @@ Pull request #249: Drain shows its progress against the estimate
 - `djbod cluster drain` prints, every 1,000 versions handled, where it is against the estimate: versions and bytes done, time elapsed and roughly how long remains. Counted from the events the drain already sends, not timed, so it costs the node nothing. The web UI's drain panel gets the meter and progress text the scrub panel has (#248).
 - `shard_bytes` on `DrainEvent::Moved`, the moved shard file's size from the record's geometry, required (SPEC 19.1.5.2).
 
-### Changed
-
-- Version 0.2.13.
-
-## [5f8cc79] - 2026-09-25
+## [0.2.12] - 2026-09-25 ([5f8cc79])
 
 Pull request #247: Tables lead with the label, and contents shows the owning node's UUID
 
 ### Changed
 
 - `status`, `contents` and `cluster show` put the LABEL column first with the UUID beside it; `contents` gains a NODE column it lacked, so an unnamed owning node is identified. The getting-started sample table follows (#123).
-- Version 0.2.12.
 
-## [ea49f21] - 2026-09-25
+## [0.2.11] - 2026-09-25 ([ea49f21])
 
 Pull request #246: Cluster administration commands name what they acted on
 
 ### Changed
 
 - `set-state`, `set-label`, `set-node-label`, `set-address`, both forms of `remove-device` and `remove-node`, and `sync` print the device or node by its full identity, label with the UUID in brackets where the document has a label (SPEC 6.2.5.1). Names come from the document as it was before the change, so a relabel shows the old identity and the new label. `remove-device` no longer echoes the operator's input, which hid a label when a UUID was typed (#123).
-- Version 0.2.11.
 
-## [8e97556] - 2026-09-25
+## [0.2.10] - 2026-09-25 ([8e97556])
 
 Pull request #245: move-shard and repair name the devices they touched
 
 ### Changed
 
 - `move-shard` names source and destination, and `repair` each shard's device and the device a lost shard was rebuilt onto, as `node X device Y` by label where the document has one (#123).
-- Version 0.2.10.
 
-## [a7c36bc] - 2026-09-25
+## [0.2.9] - 2026-09-25 ([a7c36bc])
 
 Pull request #244: Scrub output names nodes and devices, and cluster findings are written out
 
 ### Changed
 
 - Every scrub line names its node and device by label where the document has one, and by the whole UUID where it does not; the eight-character UUID prefixes are gone. Cross-node findings, which were printed in the event's Debug form, are written out with the object first and the device by name (#123).
-- Version 0.2.9.
 
-## [d99a71a] - 2026-09-25
+## [0.2.8] - 2026-09-25 ([d99a71a])
 
 Pull request #243: CLI names devices and nodes in errors, status, put, get, head and list
 
@@ -149,18 +231,16 @@ Pull request #243: CLI names devices and nodes in errors, status, put, get, head
 ### Changed
 
 - The error block every failure prints, the `status` header and its unreachable-node lines, the devices a `put` went around, the shards of `head`, the record copies and reconstructed blocks a `get` reports, and the devices a listing went without all read by name. The drain's own helpers from #242 are replaced.
-- Version 0.2.8.
 
-## [20609e4] - 2026-09-25
+## [0.2.7] - 2026-09-25 ([20609e4])
 
 Pull request #242: Drain names devices and nodes, and each moved line shows source and destination
 
 ### Changed
 
 - The drain names the drained device and its node by label with the UUID in brackets on its opening and closing lines, and each moved line reads `node X device Y -> node X device Y`, both ends by label or, without one, UUID. Before, it printed the drained device's UUID, the node's first eight characters and each destination's UUID with no source (#123).
-- Version 0.2.7.
 
-## [96e0872] - 2026-09-25
+## [0.2.6] - 2026-09-25 ([96e0872])
 
 Pull request #239: Scrub reports shards available before and after its repairs
 
@@ -169,7 +249,6 @@ Pull request #239: Scrub reports shards available before and after its repairs
 - The shards-available count is taken as the run leaves it: a repairing run reports it twice, before the repairs and after them, each version repaired counted as whole and each that could not be left where it was, so the two lines show what the run changed. It had been taken in the merge, before the repairs (SPEC 20.1.2.2).
 - `djbod scrub` no longer prints "scrub incomplete" for a stream that ended only because repairs failed; that is a complete run (SPEC 20.1.2.3) and the verdict carries the count.
 - `after_repair` on `ScrubEvent::CrossCheckAvailability`, required.
-- Version 0.2.6.
 
 ## [5a5fbdc] - 2026-09-25
 
@@ -179,14 +258,13 @@ Pull request #213: Add an operator guide for setup, deployment, and recovery
 
 - `docs/guide/`, an operator's guide: concepts, a one-machine setup, deployment on real disks, day-to-day use, TLS, a command reference, and failure scenarios (an unreadable disk, a bad block, a damaged record, adding and replacing a device, adding and replacing a node, a node that is down, a node that will never come back). The README points at it.
 
-## [1b8e434] - 2026-09-25
+## [0.2.5] - 2026-09-25 ([1b8e434])
 
 Pull request #238: Plurals in words everywhere, never (s)
 
 ### Changed
 
 - Every count a person reads is a number and the word that agrees with it, "1 device", "2 devices", never "device(s)", across the CLI, the node binary, the coordinator's messages, the client's admin errors, the recovery tool, the Python package and the web UI, through one `djbod_core::text::counted` helper; SPEC 14.1 follows (#235).
-- Version 0.2.5.
 
 ## [cd95829] - 2026-09-25
 
@@ -196,7 +274,7 @@ Pull request #217: CHANGELOG.md: one section per commit on main, with the earlie
 
 - This file: one section per commit on `main`, headed by its short hash in place of a release tag until the first tag, with the earlier single-section summary kept as `docs/history-summary-0.2.0.md` (#172).
 
-## [26064ba] - 2026-09-25
+## [0.2.4] - 2026-09-25 ([26064ba])
 
 Pull request #236: Scrub's last line counts by kind and object, then every object by shards available; a shard on a removed device is lost
 
@@ -209,9 +287,8 @@ Pull request #236: Scrub's last line counts by kind and object, then every objec
 
 - The scrub's last line counts findings by kind in words and by the objects they fall in, mentions repairs and failures only with `--repair`, and writes counts as words (SPEC 20.1.2.3).
 - The incomplete-listing test from #222 no longer depends on placement, which on one shared filesystem picks the same devices every time.
-- Version 0.2.4.
 
-## [2286527] - 2026-09-25
+## [0.2.3] - 2026-09-25 ([2286527])
 
 Pull request #233: Status lists every device in the document, removed ones included
 
@@ -219,21 +296,13 @@ Pull request #233: Status lists every device in the document, removed ones inclu
 
 - `LocalStatus` lists every document device of its node that it did not open, whatever the state, and `Status` every document device of an unreachable node. A device whose directory was gone at startup and was then retired with `remove-device --force` had dropped out of the status and the web UI, while a removed device still attached showed as removed (SPEC 19.1.3) (#232).
 
-### Changed
-
-- Version 0.2.3.
-
-## [af5af8b] - 2026-09-25
+## [0.2.2] - 2026-09-25 ([af5af8b])
 
 Pull request #231: Scrub reports what an unavailable device costs, loudly, as its last lines
 
 ### Added
 
 - `ScrubEvent::CrossCheckExposure`, sent once when the cross-node phase ends with any device unread: per device, the versions with a shard on it; the versions with any shard out; those with exactly m out, one further loss from unreadable; and those with more than m out. `djbod scrub` prints it as its last lines, headed `WARNING: data at higher risk`, with what to do; the web UI's scrub log shows the same. Exposure, not damage: the exit code is unchanged (SPEC 20.1.2.2) (#230).
-
-### Changed
-
-- Version 0.2.2.
 
 ## [3f33beb] - 2026-09-25
 
@@ -243,7 +312,7 @@ Pull request #226: docs(design): object health in the web UI
 
 - `docs/design/object-health.html`: three treatments of an Overview card for object health, the four states it must express, a health filter and Shards column on the Objects page, a verdict line in the record view, and where each number comes from. The decision is recorded as not yet taken.
 
-## [2d88af6] - 2026-09-25
+## [0.2.1] - 2026-09-25 ([2d88af6])
 
 Pull request #225: A refused object is worded as a refusal, ids print once, version 0.2.1
 
@@ -251,10 +320,6 @@ Pull request #225: A refused object is worded as a refusal, ids print once, vers
 
 - The web UI server answers 409 rather than 502 for a `NodeUnreachable` or `DeviceUnavailable` detail that names a key, and the page words it "refused while a node is unreachable" rather than "cannot reach the cluster", which is for the server itself failing to reach a node (#223).
 - Node and device ids no longer print with a doubled prefix ("node node ...", "device device ...") in the `djbod list` note and three lookup reasons.
-
-### Changed
-
-- Version 0.2.1.
 
 ## [ea584ef] - 2026-09-25
 
@@ -303,7 +368,7 @@ Pull request #216: Web UI: mark an unavailable device with the failure square, n
 - A device whose node cannot read it or cannot be reached takes the failure square whatever the document's state, in the device table and in the record view's shard table, through one `stateCell` helper with a tooltip saying why. The Overview had listed such devices as `active, unavailable` with the green active dot beside them (#215).
 - The Devices card counts the unavailable devices when there are any, and the Nodes table's devices cell says how many are unavailable, in red.
 
-## [dffe86d] - 2026-09-25
+## [0.2.0] - 2026-09-25 ([dffe86d])
 
 Pull request #214: Version 0.2.0
 
@@ -2021,29 +2086,66 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/4e127a6...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...HEAD
+[af3ad27]: https://github.com/edward-b-1/Distributed-JBOD/commit/af3ad27b44def7be7a646477229fdea4962fd939
+[0.2.22]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.21...v0.2.22
+[89c3120]: https://github.com/edward-b-1/Distributed-JBOD/commit/89c312050b6aefede65e0aca3baa07ac49384375
+[ff4b104]: https://github.com/edward-b-1/Distributed-JBOD/commit/ff4b10492dfe5d7c16266c94cc25cf89ee7ccae2
+[f7bd47b]: https://github.com/edward-b-1/Distributed-JBOD/commit/f7bd47b63c9a0fdfc9ae4663c5e304ef604f00a9
+[1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
+[0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.20...v0.2.21
+[fa0dca9]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
+[0.2.20]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.19...v0.2.20
+[b36dbea]: https://github.com/edward-b-1/Distributed-JBOD/commit/b36dbea05b36ceaa746f71b8fe5f479a99169b05
+[0.2.19]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.18...v0.2.19
+[b1a9a3c]: https://github.com/edward-b-1/Distributed-JBOD/commit/b1a9a3c64bddc598c1439031388c7d62d1eade6d
+[2fdbba1]: https://github.com/edward-b-1/Distributed-JBOD/commit/2fdbba1a53b061e131ab9ecd11b6017dba3f2e7e
+[0.2.18]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.17...v0.2.18
+[ea18734]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea18734ef9f5be0e1a1e6f851f5679a8586f57ea
+[0.2.17]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.16...v0.2.17
+[57746ff]: https://github.com/edward-b-1/Distributed-JBOD/commit/57746ff8e614fcb17c1ade411b3d1e9e8247cdfa
+[15798b3]: https://github.com/edward-b-1/Distributed-JBOD/commit/15798b3c9f685282e21aa47fc0d0e301ca97cab4
+[0.2.16]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.15...v0.2.16
+[52c4f52]: https://github.com/edward-b-1/Distributed-JBOD/commit/52c4f525b28852e7f72a1c842857f2ba94aa1c09
+[d42a7dc]: https://github.com/edward-b-1/Distributed-JBOD/commit/d42a7dc47005c1bcd4f4e184ee10d040377253a9
+[0.2.15]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.14...v0.2.15
 [4e127a6]: https://github.com/edward-b-1/Distributed-JBOD/commit/4e127a6bf553260abb631f55600328b2cb8ea63d
+[0.2.14]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.13...v0.2.14
 [5ce1b6c]: https://github.com/edward-b-1/Distributed-JBOD/commit/5ce1b6cf3325e727fa5ad780b32b8806f35392bc
+[0.2.13]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.12...v0.2.13
 [81ca3d5]: https://github.com/edward-b-1/Distributed-JBOD/commit/81ca3d5883221601e4c219716503a3976eafdeff
+[0.2.12]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.11...v0.2.12
 [5f8cc79]: https://github.com/edward-b-1/Distributed-JBOD/commit/5f8cc7915c33688c6b899142c68d1d42242215b4
+[0.2.11]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.10...v0.2.11
 [ea49f21]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea49f21f55995d6a04cec82130708db4cf863dfa
+[0.2.10]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.9...v0.2.10
 [8e97556]: https://github.com/edward-b-1/Distributed-JBOD/commit/8e97556fd6c59ae97e5e4da3c40a17b2795b61a6
+[0.2.9]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.8...v0.2.9
 [a7c36bc]: https://github.com/edward-b-1/Distributed-JBOD/commit/a7c36bc04a255af763d74c5cc586686ec8c5137d
+[0.2.8]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.7...v0.2.8
 [d99a71a]: https://github.com/edward-b-1/Distributed-JBOD/commit/d99a71af9bff0df9c1010abc2323b2f6def40e44
+[0.2.7]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.6...v0.2.7
 [20609e4]: https://github.com/edward-b-1/Distributed-JBOD/commit/20609e4c435d88acc866c7b71af174c451562ece
+[0.2.6]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.5...v0.2.6
 [96e0872]: https://github.com/edward-b-1/Distributed-JBOD/commit/96e0872519868fc3b5ceadaa64fab073fca5c141
 [5a5fbdc]: https://github.com/edward-b-1/Distributed-JBOD/commit/5a5fbdc660ed65abfd4e861cd985afd7016008b9
+[0.2.5]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.4...v0.2.5
 [1b8e434]: https://github.com/edward-b-1/Distributed-JBOD/commit/1b8e434cdb3817ce416ce1b154c5a1c9663f964f
 [cd95829]: https://github.com/edward-b-1/Distributed-JBOD/commit/cd95829e9f8e3824676db2b88def315072be5b3e
+[0.2.4]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.3...v0.2.4
 [26064ba]: https://github.com/edward-b-1/Distributed-JBOD/commit/26064ba1025bd576d7bac6871d43b6b4b501d387
+[0.2.3]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.2...v0.2.3
 [2286527]: https://github.com/edward-b-1/Distributed-JBOD/commit/2286527908f8014f27ceaacb8f3a9211d945b850
+[0.2.2]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.1...v0.2.2
 [af5af8b]: https://github.com/edward-b-1/Distributed-JBOD/commit/af5af8b89a6a2628d663eb99da17a1e0233291ed
 [3f33beb]: https://github.com/edward-b-1/Distributed-JBOD/commit/3f33beb07a395068c2c6414efac5f1581a51e160
+[0.2.1]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.0...v0.2.1
 [2d88af6]: https://github.com/edward-b-1/Distributed-JBOD/commit/2d88af6a0ccd252867d71d1394654ff1276c59d8
 [ea584ef]: https://github.com/edward-b-1/Distributed-JBOD/commit/ea584ef57b8a7b7fff770128465bed4eac09c09f
 [3e55cc5]: https://github.com/edward-b-1/Distributed-JBOD/commit/3e55cc571b1e0f6771971407e928eef701c751c3
 [92c4f75]: https://github.com/edward-b-1/Distributed-JBOD/commit/92c4f7516e676beb33ff04c620b7f849f9c12736
 [b928225]: https://github.com/edward-b-1/Distributed-JBOD/commit/b928225f2ee451dc4e4a2914b478b43673f37269
+[0.2.0]: https://github.com/edward-b-1/Distributed-JBOD/releases/tag/v0.2.0
 [dffe86d]: https://github.com/edward-b-1/Distributed-JBOD/commit/dffe86d5741d31192cf7e0cd865594121dae5720
 [ad9bfa3]: https://github.com/edward-b-1/Distributed-JBOD/commit/ad9bfa33c4cbb8b2431988c2fd1570dc623ea40f
 [d0b8133]: https://github.com/edward-b-1/Distributed-JBOD/commit/d0b8133c6f1bc794b74925a6c5caea06a6db6fab

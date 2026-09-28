@@ -37,6 +37,9 @@ RUN groupadd --system --gid 5263 djbod \
     && chown -R djbod:djbod /var/lib/djbod /data
 COPY --from=build /src/target/release/djbod-node /src/target/release/djbod \
     /src/target/release/djbod-recover /src/target/release/djbod-ui /usr/local/bin/
+# The binaries contain the dependencies, so their notices ship with them
+# (SPEC 21.5).
+COPY LICENSE THIRD-PARTY-NOTICES /usr/share/doc/djbod/
 COPY deploy/docker/entrypoint.sh /usr/local/bin/djbod-entrypoint
 COPY deploy/docker/ui-entrypoint.sh /usr/local/bin/djbod-ui-entrypoint
 COPY deploy/docker/healthcheck.sh /usr/local/bin/djbod-healthcheck

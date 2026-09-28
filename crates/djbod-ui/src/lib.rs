@@ -30,6 +30,7 @@
 //! | `POST /devices/{id}/label`           | `djbod cluster set-device-label`           |
 //! | (a device `{id}` is a UUID or a label) |                                   |
 //! | `POST /devices/{id}/drain`           | `Drain`, events streamed as NDJSON  |
+//! | `POST /inventory`                    | `djbod inventory`, events streamed as NDJSON; body `{"keys": "<state>"}` is `--keys` |
 //! | `POST /devices/{id}/remove`          | `djbod cluster remove-device`       |
 //! | `POST /nodes/{id}/remove`            | `djbod cluster remove-node`         |
 //! | `POST /nodes/{id}/label`             | `djbod cluster set-node-label`      |
@@ -78,8 +79,8 @@ use djbod_core::cluster::{DeviceState, NodeId};
 use djbod_core::erasure::Scheme;
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{
-    ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction, RecordCopyFault, Request,
-    Response as Reply,
+    ErrorCode, ErrorDetail, InventoryQuery, ListQuery, MissingRecordCopy, ObjectState,
+    Reconstruction, RecordCopyFault, Request, Response as Reply,
 };
 
 /// The page, embedded so the binary is self-contained.
@@ -345,6 +346,7 @@ pub fn router_for_hosts(target: Target, hosts: Vec<String>) -> Router {
         .route("/verify/{*key}", post(verify_object))
         .route("/move-shard/{*key}", post(move_shard))
         .route("/scrub", post(scrub))
+        .route("/inventory", post(inventory))
         .route("/devices/{id}/state", post(set_device_state))
         .route("/devices/{id}/label", post(set_device_label))
         .route("/devices/{id}/drain", post(drain))
@@ -1500,6 +1502,29 @@ async fn scrub(State(app): State<Arc<App>>, Json(body): Json<ScrubBody>) -> ApiR
         .await?;
     Ok(ndjson_stream(conn, id, |mut conn, id| async move {
         let item = conn.next_scrub_event(id).await;
+        (conn, item)
+    }))
+}
+
+/// `djbod inventory [--keys STATE]` (SPEC 20.1.5): every object's state
+/// against the devices that can be read now, from records alone.
+#[derive(Deserialize, Default)]
+struct InventoryBody {
+    /// Stream one `object` event per version in this state, besides the
+    /// counts; absent for the counts alone.
+    #[serde(default)]
+    keys: Option<ObjectState>,
+}
+
+async fn inventory(
+    State(app): State<Arc<App>>,
+    body: Option<Json<InventoryBody>>,
+) -> ApiResult<Response> {
+    let keys = body.map(|Json(b)| b.keys).unwrap_or(None);
+    let mut conn = connect(&app).await?;
+    let id = conn.start_inventory(InventoryQuery { keys }).await?;
+    Ok(ndjson_stream(conn, id, |mut conn, id| async move {
+        let item = conn.next_inventory_event(id).await;
         (conn, item)
     }))
 }

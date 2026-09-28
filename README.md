@@ -74,6 +74,11 @@ systemd units for a node per machine, a Docker image configured entirely
 by environment variables, and a Docker Compose stack of three nodes and
 the web UI for trying it on one computer.
 
+[docs/releasing.md](docs/releasing.md) says what a version number
+promises and how a release is cut: a tag `vX.Y.Z` builds the binaries,
+the Python wheel and the Docker image and publishes them as a GitHub
+release.
+
 The [detailed user guide](docs/user-guide.md) covers deployment,
 configuration, daily use, TLS, maintenance, troubleshooting, and recovery.
 
@@ -193,7 +198,10 @@ out, at the moment you would want to. `djbod status` and the web UI
 show the same facts on demand. `djbod scrub`, run by hand or from cron,
 checks every disk and every object and exits non-zero when it finds
 damage, so a scheduled scrub is one line of crontab and its exit code
-is the whole integration.
+is the whole integration. `djbod inventory` answers the quicker
+question, in minutes rather than days: with the disks readable right
+now, which objects are whole, which are degraded, and which cannot be
+read at all.
 
 Repair is a command, not a background process. `djbod repair <key>`
 rebuilds one object; `djbod scrub --repair` rebuilds everything the
