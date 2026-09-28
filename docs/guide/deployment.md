@@ -266,6 +266,9 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
+A node that the cluster has removed exits on its own. `Restart=on-failure`
+does not start it again.
+
 The device filesystems must be mounted before the process starts. If a
 mount is missing, the node still starts and that device is unavailable.
 That is the right behaviour for a disk that failed. It is also what you
