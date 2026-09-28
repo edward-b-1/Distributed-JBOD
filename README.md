@@ -372,6 +372,12 @@ ports, and takes a few seconds.
 `python3 -m unittest discover -s scripts/tests -v` checks the PKI helper's
 certificate listing using temporary certificates; it requires `openssl`.
 
+The separate [bitrotter testing tool](crates/djbod-bitrotter/README.md)
+coordinates deliberate shard corruption across worker processes on port
+6666. Build it explicitly with `cargo build -p djbod-bitrotter`; it is
+excluded from default product builds and release images. Use it only with
+disposable test data.
+
 ## Status
 
 Milestones 1 to 6 of the plan are built: the core format, a single node

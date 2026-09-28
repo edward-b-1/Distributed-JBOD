@@ -1,0 +1,32 @@
+[package]
+name = "djbod-bitrotter"
+description = "Coordinated corruption testing for disposable Distributed-JBOD clusters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+djbod-core.workspace = true
+djbod-client.workspace = true
+futures-util.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio = { workspace = true, features = ["signal"] }
+toml.workspace = true
+uuid.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+
+[dev-dependencies]
+djbod-node.workspace = true
+djbod-proto.workspace = true
+tempfile.workspace = true
+rcgen = "0.13"
+
+[lints]
+workspace = true
