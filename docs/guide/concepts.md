@@ -230,14 +230,15 @@ or a machine in another region that is only there to hold a disk, can
 still be in the list so the client has somewhere to go when the first
 is down. It should not be the machine that decodes every large read.
 
-`djbod` tries only the addresses you gave it. `djbod-ui` is wider. Its
-`--bootstrap-node` (environment `DJBOD_BOOTSTRAP_NODE`) is the same
-ordered list, and `--bootstrap-node` / `DJBOD_BOOTSTRAP_NODE` is the old spelling, still
-accepted with a warning. After the UI has read the cluster document it
-also tries the other node addresses the document lists, so a node
-leaving does not by itself take the page down. It remembers the address
-that answered last and tries that one first the next time. The page's
-requests are still coordinated by whichever node it connected to.
+`djbod` tries only the addresses you gave it. `djbod-ui` is wider. Both
+take the same flag and the same variable, `--bootstrap-node` and
+`DJBOD_BOOTSTRAP_NODE`. The old names `--node` and `DJBOD_NODE` are
+gone from both tools. `DJBOD_NODE_ID` is a different setting: it is the
+node's own identity in `node.toml`. After the UI has read the cluster
+document it also tries the other node addresses the document lists, so
+a node leaving does not by itself take the page down. It remembers the
+address that answered last and tries that one first the next time. The
+page's requests are still coordinated by whichever node it connected to.
 
 ## When a machine is off
 
