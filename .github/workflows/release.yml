@@ -1,0 +1,235 @@
+# A release, run by pushing a tag vX.Y.Z to a commit on main whose
+# workspace version is X.Y.Z and whose CHANGELOG.md has an [X.Y.Z]
+# section (docs/releasing.md). It builds the binaries and the Python
+# wheel for x86_64 and aarch64 Linux, pushes the Docker image to GHCR,
+# and creates the GitHub release with that changelog section as its
+# notes. Every build reports X.Y.Z+<commit>.
+#
+# A pull request that changes this file, the Dockerfile or the Python
+# packaging runs everything but the publishing, as a dry run.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - Dockerfile
+      - .dockerignore
+      - crates/djbod-python/pyproject.toml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/${{ github.repository_owner }}/distributed-jbod
+
+jobs:
+  verify:
+    name: Verify the tag
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.check.outputs.version || steps.dry.outputs.version }}
+      commit: ${{ steps.check.outputs.commit || steps.dry.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - id: check
+        name: Tag, Cargo.toml, CHANGELOG.md and main agree
+        if: github.event_name == 'push'
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          fail() { echo "::error::$1"; exit 1; }
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) fail "tag $tag is not vX.Y.Z" ;;
+          esac
+          [ "$version" = "$cargo_version" ] \
+            || fail "tag $tag but the workspace version in Cargo.toml is $cargo_version"
+          grep -q "^## \[$version\] - " CHANGELOG.md \
+            || fail "CHANGELOG.md has no [$version] section"
+          git merge-base --is-ancestor HEAD origin/main \
+            || fail "$tag is not on main"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short=9 HEAD)" >> "$GITHUB_OUTPUT"
+      - id: dry
+        name: Version for a dry run
+        if: github.event_name != 'push'
+        run: |
+          echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short=9 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Release notes from CHANGELOG.md
+        if: github.event_name == 'push'
+        run: |
+          awk -v v="${GITHUB_REF_NAME#v}" '
+            index($0, "## [" v "] - ") == 1 { on = 1; next }
+            on && /^## \[/ { exit }
+            on && /^\[[^]]*\]: / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          cat notes.md
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: notes
+          path: notes.md
+
+  binaries:
+    name: Binaries (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    # Debian 12's glibc, so the binaries run on it and anything newer.
+    container: rust:1.98.1-bookworm
+    env:
+      DJBOD_GIT_COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build
+        run: cargo build --release --locked -p djbod-node -p djbod-cli -p djbod-recover -p djbod-ui
+      - name: Package
+        run: |
+          name="djbod-${{ needs.verify.outputs.version }}-${{ matrix.arch }}-linux"
+          mkdir -p "dist/$name"
+          cp target/release/djbod-node target/release/djbod target/release/djbod-recover \
+            target/release/djbod-ui "dist/$name/"
+          cp LICENSE THIRD-PARTY-NOTICES README.md "dist/$name/"
+          "dist/$name/djbod" --version
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  wheels:
+    name: Python wheel (${{ matrix.arch }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      # The wheel holds the compiled dependencies, so their notices go in
+      # it too (SPEC 21.5), as package data beside the module.
+      - name: Notices into the package
+        run: cp LICENSE THIRD-PARTY-NOTICES crates/djbod-python/python/djbod/
+      - uses: PyO3/maturin-action@v1
+        env:
+          DJBOD_GIT_COMMIT: ${{ needs.verify.outputs.commit }}
+        with:
+          working-directory: crates/djbod-python
+          target: ${{ matrix.arch }}
+          manylinux: auto
+          args: --release --locked --out dist
+          docker-options: -e DJBOD_GIT_COMMIT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.arch }}
+          path: crates/djbod-python/dist/*.whl
+
+  image:
+    name: Docker image (${{ matrix.platform }})
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include:
+          - platform: amd64
+            runner: ubuntu-24.04
+          - platform: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        run: |
+          tag="$IMAGE:${{ needs.verify.outputs.version }}-${{ matrix.platform }}"
+          docker build \
+            --build-arg DJBOD_GIT_COMMIT=${{ needs.verify.outputs.commit }} \
+            --label org.opencontainers.image.source=https://github.com/${{ github.repository }} \
+            --label org.opencontainers.image.version=${{ needs.verify.outputs.version }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.licenses=AGPL-3.0-only \
+            -t "$tag" .
+          docker run --rm --entrypoint djbod "$tag" --version
+          if [ "$GITHUB_EVENT_NAME" = push ]; then docker push "$tag"; fi
+
+  manifest:
+    name: Docker manifest
+    needs: [verify, image]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: One tag for both platforms, and latest
+        run: |
+          v=${{ needs.verify.outputs.version }}
+          docker buildx imagetools create -t "$IMAGE:$v" -t "$IMAGE:latest" \
+            "$IMAGE:$v-amd64" "$IMAGE:$v-arm64"
+
+  release:
+    name: GitHub release
+    needs: [verify, binaries, wheels, manifest]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz *.whl > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v=${{ needs.verify.outputs.version }}
+          {
+            cat artifacts/notes.md
+            echo
+            echo "Docker image: \`$IMAGE:$v\` (amd64 and arm64)."
+          } > body.md
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$v" --notes-file body.md --verify-tag \
+            artifacts/*.tar.gz artifacts/*.whl artifacts/SHA256SUMS
