@@ -2064,8 +2064,8 @@ Direct commit: Initial commit
 - The repository, with a `README.md` naming the project.
 
 [Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/ff4b104...HEAD
-[ff4b104]: https://github.com/edward-b-1/Distributed-JBOD/commit/
-[f7bd47b]: https://github.com/edward-b-1/Distributed-JBOD/commit/
+[ff4b104]: https://github.com/edward-b-1/Distributed-JBOD/commit/ff4b10492dfe5d7c16266c94cc25cf89ee7ccae2
+[f7bd47b]: https://github.com/edward-b-1/Distributed-JBOD/commit/f7bd47b63c9a0fdfc9ae4663c5e304ef604f00a9
 [1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
 [0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
 [fa0dca9]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
