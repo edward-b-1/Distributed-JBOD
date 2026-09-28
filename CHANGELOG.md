@@ -22,6 +22,12 @@ the version and hash if the pull request set a new version.
 
 ## [Unreleased]
 
+Pull request: PutShard releases its write guard before it answers
+
+### Fixed
+
+- A `MoveShard` whose copy from the source failed on a damaged block could be refused its rebuild with "this shard is already being written on this device by another request": the node answered the abandoned `PutShard` before dropping the one-writer-per-shard guard of 20.1.2.1, and the coordinator, reading the answer, began the rebuild's `PutShard` for the same shard on the same device at once. The guard is now released before the answer is sent, on the abandoned path and on the finished one, so a coordinator that reads the answer can write the shard again. Seen as an intermittent failure of `move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged` in CI (#271).
+
 Pull request: CI: formatting, lints and every test on each pull request and push to main
 
 ### Added
