@@ -9,8 +9,10 @@ The [README](../../README.md) is the introduction. [SPEC.md](../../SPEC.md)
 is the design document for people changing the software. Procedures in
 this guide were checked against the implementation, including runs on one
 machine with directories standing in for disks, and then read again
-against main at `1b8e434` (version 0.2.5), where reads, listings, and
-`status` learned to go around a disk or a machine they cannot reach.
+against main at `bcf72ff` (version 0.3.0). Version 0.3.0 is the first
+published release. A rolling upgrade from 0.2.22 rewrites nothing.
+Reads, listings, and `status` go around a disk or a machine they cannot
+reach, which has been true since 0.2.5.
 Where a command's result depends on free space or on which disks an
 object landed on, the guide says what was observed and what to look for
 on your own cluster.
