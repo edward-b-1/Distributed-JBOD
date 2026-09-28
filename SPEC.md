@@ -2546,6 +2546,34 @@ document. A private key is its own file, with owner-only permissions, and
 the configuration or argument names its path. The same applies to any
 future credential.
 
+### 20.7 Versions and releases
+
+20.7.1 [D] **Numbering.** Versions follow Semantic Versioning. The
+workspace `version` in `Cargo.toml` is the only place the number is
+written: every crate inherits it and the Python package reads it through
+maturin. A build identifies itself as `<version>+<commit>` (6.2.6.4,
+19.1.5). While the major version is 0, a minor bump says the release is
+incompatible with the one before in something a running cluster depends
+on: the on-disk format, the protocol of 19.1, the cluster document, or the
+command line's output and exit codes. A patch bump says anything else.
+
+20.7.2 [D] **A release is a tag.** A release is a tag `vX.Y.Z` on `main`,
+on the commit that set the workspace version to X.Y.Z and named the
+changelog's section for it. Pull requests do not change the version; each
+adds its entries to `CHANGELOG.md` under `Unreleased`, and the release's
+own pull request renames that section. Between releases `main` keeps the
+last release's number, and the commit in the build id says which build it
+is. Pushing the tag builds and publishes the release: the binaries and
+the Python wheel (20.8.1) for x86_64 and aarch64 Linux, the Docker image
+(20.6), and a GitHub release whose notes are the changelog section. Every
+artifact carries the notices of 21.5. `docs/releasing.md` has the steps.
+
+20.7.3 [D] **What a release says about upgrading.** A release's changelog
+section says, before anything else, what an operator must know to
+upgrade: whether nodes of the previous release can stay in the cluster
+during a rolling upgrade, given the rule of 6.2.6.4, and anything on disk
+that must be rewritten.
+
 20.8 [D] **Client libraries.** Programs reach the store through the
 `djbod-client` crate (C.2), which the node, the command-line tool, and the
 web UI are themselves built on, so there is one implementation of the

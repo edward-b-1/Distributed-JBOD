@@ -3,6 +3,7 @@
 A release is a tag `vX.Y.Z` on `main`. Pushing the tag runs
 `.github/workflows/release.yml`, which builds and publishes everything;
 the steps by hand are only the version, the changelog and the tag.
+SPEC 20.7 is the rule; this is how to follow it.
 
 ## What a version number says
 
