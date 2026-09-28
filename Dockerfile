@@ -28,7 +28,7 @@ COPY . .
 ARG DJBOD_GIT_COMMIT=unknown
 ENV DJBOD_GIT_COMMIT=$DJBOD_GIT_COMMIT
 # --locked: build exactly the dependency versions in Cargo.lock.
-RUN cargo build --release --workspace --locked
+RUN cargo build --release --locked
 
 FROM debian:trixie-slim
 RUN groupadd --system --gid 5263 djbod \

@@ -339,6 +339,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "djbod-bitrotter"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "djbod-client",
+ "djbod-core",
+ "djbod-node",
+ "djbod-proto",
+ "futures-util",
+ "rcgen",
+ "rustix",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "toml",
+ "uuid",
+]
+
+[[package]]
 name = "djbod-cli"
 version = "0.3.0"
 dependencies = [

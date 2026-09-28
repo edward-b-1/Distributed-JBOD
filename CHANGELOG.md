@@ -25,6 +25,15 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
+### Added
+
+- Separate `djbod-bitrotter` controller and `djbod-bitrotter-worker` executables in the testing crate, sharing its library; storage nodes run `djbod-bitrotter-worker --config ...` (#135, #275).
+- `djbod-bitrotter`, a separate testing crate with a coordinator and workers on port 6666. Plans select exactly `n` distinct shard indices per object version across nodes and damage one payload bit in the same stripe of each selected shard, using the existing shard format (SPEC 9.3). Every run requires a testing-damage acknowledgement, with an additional explicit acknowledgement of certain data loss when `n > m`; the warning also covers independent bitrot when `n <= m`. Durable journals, session fencing, and resume reconcile partial events without repeating a bit flip. Includes disposable multi-node tests for reconstruction without read repair, scrub, and explicit repair (SPEC 11.4, 18.3, 20.1.2), plus setup instructions. The tool is excluded from default product builds and release images (#135).
+
+### Changed
+
+- Bitrotter TLS is optional: workers default to `plain` and support the product's `tls-optional` and mutual-TLS-only `tls` modes (SPEC 19.1.6.4). Both executables follow the existing `--tls-ca`, `--tls-cert`, `--tls-key`, `DJBOD_TLS_*`, and argument/environment/TOML precedence conventions (SPEC 19.1.6.2, 20.6); controllers support CA-only anonymous TLS. An optional controller certificate allowlist continues to reject unauthenticated connections. Saved plans pin transport and credential paths, and warnings and confirmations apply in every mode (#135, #275).
+
 ## [0.3.0] - 2026-09-28
 
 The first published release: binaries, the Python wheel and the Docker image,
