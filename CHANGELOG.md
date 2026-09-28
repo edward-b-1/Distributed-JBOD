@@ -27,6 +27,7 @@ afterwards; none of those versions was published.
 
 ### Added
 
+- The Overview offers **Force remove** for an unavailable device, first among its actions: the confirmation states the cost in the command's words with k and m from the document, warns when fewer than k+m active, available devices would remain, and has the device's name typed back; `POST /api/devices/{id}/remove` accepts `{"force": true}`, which is `remove-device --force`. Set draining stays with a tooltip saying no drain can run meanwhile; Drain and plain Remove are not offered for an unavailable device; the Maintenance drain picker skips them (SPEC 5.6, 18.2.1.1) (#228).
 - `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
 - `docs/releasing.md`: what a minor and a patch bump promise, what every pull request does, the steps of a release, and what to do when the workflow fails (#172).
 - The Docker image carries `LICENSE` and `THIRD-PARTY-NOTICES` in `/usr/share/doc/djbod/`, and the Python wheel both beside the module (SPEC 21.5) (#165, #169).
