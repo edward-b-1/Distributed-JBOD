@@ -25,8 +25,17 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-28
+
+The first published release: binaries, the Python wheel and the Docker image,
+built by the release workflow. The minor version marks the first release, not
+an incompatibility: upgrading from 0.2.22 is a rolling upgrade with nothing to
+rewrite, since no protocol, cluster document or on-disk format changed, so nodes
+of 0.2.22 and 0.3.0 run in one cluster.
+
 ### Added
 
+- `crates/djbod-python/README.md` says how to install the wheel from a GitHub release by its URL, pin it in `requirements.txt`, and check it against `SHA256SUMS`, while it is not on PyPI (#169).
 - `docs/design/objects-availability.html`: the comparison behind the Objects page's availability line, the five cases by scheme and count of unavailable devices, three treatments, and the decision for the status line (#218).
 - `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
 - `docs/releasing.md`: what a minor and a patch bump promise, what every pull request does, the steps of a release, and what to do when the workflow fails (#172).
@@ -2087,7 +2096,8 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...v0.3.0
 [af3ad27]: https://github.com/edward-b-1/Distributed-JBOD/commit/af3ad27b44def7be7a646477229fdea4962fd939
 [0.2.22]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.21...v0.2.22
 [89c3120]: https://github.com/edward-b-1/Distributed-JBOD/commit/89c312050b6aefede65e0aca3baa07ac49384375

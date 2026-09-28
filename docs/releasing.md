@@ -98,6 +98,7 @@ broken build shows up before a tag does.
 
 ## Not yet
 
-- Publishing the wheel to PyPI (#169); for now it is a release asset,
-  installed with `pip install <url of the wheel>`.
+- Publishing the wheel to PyPI (#169), held back until there are more
+  users; for now it is a release asset, installed by its URL as
+  `crates/djbod-python/README.md` shows.
 - Binaries for macOS or other targets.
