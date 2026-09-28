@@ -143,8 +143,9 @@ the node, the build, the document version, and the transport.
 works. `--json` on `get-cluster-id` adds the name and the build.
 
 `status` needs both variables. It prints who answered, then one row per
-device: id, label, owning node, that node's build, state, filesystem
-total, and free space after headroom. The node that answered is the
+device. The label is the first column, then the device UUID, the owning
+node's label and UUID, that node's build, state, filesystem total, and
+free space after headroom. The node that answered is the
 coordinator: it does the encoding, the fan-out, and the checksums for
 the requests this client sends. Several addresses may be given,
 comma-separated. They are tried in order, and the first that accepts
