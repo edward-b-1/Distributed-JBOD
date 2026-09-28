@@ -26,7 +26,15 @@ Pull request: CHANGELOG.md: the entry for #268
 
 ### Fixed
 
-- #268, the object health card and the health filter, merged without an entry; it has one now, under its commit. The entry of #269 is moved under its commit.
+- #268, the object health card and the health filter, merged without an entry; it has one now, under its commit. The entries of #269 and #272 are moved under their commits.
+
+## [0.2.22] - 2026-09-28 ([89c3120])
+
+Pull request #272: PutShard releases its write guard before it answers
+
+### Fixed
+
+- A `MoveShard` whose copy from the source failed on a damaged block could be refused its rebuild with "this shard is already being written on this device by another request": the node answered the abandoned `PutShard` before dropping the one-writer-per-shard guard of 20.1.2.1, and the coordinator, reading the answer, began the rebuild's `PutShard` for the same shard on the same device at once. The guard is now released before the answer is sent, on the abandoned path and on the finished one, so a coordinator that reads the answer can write the shard again. Seen as an intermittent failure of `move_shard_rebuilds_from_the_other_shards_when_the_source_is_damaged` in CI (#271).
 
 ## [ff4b104] - 2026-09-28
 
@@ -2063,7 +2071,9 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/ff4b104...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/89c3120...HEAD
+[0.2.22]: https://github.com/edward-b-1/Distributed-JBOD/commit/89c312050b6aefede65e0aca3baa07ac49384375
+[89c3120]: https://github.com/edward-b-1/Distributed-JBOD/commit/89c312050b6aefede65e0aca3baa07ac49384375
 [ff4b104]: https://github.com/edward-b-1/Distributed-JBOD/commit/ff4b10492dfe5d7c16266c94cc25cf89ee7ccae2
 [f7bd47b]: https://github.com/edward-b-1/Distributed-JBOD/commit/f7bd47b63c9a0fdfc9ae4663c5e304ef604f00a9
 [1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
