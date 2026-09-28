@@ -22,7 +22,15 @@ the version and hash if the pull request set a new version.
 
 ## [Unreleased]
 
-Pull request: CHANGELOG.md: a version's section is headed by its version
+Pull request: CI: formatting, lints and every test on each pull request and push to main
+
+### Added
+
+- `.github/workflows/ci.yml`, the project's first CI, on GitHub Actions for every pull request and every push to `main`, on the Dockerfile's toolchain (Rust 1.98.1): `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace`, both `--locked`; the Python client's tests against a node with `scripts/python-tests.sh`; the PKI helper's tests; and a check that `THIRD-PARTY-NOTICES` is what `scripts/third-party-notices.py` writes from `Cargo.lock` (SPEC 21.5). A new push to a pull request cancels the run it replaces (#172).
+
+## [1f5c440] - 2026-09-27
+
+Pull request #267: CHANGELOG.md: a version's section is headed by its version
 
 ### Changed
 
@@ -2037,7 +2045,8 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/fa0dca9...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/1f5c440...HEAD
+[1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
 [0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
 [fa0dca9]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
 [0.2.20]: https://github.com/edward-b-1/Distributed-JBOD/commit/b36dbea05b36ceaa746f71b8fe5f479a99169b05
