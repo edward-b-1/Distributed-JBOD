@@ -97,6 +97,21 @@ than `k` of them can be read and the cause is not an unavailable device.
 Delete the current version. Prints `deleted <key>`. A missing key is
 `NotFound`, exit 1.
 
+### `inventory [--keys STATE]`
+
+Every object's state from one pass over the records, with no shard
+read. Each version is whole, degraded with only parity out (a read does
+not decode), degraded with a data shard out (every read decodes),
+unreadable (more than `m` shards out), or inconsistent (the copies that
+were read disagree, or one is missing). A node that is down is skipped.
+Its devices are named, and the summary says whether the counts are
+complete: they are while fewer than `k + m` devices are unread. The
+summary line counts whole, both kinds of degraded, unreadable, and
+inconsistent. `--keys <state>` prints one line per object in that
+state, with how many shards can be read. `--json` is one event per
+line. Exit codes are the scrub's, and anything that is not whole counts
+as damage. The same pass is what the web UI's object health card runs.
+
 ### `list [--prefix PREFIX] [--start-after KEY] [--limit N]`
 
 Keys in order. Each line is the size, the version id, and the key.

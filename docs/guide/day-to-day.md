@@ -155,14 +155,26 @@ The page has five sections.
 
 - **Overview** shows the cluster, the document version, and every device
   with its state and a free-space meter. You can set a label and mark a
-  device draining or active from here.
+  device draining or active from here. A cluster health card says
+  whether the nodes agree. Under it, an object health card runs `djbod
+  inventory` when you press Compute, and Recompute after that. It counts
+  objects as whole, degraded, unreadable, or inconsistent, names devices
+  it could not read, and says whether the count is complete and when it
+  was taken. The card is empty until you ask: the pass reads every
+  record. **Show removed** on the node list and on the device list
+  reveals tombstones. They are hidden until you ask, and nothing is
+  checked or done for them.
 - **Nodes** lists the machines and their devices.
 - **Objects** lists keys, shows a record and where its shards sit, and
   offers verify, repair, move-shard, download, upload, and delete.
-  Verify reads the object through the node without saving it.
+  Verify reads the object through the node without saving it. A Health
+  filter beside the prefix lists objects in one inventory state. The
+  size column becomes shards available, as `2 of 3`.
 - **Maintenance** runs a scrub and a drain, and shows their events.
-  Mark the device draining on Overview first. The page says to rerun a
-  drain that skipped versions, then remove the device.
+  Mark the device draining on Overview first. The drain panel shows
+  progress against the estimate, the same count the command prints
+  every 1,000 versions. The page says to rerun a drain that skipped
+  versions, then remove the device.
 - **Settings** changes the scheme, the block size, and the size limits.
   Changing them does not rewrite existing objects. The page tells you to
   run `djbod cluster reencode` for that. Reencode is not on the page,
