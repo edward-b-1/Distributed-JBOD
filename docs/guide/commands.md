@@ -12,14 +12,14 @@ disagree.
 Client and administration tool.
 
 ```text
-djbod [--node ADDR[,ADDR...]] [--cluster UUID] [--json]
+djbod [--bootstrap-node ADDR[,ADDR...]] [--cluster UUID] [--json]
      [--tls-ca FILE] [--tls-cert FILE] [--tls-key FILE]
      <command>
 ```
 
 | Flag | Environment | Meaning |
 |---|---|---|
-| `--node` | `DJBOD_NODE` | One or more `ip:port` addresses, comma-separated. Tried in order. The first that answers is the coordinator for the request: it encodes, fans the work out, and checks checksums. A later failure moves to the next address in this list only. [Concepts](concepts.md#which-node-coordinates) is why the order matters on machines that differ in CPU, link speed, or region. |
+| `--bootstrap-node` | `DJBOD_BOOTSTRAP_NODE` | One or more `ip:port` addresses, comma-separated. Tried in order. The first that answers is the coordinator for the request: it encodes, fans the work out, and checks checksums. A later failure moves to the next address in this list only. [Concepts](concepts.md#which-node-coordinates) is why the order matters on machines that differ in CPU, link speed, or region. |
 | `--cluster` | `DJBOD_CLUSTER` | Cluster id from `init-cluster`. Required for every command except `identity` and `get-cluster-id`. |
 | `--json` | | One JSON value, or one JSON object per event for streaming commands. |
 | `--tls-ca` | `DJBOD_TLS_CA` | PEM authority or bundle. Alone, the connection is encrypted and presents no certificate. |
@@ -54,13 +54,13 @@ device with zero versions is called out as empty.
 
 ### `get-cluster-id`
 
-Prints the cluster UUID of the node at `--node`. Does not take
+Prints the cluster UUID of the node at `--bootstrap-node`. Does not take
 `--cluster`. `--json` adds the name, the node, and the build. The plain
 form is what `export DJBOD_CLUSTER=$(djbod get-cluster-id)` expects.
 
 ### `identity`
 
-Who is at `--node`: cluster name and id, node label and id, address,
+Who is at `--bootstrap-node`: cluster name and id, node label and id, address,
 build, document version, transport. Does not take `--cluster`.
 
 ### `put <KEY> <FILE> [--content-type TYPE]`
@@ -148,7 +148,7 @@ the exit code is the only summary.
 ### `cluster`
 
 Membership and settings. Every subcommand talks to the cluster and
-needs `--node` and `--cluster`. Devices and nodes are named by UUID or
+needs `--bootstrap-node` and `--cluster`. Devices and nodes are named by UUID or
 label.
 
 | Subcommand | What it does |
@@ -272,9 +272,8 @@ djbod-ui --bootstrap-node ADDR[,ADDR...] --cluster UUID [--listen 127.0.0.1:5264
 Serves the administration page. `--bootstrap-node`
 (`DJBOD_BOOTSTRAP_NODE`) is the ordered list of nodes to try. The first
 that answers coordinates the page. After the cluster document has been
-read, the other addresses in it are tried too. `--node` and `DJBOD_NODE`
-are the deprecated spelling: accepted with a warning, and ignored when
-the new spelling is set. `--cluster` and the TLS flags match `djbod`.
+read, the other addresses in it are tried too. `--cluster` and the TLS
+flags match `djbod`.
 `--listen` defaults to `127.0.0.1:5264`. There is no authentication on
 the HTTP port. `--host` adds a DNS name the server will answer, besides
 IP addresses and `localhost`. Other `Host` values get HTTP 403. The page

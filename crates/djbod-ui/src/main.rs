@@ -9,9 +9,8 @@
 //! come from the same environment variables as for the `djbod` client,
 //! and mean the same: the addresses are connection endpoints, tried in
 //! order, and once the cluster document has been fetched the other nodes
-//! it lists are tried too. `--node` and `DJBOD_NODE` are the deprecated
-//! spelling. The HTTP side has no authentication and listens on
-//! localhost unless told otherwise.
+//! it lists are tried too. The HTTP side has no authentication and
+//! listens on localhost unless told otherwise.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,15 +41,6 @@ struct Cli {
         value_delimiter = ','
     )]
     bootstrap_nodes: Vec<SocketAddr>,
-    /// Deprecated spelling of --bootstrap-node, with DJBOD_NODE as its
-    /// variable; used only when --bootstrap-node is not given.
-    #[arg(
-        long = "node",
-        env = "DJBOD_NODE",
-        value_name = "ADDR[,ADDR...]",
-        value_delimiter = ','
-    )]
-    nodes: Vec<SocketAddr>,
     /// The cluster id, as printed by `djbod-node init-cluster`.
     #[arg(long, env = "DJBOD_CLUSTER")]
     cluster: Uuid,
@@ -98,20 +88,12 @@ async fn main() -> ExitCode {
     }
 }
 
-/// The node addresses to use: the new spelling when given, else the
-/// deprecated one with a notice, else an error. Either may come from the
-/// command line or its variable; the new spelling wins from either.
+/// The node addresses to use, from the flag or its variable.
 fn bootstrap_nodes(cli: &Cli) -> anyhow::Result<Vec<SocketAddr>> {
-    if !cli.bootstrap_nodes.is_empty() {
-        return Ok(cli.bootstrap_nodes.clone());
+    if cli.bootstrap_nodes.is_empty() {
+        anyhow::bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE")
     }
-    if !cli.nodes.is_empty() {
-        eprintln!(
-            "warning: --node and DJBOD_NODE are deprecated; use --bootstrap-node or DJBOD_BOOTSTRAP_NODE"
-        );
-        return Ok(cli.nodes.clone());
-    }
-    anyhow::bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE")
+    Ok(cli.bootstrap_nodes.clone())
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {

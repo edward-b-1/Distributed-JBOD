@@ -107,7 +107,7 @@ command; use `run` for subsequent starts.
 In another terminal, with the binaries on `PATH`:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=$(djbod get-cluster-id)
 printf 'Hello from Distributed-JBOD\n' > /tmp/djbod-guide/hello.txt
 djbod put notes/hello.txt /tmp/djbod-guide/hello.txt --content-type text/plain
@@ -183,7 +183,7 @@ there are nine devices and enough candidates for a six-shard write.
 On an administration machine:
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
 export DJBOD_CLUSTER=$(djbod get-cluster-id)
 djbod identity
 djbod cluster show
@@ -248,7 +248,7 @@ is no `set-headroom` command.
 
 ## Store and retrieve objects
 
-The CLI needs `--node`/`DJBOD_NODE` and `--cluster`/`DJBOD_CLUSTER` for
+The CLI needs `--bootstrap-node`/`DJBOD_BOOTSTRAP_NODE` and `--cluster`/`DJBOD_CLUSTER` for
 ordinary commands. `identity` and `get-cluster-id` need only an address.
 All addresses are IP addresses with ports, including bracketed IPv6
 addresses where appropriate. A cluster name is display text, not a
@@ -304,11 +304,11 @@ Retain standard error for context.
 
 ## Use the web interface
 
-The UI accepts **one** node address, even when the CLI's `DJBOD_NODE`
+The UI accepts **one** node address, even when the CLI's `DJBOD_BOOTSTRAP_NODE`
 contains several. Override it explicitly:
 
 ```sh
-djbod-ui --node 10.0.0.1:5263 --cluster "$DJBOD_CLUSTER" --listen 127.0.0.1:5264
+djbod-ui --bootstrap-node 10.0.0.1:5263 --cluster "$DJBOD_CLUSTER" --listen 127.0.0.1:5264
 ```
 
 Open <http://127.0.0.1:5264/> on that machine, or forward the port:
@@ -455,6 +455,25 @@ measured speed. `--repair` attempts repairs for affected objects. A
 successful repair run can exit 0 despite having found damage; incomplete
 scrubs and failed repairs exit 2. Inspect the events and run a subsequent
 scrub to confirm the result.
+
+### Inventory
+
+```sh
+djbod inventory
+djbod inventory --keys unreadable
+```
+
+Where a scrub reads every block and takes days, an inventory reads the
+records alone and takes minutes: with the devices that can be read
+*now*, it counts the objects that are whole, degraded with only parity
+shards out (reads unaffected), degraded with a data shard out (every
+read decodes), unreadable (more than m shards out), or inconsistent (the
+record copies disagree, which is the scrub's job to examine). A node
+that is down does not stop it: that node's devices are reported as
+unread, and the summary says whether every object could be seen, which
+holds while fewer than k+m devices are unread. `--keys <state>` lists
+the objects in that state, one per line with their shards available.
+The exit codes are the scrub's, with "not whole" in place of damage.
 
 At this revision, `djbod scrub --json` can emit finding events and still
 exit 0 when the scan completes. For alerts based on exit status, use the
@@ -715,7 +734,7 @@ for the Python surface; it does not wrap every Rust administration method.
 | Startup rejects shared filesystems | Check mounts and physical disk mapping. Enable the bypass only for a disposable experiment. |
 | Setup rejects a nonempty device | Verify the path and identity. Use an empty device; do not erase existing storage to make setup pass. |
 | Drain skips versions | Read the per-version causes, add eligible targets or repair damage, then rerun. Do not disconnect the source yet. |
-| UI rejects a comma-separated address | Supply a single `--node`; multiple entry points are a CLI/library feature. |
+| UI rejects a comma-separated address | Supply a single `--bootstrap-node`; multiple entry points are a CLI/library feature. |
 | Upload times out after a pause | Check the sender and network; adjust `stream_idle_timeout_secs` if legitimate pauses exceed the configured per-frame timeout. |
 
 For the exact options in an installed build, use `djbod --help`, `djbod

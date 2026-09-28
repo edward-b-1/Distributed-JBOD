@@ -158,7 +158,7 @@ node reserves them with `fallocate`.
 You will see three kinds of name.
 
 - The **cluster id** is a UUID. `djbod --cluster` and `DJBOD_CLUSTER` take
-  it. `init-cluster` prints it. `djbod get-cluster-id --node <address>`
+  it. `init-cluster` prints it. `djbod get-cluster-id --bootstrap-node <address>`
   prints it again, with no `--cluster`. A **cluster name**, set with
   `init-cluster --name` or `djbod cluster set-name`, is shown beside the
   id. The name can contain spaces. The id is what the client sends.
@@ -208,9 +208,9 @@ files on their own disks and send blocks back. A large `put`, `get`,
 `repair`, or `reencode` is therefore CPU and network on the coordinator,
 and mostly disk on everyone else.
 
-You choose the coordinator by which address you pass. `djbod --node`
+You choose the coordinator by which address you pass. `djbod --bootstrap-node`
 takes one or more `ip:port` values, comma-separated, also as
-`DJBOD_NODE`. They are tried in order. The first that accepts the
+`DJBOD_BOOTSTRAP_NODE`. They are tried in order. The first that accepts the
 connection is the coordinator. If that connection later fails, the next
 address in the list is tried. The list is not a filter on which disks
 the operation may use. A `get` coordinated by nas1 still reads shards
@@ -223,7 +223,7 @@ why the RAM matters. The links between machines may not be the same
 width or latency: a coordinator on a gigabit port reconstructing an
 object whose disks are on a 100-megabit port spends the read waiting on
 the slow link, and a coordinator that sits in another region pays a
-round trip to every node for every request. Put `--node` in the order
+round trip to every node for every request. Put `--bootstrap-node` in the order
 you want the work done. A powerful machine on the same site as the
 client, with a wide path to the disks, should be first. A small board,
 or a machine in another region that is only there to hold a disk, can
@@ -232,7 +232,7 @@ is down. It should not be the machine that decodes every large read.
 
 `djbod` tries only the addresses you gave it. `djbod-ui` is wider. Its
 `--bootstrap-node` (environment `DJBOD_BOOTSTRAP_NODE`) is the same
-ordered list, and `--node` / `DJBOD_NODE` is the old spelling, still
+ordered list, and `--bootstrap-node` / `DJBOD_BOOTSTRAP_NODE` is the old spelling, still
 accepted with a warning. After the UI has read the cluster document it
 also tries the other node addresses the document lists, so a node
 leaving does not by itself take the page down. It remembers the address

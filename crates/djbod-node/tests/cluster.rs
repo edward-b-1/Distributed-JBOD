@@ -436,6 +436,126 @@ async fn a_listing_says_when_the_devices_out_could_hide_a_key() {
     }
 }
 
+async fn run_inventory(
+    conn: &mut Connection,
+    keys: Option<djbod_proto::message::ObjectState>,
+) -> Vec<djbod_proto::message::InventoryEvent> {
+    let id = conn
+        .start_inventory(djbod_proto::message::InventoryQuery { keys })
+        .await
+        .expect("start inventory");
+    let mut events = Vec::new();
+    loop {
+        match conn
+            .next_inventory_event(id)
+            .await
+            .expect("inventory event")
+        {
+            Ok(event) => events.push(event),
+            Err(end) => {
+                assert!(end.error.is_none(), "{end:?}");
+                return events;
+            }
+        }
+    }
+}
+
+/// SPEC 20.1.5: the inventory reads records alone, goes around a node
+/// that is down, judges each version by the shards its unread devices
+/// hold, and says when the unread devices could hide a version.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_inventory_counts_objects_by_state_and_goes_around_a_dead_node() {
+    use djbod_proto::message::{InventoryEvent, ObjectState};
+    let a = first_node(2, 1, 1).await;
+    let mut b = joined_node(2, &a).await;
+    let mut client = a.client().await;
+    let records = put_objects(&mut client, 8, 400).await;
+    let on_b: Vec<DeviceId> = b.node.devices().iter().map(|d| d.id()).collect();
+
+    // Every node up: eight whole objects, nothing unread, complete.
+    let events = run_inventory(&mut client, Some(ObjectState::Whole)).await;
+    let mut listed: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            InventoryEvent::Object { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    listed.sort();
+    let mut all: Vec<String> = records.iter().map(|r| r.key.clone()).collect();
+    all.sort();
+    assert_eq!(listed, all, "{events:?}");
+    assert!(
+        matches!(
+            events.last(),
+            Some(InventoryEvent::Summary {
+                versions_checked: 8,
+                whole: 8,
+                complete: true,
+                unread,
+                ..
+            }) if unread.is_empty()
+        ),
+        "{events:?}"
+    );
+
+    // With b down its two devices are unread, which is k+m: a version
+    // with both shards on b leaves no trace and the summary says so; one
+    // with one shard on b is degraded, by that shard's index; one with
+    // none is whole. Which is which depends on placement (10.5), so the
+    // expectation is read from the records.
+    b.stop();
+    let on_b_count = |r: &djbod_core::record::MetadataRecord| {
+        r.shards.iter().filter(|s| on_b.contains(&s.device)).count()
+    };
+    let expected_whole = records.iter().filter(|r| on_b_count(r) == 0).count() as u64;
+    let expected_parity = records
+        .iter()
+        .filter(|r| {
+            on_b_count(r) == 1
+                && r.shards
+                    .iter()
+                    .any(|s| on_b.contains(&s.device) && s.index == 1)
+        })
+        .count() as u64;
+    let expected_data = records
+        .iter()
+        .filter(|r| {
+            on_b_count(r) == 1
+                && r.shards
+                    .iter()
+                    .any(|s| on_b.contains(&s.device) && s.index == 0)
+        })
+        .count() as u64;
+    let events = run_inventory(&mut client, None).await;
+    let Some(InventoryEvent::Summary {
+        versions_checked,
+        whole,
+        degraded_parity,
+        degraded_data,
+        unreadable,
+        inconsistent,
+        unread,
+        complete,
+    }) = events.last()
+    else {
+        panic!("no summary: {events:?}");
+    };
+    assert_eq!(
+        *versions_checked,
+        expected_whole + expected_parity + expected_data
+    );
+    assert_eq!(*whole, expected_whole);
+    assert_eq!(*degraded_parity, expected_parity);
+    assert_eq!(*degraded_data, expected_data);
+    assert_eq!((*unreadable, *inconsistent), (0, 0));
+    assert_eq!(unread.len(), 2, "{unread:?}");
+    assert!(unread
+        .iter()
+        .all(|u| u.node == b.node.id() && on_b.contains(&u.device)));
+    assert!(!complete);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_proposals_are_serialised_and_stragglers_are_synced() {
     let a = first_node(1, 1, 1).await;

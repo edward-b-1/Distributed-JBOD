@@ -102,7 +102,7 @@ Label the disks once you have the ids from `init-cluster` or from
 `djbod status`:
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263
 export DJBOD_CLUSTER=$(djbod get-cluster-id)
 djbod cluster set-node-label <node-uuid> nas1
 djbod cluster set-device-label <device-uuid> nas1-bay0
@@ -208,14 +208,14 @@ not edit `node.toml`. A `join` that stops at `cannot reach` has not
 added the machine; start the node that was down and run `join` again
 before `run`.
 
-From an administration machine, point `--node` at the machine you want
+From an administration machine, point `--bootstrap-node` at the machine you want
 coordinating, then the others as fallback. The first that answers does
 the encoding and the fan-out. On a cluster with one fast server and two
 small ones, or with a machine in another region, the fast local server
 belongs first. [Concepts](concepts.md#which-node-coordinates) is why.
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
 export DJBOD_CLUSTER=$(djbod get-cluster-id)
 djbod cluster show
 djbod status
@@ -228,7 +228,7 @@ each with a build string. `status` should list nine devices, all
 node can serve the object:
 
 ```sh
-djbod --node 10.0.0.2:5263 get backups/2026-09.tar /tmp/copy.tar
+djbod --bootstrap-node 10.0.0.2:5263 get backups/2026-09.tar /tmp/copy.tar
 ```
 
 Label nodes and devices before you need them in an incident. `status`
@@ -241,10 +241,13 @@ which is a different command and requires a restart of that node.
 
 ## Keep the node running
 
-The repository does not ship a service unit. This is a unit that runs
-the binary you installed as `/usr/local/bin/djbod-node`, as a user that
-can read the config, the certificates, and the device directories.
-Standard error goes to the journal.
+[`deploy/systemd/djbod-node.service`](../../deploy/systemd/djbod-node.service)
+is the unit the repository ships, with a scrub timer and the web UI's
+unit beside it and the steps to install them in
+[deployment.md](../deployment.md). In outline it runs the binary you
+installed as `/usr/local/bin/djbod-node`, as a user that can read the
+config, the certificates, and the device directories. Standard error
+goes to the journal.
 
 ```ini
 [Unit]
@@ -280,17 +283,20 @@ is that procedure on purpose.
 
 Install `djbod` where you will run repairs. Point it at every node, in
 an order you like. The first one that answers is used, and a later
-command can pass `--node` to pin a single address.
+command can pass `--bootstrap-node` to pin a single address.
 
 ```sh
-export DJBOD_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
+export DJBOD_BOOTSTRAP_NODE=10.0.0.1:5263,10.0.0.2:5263,10.0.0.3:5263
 export DJBOD_CLUSTER=<cluster-id>
 ```
 
 Put the web UI on one machine, bound to localhost, and reach it with an
 SSH tunnel (`ssh -L 5264:127.0.0.1:5264 nas1`) or from the machine
 itself. The UI has no login of its own. [Day to day](day-to-day.md#the-web-ui)
-has the details. Turn on [TLS](tls.md) before any of these addresses are
+has the details. [`deploy/systemd/djbod-ui.service`](../../deploy/systemd/djbod-ui.service)
+is a unit that keeps it running, with the steps to install it at the
+top; its settings come from `/etc/djbod/client.env`, which the `djbod`
+command line reads too. Turn on [TLS](tls.md) before any of these addresses are
 reachable from a network you do not trust. Until then the protocol is
 plain TCP and any client that can connect can do everything, including
 administration.

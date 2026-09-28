@@ -131,13 +131,13 @@ of them.
 In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=$(target/release/djbod get-cluster-id)
 target/release/djbod identity
 target/release/djbod status
 ```
 
-`identity` needs only `DJBOD_NODE`. It prints the cluster name and id,
+`identity` needs only `DJBOD_BOOTSTRAP_NODE`. It prints the cluster name and id,
 the node, the build, the document version, and the transport.
 `get-cluster-id` prints the UUID alone, which is why the `export` above
 works. `--json` on `get-cluster-id` adds the name and the build.
@@ -157,12 +157,12 @@ should not be the one that decodes every large read.
 including why the block size changes how much RAM that machine needs.
 
 ```sh
-export DJBOD_NODE=127.0.0.1:9,127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:9,127.0.0.1:5263
 ```
 
 Port 9 is closed. The client reports the failure and uses `5263`.
 
-Every `djbod` command accepts the same values as flags: `--node` and
+Every `djbod` command accepts the same values as flags: `--bootstrap-node` and
 `--cluster`. A flag wins over the environment variable.
 
 ## Store and fetch
@@ -253,8 +253,7 @@ target/release/djbod-ui --listen 127.0.0.1:5264 --bootstrap-node 127.0.0.1:5263
 ```
 
 `--bootstrap-node` is the ordered list of nodes to try, the same choice
-as `djbod --node`. `DJBOD_BOOTSTRAP_NODE` is its variable. `--node` and
-`DJBOD_NODE` still work and print a warning. It also needs
+as `djbod --bootstrap-node`. `DJBOD_BOOTSTRAP_NODE` is its variable. It also needs
 `DJBOD_CLUSTER`. Open `http://127.0.0.1:5264/`.
 
 The page has no login. Leave it on localhost. [Day to day](day-to-day.md#the-web-ui)

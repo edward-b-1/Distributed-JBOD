@@ -92,8 +92,8 @@ grow, but it warns, and every `put` fails with `InsufficientDevices`
 until enough devices exist.
 
 You need the **cluster id** for the client. If you lose it, any running
-node repeats it: `djbod get-cluster-id --node 127.0.0.1:5263` needs no
-`--cluster`, and `djbod identity --node 127.0.0.1:5263` says in words who
+node repeats it: `djbod get-cluster-id --bootstrap-node 127.0.0.1:5263` needs no
+`--cluster`, and `djbod identity --bootstrap-node 127.0.0.1:5263` says in words who
 is there: cluster, node, build, and document version. The id is also in
 `/tmp/djbod/state/cluster.json`.
 
@@ -116,7 +116,7 @@ add `--log-format json`.
 In another terminal:
 
 ```sh
-export DJBOD_NODE=127.0.0.1:5263
+export DJBOD_BOOTSTRAP_NODE=127.0.0.1:5263
 export DJBOD_CLUSTER=4e9a31f4-e921-4767-8477-250de7f1640f   # yours
 
 target/release/djbod status
@@ -177,7 +177,7 @@ download, in a browser. It takes the same two settings as the client and
 serves on localhost:
 
 ```sh
-target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE (or the deprecated DJBOD_NODE) and DJBOD_CLUSTER as above
+target/release/djbod-ui --listen 127.0.0.1:5264     # DJBOD_BOOTSTRAP_NODE and DJBOD_CLUSTER as above
 ```
 
 `--bootstrap-node` takes several addresses, comma-separated, tried in
@@ -288,6 +288,7 @@ tripped over; a scrub finds damage first:
 ```sh
 target/release/djbod scrub            # every node checks its own disks; then cross-node checks
 target/release/djbod scrub --repair   # and rebuild what was found
+target/release/djbod inventory        # which objects are whole, degraded or unreadable right now
 ```
 
 Each node reads every record and every block on its own devices against
@@ -546,7 +547,7 @@ devices; every existing node must accept it. Then:
 ```sh
 target/release/djbod cluster show          # every node and the document version it holds
 target/release/djbod put big/file some.bin  # shards now land on both nodes
-target/release/djbod --node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
+target/release/djbod --bootstrap-node 127.0.0.1:5264 get big/file copy.bin   # any node serves any object
 ```
 
 Stop one node and any request needing it fails naming the node, then
@@ -566,7 +567,8 @@ path>`, and restart the node.
 
 On real machines, `listen` is that machine's own address, or `0.0.0.0`
 with `advertise` set to the address the others should use, and
-`allow_shared_filesystem` is omitted.
+`allow_shared_filesystem` is omitted. [deployment.md](deployment.md) has
+systemd units, a Docker image, and a Compose stack for that.
 
 ## TLS
 

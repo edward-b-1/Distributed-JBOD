@@ -220,6 +220,11 @@ pub enum Request {
         /// Start even if the estimate says not everything will fit.
         partial: bool,
     },
+    /// Every object's state against the devices that can be read now
+    /// (SPEC 20.1.5): a merge of the record streams, no shard read.
+    /// Answered with `InventoryStarted`, then a stream of CBOR
+    /// `InventoryEvent` data frames, then end-of-stream.
+    Inventory(InventoryQuery),
 
     // ---- node to node
     LocalStatus,
@@ -480,6 +485,8 @@ pub enum Response {
     ScrubStarted,
     /// Followed by a stream of `DrainEvent` frames.
     DrainStarted,
+    /// Followed by a stream of `InventoryEvent` frames.
+    InventoryStarted,
 
     // ---- node to node
     LocalStatus {
@@ -696,6 +703,70 @@ pub struct ShardAvailability {
 pub struct DeviceExposure {
     pub device: DeviceId,
     pub versions: u64,
+}
+
+/// What an inventory should stream besides its summary (SPEC 20.1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InventoryQuery {
+    /// Stream one `Object` event for every version in this state; none
+    /// when absent, which gives the counts alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<ObjectState>,
+}
+
+/// A version's state against the devices that can be read now (SPEC
+/// 20.1.5), from its record alone: a shard is out when its device is
+/// unread or removed, or the device has no file for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectState {
+    /// Every shard on a device that can be read.
+    Whole,
+    /// At most m shards out, all of them parity: a read is unaffected,
+    /// the redundancy is reduced.
+    DegradedParity,
+    /// At most m shards out, at least one of them data: a read succeeds
+    /// by decoding parity and pays for it every time (11.4).
+    DegradedData,
+    /// More than m shards out: fewer than k remain, and the object cannot
+    /// be read until a device returns.
+    Unreadable,
+    /// The record copies that could be read do not agree, or a copy is
+    /// missing from a device that was read: the scrub's territory
+    /// (20.1.2.2); the shards are not known.
+    Inconsistent,
+}
+
+/// One frame of an `Inventory` stream (SPEC 20.1.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum InventoryEvent {
+    /// A version in the state the query asked for.
+    Object {
+        key: String,
+        version: VersionId,
+        state: ObjectState,
+        shards_available: u8,
+        shards_total: u8,
+    },
+    /// Where the merge has got to: every 10,000 versions.
+    Progress { versions_checked: u64 },
+    /// The counts, sent once at the end. `complete` is whether every
+    /// version could be seen: true while fewer than k+m devices are
+    /// unread, since every version has a record copy on k+m devices;
+    /// false once that many are out, when a version stored only on them
+    /// leaves no trace and the counts are a lower bound.
+    Summary {
+        versions_checked: u64,
+        whole: u64,
+        degraded_parity: u64,
+        degraded_data: u64,
+        unreadable: u64,
+        inconsistent: u64,
+        /// The devices whose records could not be read, with their node.
+        unread: Vec<UnavailableDevice>,
+        complete: bool,
+    },
 }
 
 /// One event of a drain (SPEC 18.2.1, 18.2.2): the estimate, then one

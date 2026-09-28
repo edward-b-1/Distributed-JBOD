@@ -1,0 +1,40 @@
+# One djbod node on this machine, for real use: the disks are bind
+# mounts, one physical disk per device path, and the node is on the host
+# network so its address is the machine's. Run one of these per machine.
+#
+#   cp deploy/docker/node.env.example /etc/djbod/compose.env    # and edit it
+#   DJBOD_GIT_COMMIT=$(git rev-parse --short=9 HEAD) \
+#     docker compose --env-file /etc/djbod/compose.env -f deploy/docker-compose.node.yml up -d --build
+#   docker compose --env-file /etc/djbod/compose.env -f deploy/docker-compose.node.yml logs -f
+#
+# Bind a directory inside each disk's mount point, not the mount point
+# itself: if the disk is not mounted the directory does not exist, Docker
+# refuses to start the container, and nothing is written into the root
+# filesystem by mistake. The directories are owned by uid 5263, the djbod
+# user in the image. The node's id is generated on the first start and
+# kept in the state directory; a joining node asks DJBOD_JOIN_PEER for
+# the cluster id. See docs/deployment.md.
+
+services:
+  node:
+    build:
+      context: ..
+      args:
+        DJBOD_GIT_COMMIT: ${DJBOD_GIT_COMMIT:-unknown}
+    image: djbod:local
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      DJBOD_LISTEN: ${DJBOD_LISTEN:?this machine's IP and port, for example 10.0.0.1:5263}
+      DJBOD_JOIN_PEER: ${DJBOD_JOIN_PEER:-}
+      DJBOD_BOOTSTRAP_PEERS: ${DJBOD_BOOTSTRAP_PEERS:-}
+      DJBOD_K: ${DJBOD_K:-3}
+      DJBOD_M: ${DJBOD_M:-1}
+      DJBOD_CLUSTER_NAME: ${DJBOD_CLUSTER_NAME:-}
+      DJBOD_TLS_CERT: ${DJBOD_TLS_CERT:-}
+      DJBOD_TLS_KEY: ${DJBOD_TLS_KEY:-}
+      DJBOD_TLS_CA: ${DJBOD_TLS_CA:-}
+    volumes:
+      - ${DJBOD_STATE_PATH:-/var/lib/djbod}:/var/lib/djbod
+      - ${DJBOD_DISK0:?a directory inside the first disk's mount point}:/data/d0
+      - ${DJBOD_DISK1:?a directory inside the second disk's mount point}:/data/d1

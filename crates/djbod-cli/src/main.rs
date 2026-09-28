@@ -1,7 +1,7 @@
 //! `djbod`: the command-line client (SPEC C.2).
 //!
 //! ```text
-//! djbod --node 10.0.0.1:5263 --cluster <uuid> status
+//! djbod --bootstrap-node 10.0.0.1:5263 --cluster <uuid> status
 //! djbod ... put photos/cat.jpg ./cat.jpg
 //! djbod ... get photos/cat.jpg ./copy.jpg
 //! djbod ... head photos/cat.jpg
@@ -10,7 +10,7 @@
 //! djbod ... cluster-config
 //! ```
 //!
-//! `--node` and `--cluster` may also come from `DJBOD_NODE` and
+//! `--bootstrap-node` and `--cluster` may also come from `DJBOD_BOOTSTRAP_NODE` and
 //! `DJBOD_CLUSTER`. `init-cluster` prints the cluster id to use.
 //!
 //! Object bodies stream: `put` reads the file a chunk at a time, `get`
@@ -35,8 +35,8 @@ use djbod_core::record::DeviceId;
 use djbod_core::stripe::FaultKind;
 use djbod_core::text::counted;
 use djbod_proto::message::{
-    DrainEvent, ErrorCode, ErrorDetail, ListQuery, MissingRecordCopy, Reconstruction,
-    RecordCopyFault,
+    DrainEvent, ErrorCode, ErrorDetail, InventoryEvent, InventoryQuery, ListQuery,
+    MissingRecordCopy, ObjectState, Reconstruction, RecordCopyFault,
 };
 
 mod names;
@@ -48,8 +48,8 @@ struct Cli {
     /// Address of a node in the cluster; several, comma-separated, are
     /// tried in order, and a request moves to the next when one fails.
     #[arg(
-        long = "node",
-        env = "DJBOD_NODE",
+        long = "bootstrap-node",
+        env = "DJBOD_BOOTSTRAP_NODE",
         global = true,
         value_delimiter = ','
     )]
@@ -117,13 +117,13 @@ enum Command {
         #[arg(long)]
         node_id: Option<String>,
     },
-    /// Ask a node which cluster it serves. Needs --node only; prints the
+    /// Ask a node which cluster it serves. Needs --bootstrap-node only; prints the
     /// cluster id alone, for `export DJBOD_CLUSTER=$(djbod get-cluster-id ...)`.
     /// --json adds the name and the node's build.
     GetClusterId,
-    /// Who is at --node: the cluster's name and id, the node's label, id
+    /// Who is at --bootstrap-node: the cluster's name and id, the node's label, id
     /// and address, its build, the document version it holds, and the
-    /// transport. Needs --node only.
+    /// transport. Needs --bootstrap-node only.
     Identity,
     /// Store a file (or standard input with `-`) under a key.
     Put {
@@ -179,6 +179,14 @@ enum Command {
         rate_mib: Option<u64>,
         #[arg(long)]
         repair: bool,
+    },
+    /// Count every object by its state against the devices that can be
+    /// read now, from the records alone: no shard is read. Goes around a
+    /// node that is down, whose devices count as unread.
+    Inventory {
+        /// Also list every object in this state, one per line.
+        #[arg(long, value_name = "STATE")]
+        keys: Option<ObjectStateArg>,
     },
 }
 
@@ -325,6 +333,33 @@ enum StateArg {
     Active,
 }
 
+/// An object state (SPEC 20.1.5) as `--keys` names it.
+#[derive(Clone, Copy, ValueEnum)]
+enum ObjectStateArg {
+    /// Every shard on a device that can be read.
+    Whole,
+    /// Within m shards out, all of them parity: reads unaffected.
+    DegradedParity,
+    /// Within m shards out, some of them data: every read decodes.
+    DegradedData,
+    /// More than m shards out: cannot be read until a device returns.
+    Unreadable,
+    /// The record copies read do not agree or one is missing.
+    Inconsistent,
+}
+
+impl From<ObjectStateArg> for ObjectState {
+    fn from(state: ObjectStateArg) -> ObjectState {
+        match state {
+            ObjectStateArg::Whole => ObjectState::Whole,
+            ObjectStateArg::DegradedParity => ObjectState::DegradedParity,
+            ObjectStateArg::DegradedData => ObjectState::DegradedData,
+            ObjectStateArg::Unreadable => ObjectState::Unreadable,
+            ObjectStateArg::Inconsistent => ObjectState::Inconsistent,
+        }
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum DeviceTransport {
     Plain,
@@ -349,7 +384,7 @@ async fn main() -> ExitCode {
 /// `get-cluster-id` requires.
 async fn connect(cli: &Cli) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let cluster = cli
         .cluster
@@ -359,7 +394,7 @@ async fn connect(cli: &Cli) -> anyhow::Result<Client> {
 
 async fn connect_with_cluster(cli: &Cli, cluster: Option<Uuid>) -> anyhow::Result<Client> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let mut options = ClientOptions::new(cli.nodes.clone()).connector(connector(cli)?);
     options.cluster = cluster;
@@ -383,7 +418,7 @@ async fn reachable_node(cli: &Cli) -> anyhow::Result<(SocketAddr, Uuid)> {
 /// Ask the configured nodes, in order, who they are (SPEC 19.1.5.1).
 async fn ask_any_node(cli: &Cli) -> anyhow::Result<djbod_client::Identity> {
     if cli.nodes.is_empty() {
-        bail!("no node address: pass --node or set DJBOD_NODE");
+        bail!("no node address: pass --bootstrap-node or set DJBOD_BOOTSTRAP_NODE");
     }
     let connector = connector(cli)?;
     let mut attempts = Vec::new();
@@ -466,6 +501,17 @@ fn scrub_exit_code(repair: bool, incomplete: bool, findings: usize, repair_failu
         (false, _) => 2,
         (true, false) => 3,
         (true, true) => 4,
+    }
+}
+
+/// An object state (20.1.5) as a key line prints it.
+fn object_state_word(state: ObjectState) -> &'static str {
+    match state {
+        ObjectState::Whole => "whole",
+        ObjectState::DegradedParity => "degraded-parity",
+        ObjectState::DegradedData => "degraded-data",
+        ObjectState::Unreadable => "unreadable",
+        ObjectState::Inconsistent => "inconsistent",
     }
 }
 
@@ -1148,6 +1194,94 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     );
                 }
             }
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Command::Inventory { keys } => {
+            let mut client = connect(&cli).await?;
+            let query = InventoryQuery {
+                keys: keys.map(ObjectState::from),
+            };
+            let mut run = client.inventory(query).await.map_err(client_err)?;
+            let mut summary: Option<InventoryEvent> = None;
+            let end = loop {
+                match run.next_event().await.map_err(client_err)? {
+                    Ok(event) => {
+                        if cli.json {
+                            println!("{}", serde_json::to_string(&event)?);
+                        }
+                        match &event {
+                            InventoryEvent::Object {
+                                key,
+                                version,
+                                state,
+                                shards_available,
+                                shards_total,
+                            } if !cli.json => {
+                                println!(
+                                    "{key}  {}  {}  {shards_available} of {shards_total} shards",
+                                    version.to_text(),
+                                    object_state_word(*state)
+                                );
+                            }
+                            InventoryEvent::Progress { versions_checked } if !cli.json => {
+                                eprintln!(
+                                    "inventory: {} checked",
+                                    counted(*versions_checked as usize, "object", "objects")
+                                );
+                            }
+                            InventoryEvent::Summary { .. } => summary = Some(event),
+                            _ => {}
+                        }
+                    }
+                    Err(end) => break end,
+                }
+            };
+            if let Some(error) = &end.error {
+                bail!("inventory failed: {}", describe_detail(error));
+            }
+            let Some(InventoryEvent::Summary {
+                versions_checked,
+                whole,
+                degraded_parity,
+                degraded_data,
+                unreadable,
+                inconsistent,
+                unread,
+                complete,
+            }) = &summary
+            else {
+                bail!("inventory ended without a summary");
+            };
+            let not_whole = versions_checked - whole;
+            if !cli.json {
+                eprintln!(
+                    "{}: {whole} whole, {degraded_parity} degraded (parity out, reads unaffected), \
+                     {degraded_data} degraded (data out, every read decodes), {unreadable} unreadable, \
+                     {inconsistent} inconsistent",
+                    counted(*versions_checked as usize, "object", "objects")
+                );
+                if !unread.is_empty() {
+                    let devices: Vec<String> = unread
+                        .iter()
+                        .map(|u| names::device_and_node(u.device))
+                        .collect();
+                    eprintln!(
+                        "{} unread: {}",
+                        counted(unread.len(), "device", "devices"),
+                        devices.join(", ")
+                    );
+                }
+                if !complete {
+                    eprintln!(
+                        "inventory incomplete: with {} unread an object stored only on them leaves \
+                         no trace, so the counts are a lower bound",
+                        counted(unread.len(), "device", "devices")
+                    );
+                }
+            }
+            let code = scrub_exit_code(false, !complete, not_whole as usize, 0);
             if code != 0 {
                 std::process::exit(code);
             }

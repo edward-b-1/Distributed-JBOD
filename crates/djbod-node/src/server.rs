@@ -265,6 +265,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
         MoveShard { .. } => "MoveShard",
         Scrub { .. } => "Scrub",
         Drain { .. } => "Drain",
+        Inventory(_) => "Inventory",
         LocalScrub { .. } => "LocalScrub",
         LocalStatus => "LocalStatus",
         LocalLookup { .. } => "LocalLookup",

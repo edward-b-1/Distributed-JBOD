@@ -15,8 +15,8 @@ use uuid::Uuid;
 use djbod_core::cluster::ClusterDocument;
 use djbod_core::record::DeviceId;
 use djbod_proto::message::{
-    DeviceContents, DrainEvent, ListQuery, ObjectRead, ObjectWrite, RepairReport, ScrubEvent,
-    StreamEnd,
+    DeviceContents, DrainEvent, InventoryEvent, InventoryQuery, ListQuery, ObjectRead, ObjectWrite,
+    RepairReport, ScrubEvent, StreamEnd,
 };
 
 pub use crate::client::{ClientError, ClientOptions, Identity, ListPage, MoveShardReport, Status};
@@ -150,6 +150,18 @@ impl Client {
         partial: bool,
     ) -> Result<EventRun<DrainEvent>, ClientError> {
         let run = self.runtime.block_on(self.inner.drain(device, partial))?;
+        Ok(EventRun {
+            handle: self.runtime.handle().clone(),
+            inner: run,
+        })
+    }
+
+    /// Start an inventory; the run's `next_event` blocks for each event.
+    pub fn inventory(
+        &mut self,
+        query: InventoryQuery,
+    ) -> Result<EventRun<InventoryEvent>, ClientError> {
+        let run = self.runtime.block_on(self.inner.inventory(query))?;
         Ok(EventRun {
             handle: self.runtime.handle().clone(),
             inner: run,
