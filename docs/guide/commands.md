@@ -39,8 +39,9 @@ standard error says `1 device is unavailable` or `N devices are
 unavailable`, plus `node <uuid> unreachable:` for each node that did
 not answer. The command still exits 0. A removed device stays in the
 table as `removed`, with no free space and without the `unavailable`
-suffix. Fails with `DocumentVersionMismatch` when a node that answered
-holds a different document version.
+suffix. A removed node's devices stay that way too: the node is a
+tombstone, listed and not contacted. Fails with `DocumentVersionMismatch`
+when a node that answered holds a different document version.
 
 ### `contents [DEVICE...] [--node-id NODE]`
 
@@ -153,7 +154,7 @@ label.
 
 | Subcommand | What it does |
 |---|---|
-| `show` | Asks every node for its document. Prints the cluster, the version held by the node you asked, and a table of node, label, address, build, and version. An unreachable node is a row, not a failure. |
+| `show` | Asks every node that is not `removed` for its document. Prints the cluster, the version held by the node you asked, and a table whose columns are label, node, address, build, and version. An unreachable node is a row, not a failure. A removed node is a row whose version column says `removed`; it is not asked. |
 | `sync` | Brings every reachable node up to the highest document version any of them holds. Prints `updated`, `already current`, and `unreachable`. Exit 2 if any node was unreachable. |
 | `set-state <DEVICE> <draining\|active>` | Changes the device's state. Moves no data. `draining` stops new shards landing on it. |
 | `set-device-label <DEVICE> [LABEL] [--clear]` | Label, 1 to 128 bytes, no whitespace, not a UUID, unique in the cluster. `--clear` removes it. |
@@ -167,7 +168,7 @@ label.
 | `set-transport <plain\|tls-optional\|tls>` | Changes how connections are made. Leaving `plain` is refused while any node has no TLS material, and the error names the node. See [TLS](tls.md). |
 | `set-limits [--max-key-bytes N] [--max-object-bytes N] [--max-user-metadata-bytes N]` | At least one flag. Applies to new writes. Prints all three values. |
 | `remove-device <DEVICE> [--force] [--yes]` | Without `--force`, the device must be `draining` and must hold no current shard. With `--force`, mark it `removed` without reading it and without moving data. `--force` describes the consequence and asks you to type the device id. `--yes` skips that prompt and requires `--force`. Rebuild afterwards with `scrub --repair`. |
-| `remove-node <NODE> [--force] [--yes]` | Without `--force`, every device of the node must be `draining` or `removed` and must hold no current shard. The node acknowledges, then exits. Refuses to remove the only node. With `--force`, the node must not answer. The command counts versions that have shards there, names any with more than `m` shards on that node, asks you to type the node id, removes the node without its acknowledgement, and rebuilds the rest. Exit 2 if a rebuild fails and the object is lost. `--yes` skips the prompt. |
+| `remove-node <NODE> [--force] [--yes]` | Without `--force`, every device of the node must be `draining` or `removed` and must hold no current shard. The node acknowledges, then exits. The node and its devices stay in the document as `removed`. Refuses to remove the only node. With `--force`, the node must not answer. The command counts versions that have shards there, names any with more than `m` shards on that node, asks you to type the node id, marks the node `removed` without its acknowledgement, and rebuilds the rest. Exit 2 if a rebuild fails and the object is lost. `--yes` skips the prompt. A removed id is never reused; the machine joins again with a new `node_id`. |
 
 ## `djbod-node`
 

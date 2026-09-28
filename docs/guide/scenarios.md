@@ -415,17 +415,23 @@ djbod cluster remove-node nas2
 `contents` should show zero versions on each of nas2's devices before
 you remove the node. `remove-node` refuses while any of those devices
 is `active`, and it refuses while any object still has a shard on them.
-On success it prints the document version. The old process acknowledges
-the new document, logs that it has been removed, stops accepting
-connections, and exits. The log line is:
+On success it prints the node's label and id, the document version, and
+that its devices can be reused with `djbod-node join
+--wipe-removed-device`. The old process acknowledges the new document,
+logs that it has been removed, stops accepting connections, and exits.
+The log line is:
 
 ```text
 this node was removed from the cluster at document version 20; stopping. Its devices can be reused with `djbod-node join --wipe-removed-device`, which erases them.
 ```
 
-`djbod cluster show` no longer lists nas2. `djbod get` of an object that
-used to have a shard there exits 0. You can power the old machine off
-after its process has exited.
+`djbod cluster show` still lists nas2. The version column says
+`removed` and the build column is `-`, because a removed node is not
+asked anything. `status` keeps its devices, as `removed`. Proposals,
+listings, and scrubs leave it out. `djbod get` of an object that used
+to have a shard there exits 0. You can power the old machine off after
+its process has exited. The node id stays taken. A machine that comes
+back joins with a new `node_id`.
 
 `remove-node` cannot remove the only node in the cluster.
 
@@ -471,8 +477,10 @@ answers and prints `updated`, `already current`, or `unreachable` for
 each. `sync` exits 2 if any node is still unreachable. Filling in
 `bootstrap_peers` is what makes the next restart do this itself.
 
-Do not force-remove a node you expect to boot. Force-removal drops its
-devices from the document. The disks will not simply rejoin.
+Do not force-remove a node you expect to boot. Force-removal marks the
+node and its devices `removed` and leaves those rows in the document.
+The disks will not rejoin under that node id. Bringing the machine back
+is a new `node_id` and `--wipe-removed-device`.
 
 ## A node will never come back
 
@@ -525,8 +533,9 @@ shard had nowhere to be written. The node is already removed at that
 point. Add devices and the lost object does not come back from parity
 that was discarded with the dead node. Add the spare first.
 
-After a clean force-removal, `djbod scrub` should exit 0. The dead
-machine's disks will not rejoin as they are. See the next section.
+After a clean force-removal, `djbod scrub` should exit 0. `cluster show`
+lists the node with version `removed`. The dead machine's disks will
+not rejoin under that node id. See the next section.
 
 ## Reusing a disk the cluster has removed
 
