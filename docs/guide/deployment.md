@@ -310,3 +310,16 @@ node before a document change that uses a field the older build does
 not understand. A node refuses a document it cannot represent, and the
 error names the node. The system does not keep a mixed-version feature
 silently by dropping fields.
+
+Version 0.3.0 is the first published release. From 0.2.22 the upgrade
+is a rolling one: nodes of both versions can serve one cluster, and
+nothing on disk has to be rewritten.
+
+Two earlier changes matter if a cluster was created by a build from
+before them. A `cluster.json` from before 0.2.16 has no `state` on its
+node entries. A current node refuses that file until each node entry
+carries `"state": "active"`. A record written before 0.2.20 omitted
+`revision` when it was 0, and the record checksum did not cover that
+field. A current node will not parse those records. Copy the objects
+out with the build that wrote them before you replace that build. There
+is no conversion command.

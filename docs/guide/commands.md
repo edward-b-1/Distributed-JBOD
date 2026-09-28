@@ -3,7 +3,7 @@
 This is the reference for the four binaries and `scripts/djbod-pki.sh`.
 The procedures that combine them are in [Scenarios](scenarios.md).
 Flags shown on a subcommand are also accepted in front of it. Build
-`1b8e434` (version 0.2.5) is the tree these descriptions were checked
+`bcf72ff` (version 0.3.0) is the tree these descriptions were checked
 against. `--help` on the binary you installed is the check when the two
 disagree.
 
