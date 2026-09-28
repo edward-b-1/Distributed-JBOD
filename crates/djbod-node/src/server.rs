@@ -271,6 +271,7 @@ fn operation_name(request: &djbod_proto::message::Request) -> &'static str {
         LocalLookup { .. } => "LocalLookup",
         LocalList(_) => "LocalList",
         LocalRecords { .. } => "LocalRecords",
+        LocalDeviceContents { .. } => "LocalDeviceContents",
         PutShard { .. } => "PutShard",
         GetShard { .. } => "GetShard",
         PutMeta { .. } => "PutMeta",

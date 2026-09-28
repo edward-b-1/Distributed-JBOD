@@ -738,27 +738,31 @@ async fn device_contents(node: &Arc<Node>, device: DeviceId) -> Result<Response,
             )
         }));
     };
-    let records = fetch_device_records(node, entry.node, device).await?;
-    let mut keys: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-    let mut blocks = 0u64;
-    let mut shard_bytes = 0u64;
-    for record in &records {
-        keys.insert(record.key.as_str());
-        if let Ok(scheme) = record.scheme() {
-            if let Some(geometry) = shard_geometry(scheme, record.block_size, record.size) {
-                blocks += geometry.block_count;
-            }
-            shard_bytes += shard_file_length(scheme, record.block_size, record.size).unwrap_or(0);
+    // The device's node counts in one walk of its records (18.2.3); the
+    // records themselves stay where they are.
+    let owner = entry.node;
+    let mut connection = connect_to(node, owner).await?;
+    let counts = match connection
+        .request(Request::LocalDeviceContents { device })
+        .await
+        .map_err(|e| remote_failure(owner, e))?
+    {
+        Response::LocalDeviceContents(counts) => counts,
+        other => {
+            return Err(error(
+                ErrorCode::ProtocolViolation,
+                format!("{owner} answered LocalDeviceContents with {other:?}"),
+            ))
         }
-    }
+    };
     Ok(Response::DeviceContents(DeviceContents {
         device,
-        node: entry.node,
+        node: owner,
         state: entry.state,
-        versions: records.len() as u64,
-        keys: keys.len() as u64,
-        blocks,
-        shard_bytes,
+        versions: counts.versions,
+        keys: counts.keys,
+        blocks: counts.blocks,
+        shard_bytes: counts.shard_bytes,
     }))
 }
 

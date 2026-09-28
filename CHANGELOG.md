@@ -43,6 +43,7 @@ of 0.2.22 and 0.3.0 run in one cluster.
 
 ### Changed
 
+- `djbod contents` and `DeviceContents` no longer pull every record of a device to the coordinator to count it. The device's node counts in one walk of its records and answers with the four totals, through the new node-to-node `LocalDeviceContents`; the records stay where they are, and a device holding hundreds of thousands of versions costs one directory walk instead of a paged transfer and a second parse of every record (SPEC 18.2.3, 19.1.3) (#121). Distinct keys are counted by key hash, at 32 bytes each.
 - A pull request no longer sets a new version, and `CHANGELOG.md` collects every pull request's entries under `Unreleased` until a release names them, instead of one section per commit. The version headings from 0.2.0 to 0.2.22 link to their tags, and the changelog, SPEC 20.7 and `docs/releasing.md` say what a version promises (#172).
 
 ## [af3ad27] - 2026-09-28
