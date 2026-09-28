@@ -22,11 +22,29 @@ the version and hash if the pull request set a new version.
 
 ## [Unreleased]
 
-Pull request: CI: formatting, lints and every test on each pull request and push to main
+Pull request: CHANGELOG.md: the entry for #268
+
+### Fixed
+
+- #268, the object health card and the health filter, merged without an entry; it has one now, under its commit. The entry of #269 is moved under its commit.
+
+## [ff4b104] - 2026-09-28
+
+Pull request #269: CI: formatting, lints and every test on each pull request and push to main
 
 ### Added
 
 - `.github/workflows/ci.yml`, the project's first CI, on GitHub Actions for every pull request and every push to `main`, on the Dockerfile's toolchain (Rust 1.98.1): `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings` and `cargo test --workspace`, both `--locked`; the Python client's tests against a node with `scripts/python-tests.sh`; the PKI helper's tests; and a check that `THIRD-PARTY-NOTICES` is what `scripts/third-party-notices.py` writes from `Cargo.lock` (SPEC 21.5). A new push to a pull request cancels the run it replaces (#172).
+
+## [f7bd47b] - 2026-09-27
+
+Pull request #268: Web UI: the object health card and a health filter on the Objects page
+
+### Added
+
+- `POST /api/inventory` streams the inventory (SPEC 20.1.5) as NDJSON, as the scrub and drain routes do; a body `{"keys": "<state>"}` is `djbod inventory --keys` and adds one `object` line per version in that state before the summary (#218).
+- The object health card on the Overview, under the cluster health card: computed on demand with a Compute button, since the inventory is one pass over every record, it counts every object as whole, degraded with parity out, degraded with data out, unreadable or inconsistent, reads by the worst state present, names the unread devices, says whether the counts are complete and when they were taken, and links to the keys of the worst state (#218).
+- A Health filter beside the prefix on the Objects page: one state lists the first thousand objects in it under the prefix, the mark carries the state and the Size column becomes Shards, "2 of 3", with the count of objects in that state in all; Clear resets it (#218).
 
 ## [1f5c440] - 2026-09-27
 
@@ -2045,7 +2063,9 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/1f5c440...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/ff4b104...HEAD
+[ff4b104]: https://github.com/edward-b-1/Distributed-JBOD/commit/
+[f7bd47b]: https://github.com/edward-b-1/Distributed-JBOD/commit/
 [1f5c440]: https://github.com/edward-b-1/Distributed-JBOD/commit/1f5c440333eeb8958a40a6304a231186d6ba6486
 [0.2.21]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
 [fa0dca9]: https://github.com/edward-b-1/Distributed-JBOD/commit/fa0dca9748e5d4c28d060d873a68983f53b077a9
