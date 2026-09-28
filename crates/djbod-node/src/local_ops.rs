@@ -629,8 +629,12 @@ async fn put_shard(
         .await;
     }
     // One writer per shard per device (20.1.2.1). The guard is held until
-    // this function returns, by success or by any failure path.
-    let Some(_write_guard) = node.begin_shard_write(ShardWriteKey {
+    // the write is finished or abandoned, and released before the answer
+    // is sent: a coordinator that reads the answer may write the same
+    // shard again at once, as a move does when its copy fails and it
+    // rebuilds instead, and must not be refused by a guard on its way
+    // out. Every other exit drops the guard on return.
+    let Some(write_guard) = node.begin_shard_write(ShardWriteKey {
         device: params.device,
         key_hash: params.key_hash,
         version: params.version,
@@ -726,6 +730,7 @@ async fn put_shard(
                 if let Some(error) = end.error {
                     // The sender gave up; the temporary goes with the write.
                     drop(write);
+                    drop(write_guard);
                     return respond(
                         writer,
                         id,
@@ -756,6 +761,7 @@ async fn put_shard(
                     .await);
                 }
                 let finished = blocking(move || write.finish(size, checksum)).await;
+                drop(write_guard);
                 return match finished {
                     Ok(_footer) => respond(writer, id, Ok(Response::PutShardDone)).await,
                     Err(Failure::Error(d)) => {
