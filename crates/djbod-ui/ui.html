@@ -1180,11 +1180,11 @@ function renderAvailability() {
   } else if (d < total) {
     level = 'bad';
     head = which;
-    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not readable until they return; the record view says which.`;
+    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not currently readable.`;
   } else {
     level = 'bad';
     head = which;
-    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not readable, and objects stored only on them leave no trace: listings and the inventory may be incomplete.`;
+    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not currently readable. Objects stored only on them leave no trace: listings and the inventory may be incomplete.`;
   }
   const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
   const box = $('avail');
