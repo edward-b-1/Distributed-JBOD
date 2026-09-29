@@ -1146,8 +1146,8 @@ async function list(page = 1) {
 //   0 < d <= m     devices named; objects still readable, reads may be slower
 //   m < d < k+m    devices named; objects with more than m shards out are
 //                  not readable
-//   d >= k+m       as above, and objects stored only there leave no
-//                  trace, so listings and the inventory may be incomplete
+//   d >= k+m       as above, and the object listing may be incomplete,
+//                  since an object stored only there leaves no trace
 // The last three carry "At least n of k+m shards available", the floor
 // for any object, since one device holds at most one shard of it.
 function renderAvailability() {
@@ -1187,7 +1187,7 @@ function renderAvailability() {
   } else {
     level = 'bad';
     head = which;
-    lines = [shards, `Objects with more than ${plural(m, 'shard')} on the unreachable devices are not currently readable.`, 'Objects stored only on them leave no trace: listings and the inventory may be incomplete.'];
+    lines = [shards, `Objects with more than ${plural(m, 'shard')} on the unreachable devices are not currently readable.`, 'Object listing may be incomplete.'];
   }
   const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
   const box = $('avail');
