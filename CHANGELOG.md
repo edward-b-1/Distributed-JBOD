@@ -39,6 +39,7 @@ of 0.2.22 and 0.3.0 run in one cluster.
 
 ### Added
 
+- The Objects page carries an availability line over the key list: how many devices in use nothing can be read from, named and grouped by node, and what that means against the scheme's k and m in four sentences, from all available through degraded reads to unreadable objects and, at k+m or more out, incomplete listings; the node count at the right (SPEC 5.6, 7.3) (#218, step 4).
 - `crates/djbod-python/README.md` says how to install the wheel from a GitHub release by its URL, pin it in `requirements.txt`, and check it against `SHA256SUMS`, while it is not on PyPI (#169).
 - `docs/design/objects-availability.html`: the comparison behind the Objects page's availability line, the five cases by scheme and count of unavailable devices, three treatments, and the decision for the status line (#218).
 - `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
