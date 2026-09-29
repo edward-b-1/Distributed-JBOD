@@ -31,7 +31,7 @@ afterwards; none of those versions was published.
 
 ### Changed
 
-- The availability line on the Objects page reads as the operator asked: `Device devbox5-d0 (651e02ff) on devbox5 (1d4bed77) is unreachable. At least 2 of 3 shards available. Objects are still readable but read operations may be slower.`, with the same shape for the other cases and the shards floor in each (SPEC 5.6, 7.3) (#218).
+- The availability line on the Objects page reads as the operator asked: `Device devbox5-d0 (651e02ff) on devbox5 (1d4bed77) is unreachable. At least 2 of 3 shards available. Objects are still readable but read operations may be slower.`, with the same shape for the worse cases and the shards floor in each; with nothing out it says `All 3 devices available` and no more (SPEC 5.6, 7.3) (#218).
 
 
 ## [0.3.0] - 2026-09-28

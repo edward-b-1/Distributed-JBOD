@@ -1142,14 +1142,14 @@ async function list(page = 1) {
 // unavailable (5.6), against the scheme's k and m. Five cases, four
 // sentences, since the count cannot tell a lost parity shard from a lost
 // data shard:
-//   d = 0          all devices available, objects readable at full speed
+//   d = 0          all devices available, nothing more
 //   0 < d <= m     devices named; objects still readable, reads may be slower
 //   m < d < k+m    devices named; objects with more than m shards out are
 //                  not readable
 //   d >= k+m       as above, and objects stored only there leave no
 //                  trace, so listings and the inventory may be incomplete
-// Each carries "At least n of k+m shards available", the floor for any
-// object, since one device holds at most one shard of it.
+// The last three carry "At least n of k+m shards available", the floor
+// for any object, since one device holds at most one shard of it.
 function renderAvailability() {
   const { status, cluster } = state;
   const doc = cluster.document;
@@ -1170,8 +1170,9 @@ function renderAvailability() {
   const which = `${d === 1 ? 'Device' : 'Devices'} ${groups} ${d === 1 ? 'is' : 'are'} unreachable.`;
   let level = 'ok', head, detail;
   if (d === 0) {
-    head = `All ${plural(inUse.length, 'device')} are available.`;
-    detail = `${shards} Objects are readable at full speed; any ${plural(m, 'device')} can fail without loss (scheme ${k}+${m}).`;
+    // Nothing to qualify: the count says it all.
+    head = `All ${plural(inUse.length, 'device')} available`;
+    detail = '';
   } else if (d <= m) {
     level = 'warn';
     head = which;
