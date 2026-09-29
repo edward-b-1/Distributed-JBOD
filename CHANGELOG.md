@@ -25,6 +25,11 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow's last step no longer fails when the release already exists: one tag push can start two identical runs, and 0.3.1's second run rebuilt everything and then failed on the release the first had made. The step now checks first and does nothing when it is there (#172).
+
+
 ## [0.3.1] - 2026-09-29
 
 Upgrading from 0.3.0 is a rolling upgrade with nothing to rewrite: no on-disk
