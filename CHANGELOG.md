@@ -29,6 +29,11 @@ afterwards; none of those versions was published.
 
 - `docs/releasing.md` no longer tells the first release to make the Docker image public by hand: 0.3.0's image could be pulled anonymously as soon as the workflow pushed it (#284).
 
+### Changed
+
+- The availability line on the Objects page reads as the operator asked: `Device devbox5-d0 (651e02ff) on devbox5 (1d4bed77) is unreachable. At least 2 of 3 shards available. Objects are still readable but read operations may be slower.`, with the same shape for the other cases and the shards floor in each (SPEC 5.6, 7.3) (#218).
+
+
 ## [0.3.0] - 2026-09-28
 
 The first published release: binaries, the Python wheel and the Docker image,

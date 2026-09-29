@@ -282,7 +282,7 @@
      many devices are out and what that means for reads, from the status
      alone. The border takes the severity; the mark is the usual shape. */
   .avail { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 7px 10px; margin: 0 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
-  .avail .h { font-weight: 600; white-space: nowrap; }
+  .avail .h { font-weight: 600; }
   .avail .d { color: var(--text-2); flex: 1 1 30ch; }
   .avail .n { margin-left: auto; color: var(--muted); white-space: nowrap; font-size: 11.5px; }
   .avail.warn { border-color: var(--warning); } .avail.bad { border-color: var(--critical); }
@@ -1142,11 +1142,14 @@ async function list(page = 1) {
 // unavailable (5.6), against the scheme's k and m. Five cases, four
 // sentences, since the count cannot tell a lost parity shard from a lost
 // data shard:
-//   d = 0          every object readable at full speed, m more may fail
-//   0 < d <= m     every object still readable, some by reconstruction
-//   m < d < k+m    objects with more than m shards out are unreadable
+//   d = 0          all devices available, objects readable at full speed
+//   0 < d <= m     devices named; objects still readable, reads may be slower
+//   m < d < k+m    devices named; objects with more than m shards out are
+//                  not readable
 //   d >= k+m       as above, and objects stored only there leave no
 //                  trace, so listings and the inventory may be incomplete
+// Each carries "At least n of k+m shards available", the floor for any
+// object, since one device holds at most one shard of it.
 function renderAvailability() {
   const { status, cluster } = state;
   const doc = cluster.document;
@@ -1154,29 +1157,33 @@ function renderAvailability() {
   const out = inUse.filter((d) => d.available === false);
   const members = cluster.nodes.filter((n) => n.state !== 'removed');
   const unreachable = members.filter((n) => n.error).length;
-  const d = out.length, k = doc.k, m = doc.m;
-  // The devices out, grouped by node: "demo-d1, demo-d2 on devbox4".
+  const d = out.length, k = doc.k, m = doc.m, total = k + m;
+  // The fewest shards any object can still have: every object has one
+  // shard per device, so d devices out cost it at most d shards.
+  const floor = Math.max(0, total - d);
+  const shards = `At least ${floor} of ${total} shards available.`;
+  // The devices out, grouped by node, each with its short id:
+  // "Devices demo-d1 (fa0488a2), demo-d2 (ed37c3db) on devbox4 (47323b5b)".
   const byNode = new Map();
   for (const x of out) { if (!byNode.has(x.node)) byNode.set(x.node, []); byNode.get(x.node).push(deviceText(x.device)); }
-  const names = [...byNode].map(([node, list]) => `${list.join(', ')} on ${nodeText(node)}`).join('; ');
+  const groups = [...byNode].map(([node, list]) => `${list.join(', ')} on ${nodeText(node)}`).join('; ');
+  const which = `${d === 1 ? 'Device' : 'Devices'} ${groups} ${d === 1 ? 'is' : 'are'} unreachable.`;
   let level = 'ok', head, detail;
   if (d === 0) {
-    head = `All ${plural(inUse.length, 'device')} available`;
-    detail = `Every object can be read at full speed; any ${plural(m, 'device')} can fail without loss (scheme ${k}+${m}).`;
+    head = `All ${plural(inUse.length, 'device')} are available.`;
+    detail = `${shards} Objects are readable at full speed; any ${plural(m, 'device')} can fail without loss (scheme ${k}+${m}).`;
   } else if (d <= m) {
     level = 'warn';
-    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
-    const margin = m - d;
-    detail = `${names}. Every object can still be read; those with a shard there are rebuilt from their other shards and may be slower. `
-      + (margin === 0 ? 'One more unavailable device may make some objects unreadable.' : `${plural(margin, 'more device')} may fail before any object becomes unreadable.`);
-  } else if (d < k + m) {
+    head = which;
+    detail = `${shards} Objects are still readable but read operations may be slower.`;
+  } else if (d < total) {
     level = 'bad';
-    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
-    detail = `${names}. Objects with more than ${plural(m, 'shard')} on them cannot be read until they return; the record view says which.`;
+    head = which;
+    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not readable until they return; the record view says which.`;
   } else {
     level = 'bad';
-    head = `${d} of ${plural(inUse.length, 'device')} unavailable`;
-    detail = `${names}. Objects with more than ${plural(m, 'shard')} on them cannot be read, and objects stored only on them leave no trace: listings and the inventory may be incomplete.`;
+    head = which;
+    detail = `${shards} Objects with more than ${plural(m, 'shard')} on the unreachable devices are not readable, and objects stored only on them leave no trace: listings and the inventory may be incomplete.`;
   }
   const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
   const box = $('avail');
@@ -1187,48 +1194,7 @@ function renderAvailability() {
     el('span', { class: 'd', text: detail }),
     el('span', { class: 'n', text: nodesText }));
 }
-// The objects in one state (djbod inventory --keys STATE): the inventory
-// streams every version in that state, so the page reads the first
-// STATE_LIST_LIMIT that match the prefix and stops the stream. The
-// summary at the end of a full run says how many there are in all.
-async function listByState(objectState) {
-  const prefix = $('prefix').value;
-  const listing = state.listing;
-  listing.mode = 'health'; listing.prefix = prefix; listing.page = 1; listing.after = [null];
-  listing.keys = []; listing.truncated = false; listing.unread = []; listing.complete = true; listing.total = null;
-  listing.objectState = objectState;
-  $('objects').replaceChildren(el('tr', {}, el('td', { colspan: 4, class: 'empty', text: `finding ${STATE_WORDS[objectState]} objects…` })));
-  try {
-    const response = await fetch('/api/inventory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ keys: objectState }) });
-    if (!response.ok) throw Object.assign(JSON.parse(await response.text()), { status: response.status });
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffered = '', stopped = false;
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffered += decoder.decode(value, { stream: true });
-      let cut;
-      while ((cut = buffered.indexOf('\n')) >= 0) {
-        const line = buffered.slice(0, cut); buffered = buffered.slice(cut + 1);
-        if (!line.trim()) continue;
-        const e = JSON.parse(line);
-        if (e.event === 'object') {
-          if (prefix && !e.key.startsWith(prefix)) continue;
-          if (listing.keys.length < STATE_LIST_LIMIT) listing.keys.push({ key: e.key, version: e.version, state: e.state, shards_available: e.shards_available, shards_total: e.shards_total });
-          else { listing.truncated = true; stopped = true; break; }
-        } else if (e.event === 'summary') {
-          listing.unread = e.unread || []; listing.complete = e.complete !== false;
-          listing.total = e[objectState];
-          state.inventory.summary = e; state.inventory.at = new Date(); renderObjectHealth();
-        }
-      }
-      if (stopped) { await reader.cancel(); break; }
-    }
-    renderListing();
-    document.querySelector('.scroll').scrollTop = 0;
-  } catch (e) { fail('list', e); }
-}
+
 function renderListing() {
   const { keys, truncated, mode } = state.listing;
   const health = mode === 'health';
