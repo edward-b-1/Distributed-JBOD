@@ -25,15 +25,30 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
+### Fixed
+
+- `docs/releasing.md` no longer tells the first release to make the Docker image public by hand: 0.3.0's image could be pulled anonymously as soon as the workflow pushed it (#284).
+
+## [0.3.0] - 2026-09-28
+
+The first published release: binaries, the Python wheel and the Docker image,
+built by the release workflow. The minor version marks the first release, not
+an incompatibility: upgrading from 0.2.22 is a rolling upgrade with nothing to
+rewrite, since no protocol, cluster document or on-disk format changed, so nodes
+of 0.2.22 and 0.3.0 run in one cluster.
+
 ### Added
 
 - The Objects page carries an availability line over the key list: how many devices in use nothing can be read from, named and grouped by node, and what that means against the scheme's k and m in four sentences, from all available through degraded reads to unreadable objects and, at k+m or more out, incomplete listings; the node count at the right (SPEC 5.6, 7.3) (#218, step 4).
+- `crates/djbod-python/README.md` says how to install the wheel from a GitHub release by its URL, pin it in `requirements.txt`, and check it against `SHA256SUMS`, while it is not on PyPI (#169).
+- `docs/design/objects-availability.html`: the comparison behind the Objects page's availability line, the five cases by scheme and count of unavailable devices, three treatments, and the decision for the status line (#218).
 - `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
 - `docs/releasing.md`: what a minor and a patch bump promise, what every pull request does, the steps of a release, and what to do when the workflow fails (#172).
 - The Docker image carries `LICENSE` and `THIRD-PARTY-NOTICES` in `/usr/share/doc/djbod/`, and the Python wheel both beside the module (SPEC 21.5) (#165, #169).
 
 ### Changed
 
+- `djbod contents` and `DeviceContents` no longer pull every record of a device to the coordinator to count it. The device's node counts in one walk of its records and answers with the four totals, through the new node-to-node `LocalDeviceContents`; the records stay where they are, and a device holding hundreds of thousands of versions costs one directory walk instead of a paged transfer and a second parse of every record (SPEC 18.2.3, 19.1.3) (#121). Distinct keys are counted by key hash, at 32 bytes each.
 - A pull request no longer sets a new version, and `CHANGELOG.md` collects every pull request's entries under `Unreleased` until a release names them, instead of one section per commit. The version headings from 0.2.0 to 0.2.22 link to their tags, and the changelog, SPEC 20.7 and `docs/releasing.md` say what a version promises (#172).
 
 ## [af3ad27] - 2026-09-28
@@ -2087,7 +2102,8 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...v0.3.0
 [af3ad27]: https://github.com/edward-b-1/Distributed-JBOD/commit/af3ad27b44def7be7a646477229fdea4962fd939
 [0.2.22]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.21...v0.2.22
 [89c3120]: https://github.com/edward-b-1/Distributed-JBOD/commit/89c312050b6aefede65e0aca3baa07ac49384375

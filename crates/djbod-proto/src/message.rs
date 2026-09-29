@@ -247,6 +247,11 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after: Option<RecordCursor>,
     },
+    /// What one local device holds (18.2.3), counted by its node in one
+    /// walk of the device's records; only the counts cross the network.
+    LocalDeviceContents {
+        device: DeviceId,
+    },
     /// Answered with `PutShardReady`, then the sender streams blocks, then
     /// the node answers `PutShardDone`.
     PutShard {
@@ -317,6 +322,20 @@ pub struct DeviceContents {
     pub device: DeviceId,
     pub node: NodeId,
     pub state: DeviceState,
+    /// Versions with a shard on the device; one shard file each.
+    pub versions: u64,
+    /// Distinct keys among those versions.
+    pub keys: u64,
+    /// Blocks in those shard files, one per stripe.
+    pub blocks: u64,
+    /// Bytes of shard files, from the records' sizes and schemes.
+    pub shard_bytes: u64,
+}
+
+/// The counts of `DeviceContents`, as the device's node makes them from
+/// one walk of its records (`LocalDeviceContents`, SPEC 18.2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceCounts {
     /// Versions with a shard on the device; one shard file each.
     pub versions: u64,
     /// Distinct keys among those versions.
@@ -521,6 +540,8 @@ pub enum Response {
         records: Vec<DeviceRecord>,
         truncated: bool,
     },
+    /// The counts of one local device (18.2.3).
+    LocalDeviceContents(DeviceCounts),
     /// The node has created and reserved the file; send blocks.
     PutShardReady,
     /// The node has fsynced and renamed the file.

@@ -244,7 +244,8 @@ print(client.head("photos/cat.jpg").size, [k.key for k in client.list_all("photo
 
 Both take a list of nodes and move to the next when one fails, and both
 report a node's refusal with the same detail the command-line tool
-prints. `crates/djbod-python/README.md` has the build steps.
+prints. `crates/djbod-python/README.md` says how to install it from a release
+and how to build it.
 
 ## Security
 

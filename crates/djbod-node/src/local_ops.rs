@@ -4,6 +4,7 @@
 //!
 //! Every device call goes through `spawn_blocking` (4.4).
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use djbod_core::cluster::DeviceState;
@@ -12,13 +13,13 @@ use djbod_core::erasure::{Scheme, ShardIndex};
 use djbod_core::keyhash::KeyHash;
 use djbod_core::layout::shard_file_name;
 use djbod_core::record::{DeviceId, MetadataRecord};
-use djbod_core::shardfile::{ShardFileError, ShardFileHeader};
+use djbod_core::shardfile::{shard_file_length, shard_geometry, ShardFileError, ShardFileHeader};
 use djbod_core::stripe::ShardBlock;
 use djbod_core::version::VersionId;
 use djbod_proto::message::{
-    DataFrame, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry, ListQuery,
-    LocatedRecord, LookupCursor, Message, RecordCursor, Request, Response, ScrubItem, StreamEnd,
-    MAX_LIST_PAGE_BYTES,
+    DataFrame, DeviceCounts, DeviceRecord, DeviceStatus, ErrorCode, ErrorDetail, KeyEntry,
+    ListQuery, LocatedRecord, LookupCursor, Message, RecordCursor, Request, Response, ScrubItem,
+    StreamEnd, MAX_LIST_PAGE_BYTES,
 };
 
 use crate::node::{Node, NodeError, ShardWriteKey};
@@ -42,6 +43,9 @@ pub async fn handle(
         Request::LocalList(query) => respond(writer, id, local_list(node, query).await).await,
         Request::LocalRecords { device, after } => {
             respond(writer, id, local_records(node, device, after).await).await
+        }
+        Request::LocalDeviceContents { device } => {
+            respond(writer, id, local_device_contents(node, device).await).await
         }
         Request::LocalScrub {
             max_bytes_per_second,
@@ -480,6 +484,49 @@ async fn local_records(
         records: page,
         truncated,
     })
+}
+
+/// `LocalDeviceContents` (18.2.3): the number of versions with a shard on
+/// the device, of distinct keys, of blocks and of shard bytes, from one
+/// walk of the device's record copies; no shard is read. A record that
+/// cannot be read is skipped, as the listing skips it, and is not
+/// counted.
+async fn local_device_contents(node: &Arc<Node>, device: DeviceId) -> Result<Response, Failure> {
+    let device = own_device(node, device)?;
+    let id = device.id();
+    let counts = blocking(move || {
+        let mut counts = DeviceCounts {
+            versions: 0,
+            keys: 0,
+            blocks: 0,
+            shard_bytes: 0,
+        };
+        let mut keys: BTreeSet<KeyHash> = BTreeSet::new();
+        device.walk_records(
+            |record| {
+                counts.versions += 1;
+                keys.insert(record.key_hash);
+                if let Ok(scheme) = record.scheme() {
+                    if let Some(geometry) = shard_geometry(scheme, record.block_size, record.size) {
+                        counts.blocks += geometry.block_count;
+                    }
+                    counts.shard_bytes +=
+                        shard_file_length(scheme, record.block_size, record.size).unwrap_or(0);
+                }
+            },
+            |path, error| {
+                tracing::warn!(path = %path.display(), %error, "unreadable record skipped");
+            },
+        )?;
+        counts.keys = keys.len() as u64;
+        Ok(counts)
+    })
+    .await
+    .map_err(|f| match f {
+        Failure::Error(d) => Failure::Error(with_device(d, id)),
+        other => other,
+    })?;
+    Ok(Response::LocalDeviceContents(counts))
 }
 
 async fn local_list(node: &Arc<Node>, query: ListQuery) -> Result<Response, Failure> {
