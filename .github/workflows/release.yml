@@ -230,6 +230,12 @@ jobs:
             echo
             echo "Docker image: \`$IMAGE:$v\` (amd64 and arm64)."
           } > body.md
+          # One tag push can start two identical runs; the second must not
+          # fail on a release the first already made.
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME already exists; nothing to do"
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$v" --notes-file body.md --verify-tag \
             artifacts/*.tar.gz artifacts/*.whl artifacts/SHA256SUMS
