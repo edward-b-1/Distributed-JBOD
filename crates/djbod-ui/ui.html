@@ -285,7 +285,7 @@
   .avail .h { font-weight: 600; }
   .avail .d { color: var(--text-2); }
   .avail .n { color: var(--muted); font-size: 11.5px; }
-  .avail.warn { border-color: var(--warning); } .avail.bad { border-color: var(--critical); }
+  .avail.level-warn { border-color: var(--warning); } .avail.level-bad { border-color: var(--critical); }
   /* A table's heading with a viewing toggle beside it and, at the right,
      how many rows the toggle is hiding, so nothing is concealed. */
   .section-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin: 22px 0 8px; }
@@ -1191,7 +1191,10 @@ function renderAvailability() {
   }
   const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
   const box = $('avail');
-  box.className = 'avail ' + (level === 'ok' ? '' : level);
+  // The severity class on the box is its own name: the bare mark classes
+  // (ok, warn, bad) draw a mark on whatever carries them, and the box
+  // must not, or the line gets a second mark on a row of its own.
+  box.className = 'avail level-' + level;
   box.hidden = false;
   box.replaceChildren(
     el('div', { class: 'h' }, el('span', { class: level, text: head })),
