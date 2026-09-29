@@ -281,10 +281,9 @@
   /* The availability line over the key list (issue #218, step 4): how
      many devices are out and what that means for reads, from the status
      alone. The border takes the severity; the mark is the usual shape. */
-  .avail { display: grid; grid-template-columns: 1fr auto; column-gap: 10px; row-gap: 2px; align-items: baseline; padding: 7px 10px; margin: 0 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
+  .avail { display: grid; row-gap: 2px; padding: 7px 10px; margin: 0 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
   .avail .h { font-weight: 600; }
-  .avail .d { color: var(--text-2); grid-column: 1; }
-  .avail .n { color: var(--muted); white-space: nowrap; font-size: 11.5px; grid-column: 2; grid-row: 1; }
+  .avail .d { color: var(--text-2); }
   .avail.warn { border-color: var(--warning); } .avail.bad { border-color: var(--critical); }
   /* A table's heading with a viewing toggle beside it and, at the right,
      how many rows the toggle is hiding, so nothing is concealed. */
@@ -1155,8 +1154,6 @@ function renderAvailability() {
   const doc = cluster.document;
   const inUse = status.devices.filter((d) => d.state !== 'removed');
   const out = inUse.filter((d) => d.available === false);
-  const members = cluster.nodes.filter((n) => n.state !== 'removed');
-  const unreachable = members.filter((n) => n.error).length;
   const d = out.length, k = doc.k, m = doc.m, total = k + m;
   // The fewest shards any object can still have: every object has one
   // shard per device, so d devices out cost it at most d shards.
@@ -1189,13 +1186,11 @@ function renderAvailability() {
     head = which;
     lines = [shards, `Objects with more than ${plural(m, 'shard')} on the unreachable devices are not currently readable.`, 'Object listing may be incomplete.'];
   }
-  const nodesText = unreachable ? `${unreachable} of ${plural(members.length, 'node')} unreachable` : `${plural(members.length, 'node')} reachable`;
   const box = $('avail');
   box.className = 'avail ' + (level === 'ok' ? '' : level);
   box.hidden = false;
   box.replaceChildren(
     el('div', { class: 'h' }, el('span', { class: level, text: head })),
-    el('span', { class: 'n', text: nodesText }),
     ...lines.map((text) => el('div', { class: 'd', text })));
 }
 
