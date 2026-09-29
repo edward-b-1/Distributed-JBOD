@@ -25,14 +25,28 @@ afterwards; none of those versions was published.
 
 ## [Unreleased]
 
-### Fixed
+## [0.3.1] - 2026-09-29
 
-- `docs/releasing.md` no longer tells the first release to make the Docker image public by hand: 0.3.0's image could be pulled anonymously as soon as the workflow pushed it (#284).
+Upgrading from 0.3.0 is a rolling upgrade with nothing to rewrite: no on-disk
+format and no cluster document field changed, so nodes of 0.3.0 and 0.3.1 run
+in one cluster. One command is affected while both builds are present:
+`djbod contents` now asks a device's node for its counts with a node-to-node
+request that a 0.3.0 node does not know, so asked through a 0.3.1 node it fails
+for a device on a 0.3.0 node until that node is upgraded. Storage, reads,
+writes and every other command are unaffected.
+
+### Added
+
+- The Objects page carries an availability line over the key list: how many devices in use nothing can be read from, named and grouped by node, and what that means against the scheme's k and m in four sentences, from all available through degraded reads to unreadable objects and, at k+m or more out, incomplete listings; the node count at the right (SPEC 5.6, 7.3) (#218, step 4).
 
 ### Changed
 
 - The availability line on the Objects page reads as the operator asked: `Device devbox5-d0 (651e02ff) on devbox5 (1d4bed77) is unreachable. At least 2 of 3 shards available. Objects are still readable but read operations may be slower.`, with the same shape for the worse cases and the shards floor in each; with nothing out it says `All 3 devices available` and no more (SPEC 5.6, 7.3) (#218).
+- `djbod contents` and `DeviceContents` no longer pull every record of a device to the coordinator to count it. The device's node counts in one walk of its records and answers with the four totals, through the new node-to-node `LocalDeviceContents`; the records stay where they are, and a device holding hundreds of thousands of versions costs one directory walk instead of a paged transfer and a second parse of every record (SPEC 18.2.3, 19.1.3) (#121). Distinct keys are counted by key hash, at 32 bytes each.
 
+### Fixed
+
+- `docs/releasing.md` no longer tells the first release to make the Docker image public by hand: 0.3.0's image could be pulled anonymously as soon as the workflow pushed it (#284).
 
 ## [0.3.0] - 2026-09-28
 
@@ -44,7 +58,6 @@ of 0.2.22 and 0.3.0 run in one cluster.
 
 ### Added
 
-- The Objects page carries an availability line over the key list: how many devices in use nothing can be read from, named and grouped by node, and what that means against the scheme's k and m in four sentences, from all available through degraded reads to unreadable objects and, at k+m or more out, incomplete listings; the node count at the right (SPEC 5.6, 7.3) (#218, step 4).
 - `crates/djbod-python/README.md` says how to install the wheel from a GitHub release by its URL, pin it in `requirements.txt`, and check it against `SHA256SUMS`, while it is not on PyPI (#169).
 - `docs/design/objects-availability.html`: the comparison behind the Objects page's availability line, the five cases by scheme and count of unavailable devices, three treatments, and the decision for the status line (#218).
 - `.github/workflows/release.yml`: pushing a tag `vX.Y.Z` on `main` checks it against the workspace version and `CHANGELOG.md`, builds the binaries and the Python wheel for x86_64 and aarch64 Linux (Debian 12's glibc; manylinux, abi3), pushes the Docker image to `ghcr.io/edward-b-1/distributed-jbod` as `X.Y.Z` and `latest` for amd64 and arm64, and creates the GitHub release with that version's changelog section as its notes. A pull request that changes the workflow, the Dockerfile or the Python packaging runs it without publishing (#172).
@@ -53,7 +66,6 @@ of 0.2.22 and 0.3.0 run in one cluster.
 
 ### Changed
 
-- `djbod contents` and `DeviceContents` no longer pull every record of a device to the coordinator to count it. The device's node counts in one walk of its records and answers with the four totals, through the new node-to-node `LocalDeviceContents`; the records stay where they are, and a device holding hundreds of thousands of versions costs one directory walk instead of a paged transfer and a second parse of every record (SPEC 18.2.3, 19.1.3) (#121). Distinct keys are counted by key hash, at 32 bytes each.
 - A pull request no longer sets a new version, and `CHANGELOG.md` collects every pull request's entries under `Unreleased` until a release names them, instead of one section per commit. The version headings from 0.2.0 to 0.2.22 link to their tags, and the changelog, SPEC 20.7 and `docs/releasing.md` say what a version promises (#172).
 
 ## [af3ad27] - 2026-09-28
@@ -2107,7 +2119,8 @@ Direct commit: Initial commit
 
 - The repository, with a `README.md` naming the project.
 
-[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.22...v0.3.0
 [af3ad27]: https://github.com/edward-b-1/Distributed-JBOD/commit/af3ad27b44def7be7a646477229fdea4962fd939
 [0.2.22]: https://github.com/edward-b-1/Distributed-JBOD/compare/v0.2.21...v0.2.22
