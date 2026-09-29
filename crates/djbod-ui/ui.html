@@ -1161,7 +1161,9 @@ function renderAvailability() {
   // The fewest shards any object can still have: every object has one
   // shard per device, so d devices out cost it at most d shards.
   const floor = Math.max(0, total - d);
-  const shards = `At least ${floor} of ${total} shards available.`;
+  // Once every shard of an object can be out, the floor is not worth a
+  // number.
+  const shards = floor > 0 ? `At least ${floor} of ${total} shards available.` : 'All shards may be unavailable.';
   // The devices out, grouped by node, each with its short id:
   // "Devices demo-d1 (fa0488a2), demo-d2 (ed37c3db) on devbox4 (47323b5b)".
   const byNode = new Map();
